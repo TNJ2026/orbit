@@ -72,17 +72,19 @@ function defaultGenerationAgent() {
 }
 
 
-function generationAgentField(id, selected, onchange) {
+function generationAgentField(
+  id, selected, onchange, label = i18n.t("generate.writtenBy"),
+) {
   const agents = generationAgents();
   if (!agents.length) return null;
   if (agents.length === 1) return el("div", { class: "field" }, [
-    el("span", { class: "field-label", text: i18n.t("generate.writtenBy") }),
+    el("span", { class: "field-label", text: label }),
     el("div", { class: "agent-choice-static mono", text: agents[0] }),
   ]);
   // No helper line: the field opens on the Agent the Runtime would use anyway,
   // so there is no "leave it unset" case left to explain.
   return el("div", { class: "field" }, [
-    el("label", { for: id, text: i18n.t("generate.writtenBy") }),
+    el("label", { for: id, text: label }),
     el("select", { id, onchange: (event) => onchange(event.target.value) },
       agents.map((name) => el("option", {
         value: name, text: name,
@@ -326,7 +328,6 @@ async function setLocale(locale) {
   syncCustomSelect(document.getElementById("localeSelect"));
   applyStaticText();
   views.update({ i18n, shellFacts, mayStartRun, route });
-  views.syncRefreshIntervalSelect(document.getElementById("refreshInterval"));
   await render();
   await views.refreshRuntimeCard();
 }
@@ -435,9 +436,6 @@ async function boot() {
   }
   select.value = i18n.locale;
   select.addEventListener("change", (event) => setLocale(event.target.value));
-  const refreshInterval = document.getElementById("refreshInterval");
-  views.syncRefreshIntervalSelect(refreshInterval);
-  refreshInterval.addEventListener("change", () => views.saveRefreshInterval(refreshInterval));
   installCustomSelects();
 
   const themeOptions = [...document.querySelectorAll(".theme-option")];

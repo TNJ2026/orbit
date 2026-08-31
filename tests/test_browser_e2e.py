@@ -214,11 +214,10 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         self.addCleanup(context.close)
         # The fault this exists for did not happen during a render; it happened
         # in the polling chain, one interval later. Watching each view for a
-        # moment would have missed it entirely, so the interval is set to its
-        # supported minimum and every view is held past a tick.
-        context.add_init_script(
-            "localStorage.setItem('orbit.refreshSeconds', '5')"
-        )
+        # moment would have missed it entirely, so the run is held past a tick
+        # at the end. The interval used to be settable and this test used to
+        # set it to five seconds; it is a fixed fifteen now, so the hold has
+        # to clear that instead.
         # Nothing this test asserts is about the public internet. The page
         # asks a font CDN for its typefaces, and that request failing — which
         # it does, roughly one run in six — was reported here as the Runtime
@@ -266,9 +265,9 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
                 self.assertEqual([], seen, f"{fragment} raised {seen}")
 
         # The polling chain belongs to the shell rather than to any one view,
-        # so one hold past a tick covers it — and costs six seconds instead of
-        # six times four.
-        page.wait_for_timeout(6_000)
+        # so one hold past a tick covers it — sixteen seconds once, rather than
+        # sixteen times five.
+        page.wait_for_timeout(16_000)
         self.assertEqual([], errors, f"the refresh chain raised {errors}")
 
     def test_the_editor_page_is_absent(self) -> None:
@@ -591,27 +590,21 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
             ".simplified-run-hero .simplified-step-output"
         ).count())
 
-    def test_refresh_interval_moves_to_the_topbar_and_settings_are_removed(self) -> None:
+    def test_the_more_menu_carries_no_refresh_interval(self) -> None:
+        """The interval was a setting nobody moved off its default.
+
+        It is one constant in the shell now, so the menu offers theme and
+        language and nothing else — and `#/settings`, which the interval
+        outlived by a while, still has nowhere to go.
+        """
+
         page = self.open("en-US")
         page.get_by_role("button", name="More", exact=True).click()
-        interval = page.get_by_role("combobox", name="Live refresh interval")
-        interval.wait_for()
-        self.assertTrue(page.evaluate("""
-          () => {
-            const language = document.querySelector(
-              '.topbar [role="combobox"][aria-label="Change language"]'
-            );
-            const refresh = document.querySelector(
-              '.topbar [role="combobox"][aria-label="Live refresh interval"]'
-            );
-            return Boolean(language.compareDocumentPosition(refresh)
-              & Node.DOCUMENT_POSITION_FOLLOWING);
-          }
-        """))
-        interval.click()
-        page.get_by_role("option", name="30 seconds").click()
+        page.get_by_role("combobox", name="Change language").wait_for()
+        self.assertEqual(0, page.locator("#refreshInterval").count())
         self.assertEqual(
-            "30", page.evaluate("localStorage.getItem('orbit.refreshSeconds')")
+            0,
+            page.get_by_role("combobox", name="Live refresh interval").count(),
         )
 
         page.goto(f"{self.base}/ui/#/settings")
@@ -630,7 +623,14 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         self.assertTrue(page.locator(".history-day-heading").first.is_visible())
         self.assertEqual(4, page.locator(".history-status-filter").count())
         self.assertEqual(0, page.locator(".history-goal-row .status-dot").count())
-        self.assertTrue(page.locator(".history-goal-chevron").first.is_visible())
+        # The verdict is the last thing in the row and it is the whole of the
+        # right-hand side: the chevron that used to follow it said "this
+        # opens", which the row already says by being a button, and it pushed
+        # the one thing worth lining up off the row's edge.
+        self.assertEqual(0, page.locator(".history-goal-chevron").count())
+        self.assertEqual(
+            "Completed", rows.first.locator(".history-goal-tail").inner_text().strip()
+        )
         # History keeps user-facing chips instead of the Runtime's technical filter select.
         self.assertEqual(0, page.locator("select[aria-label='Filter goals by status']").count())
 
@@ -707,7 +707,9 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         page.wait_for_function("() => location.hash === '#/goals'")
         page.wait_for_function("() => !document.querySelector('.page-modal-root')")
 
-    def test_history_loads_the_next_cursor_page(self) -> None:
+    def test_history_follows_the_cursor_to_the_end_on_its_own(self) -> None:
+        """No Load more: the whole history is here before anybody types."""
+
         context = self.browser.new_context(locale="en-US")
         self.addCleanup(context.close)
         page = context.new_page()
@@ -731,15 +733,71 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
 
         page.route("**/api/v1/langgraph-runs?*", history_page)
         page.goto(f"{self.base}/ui/#/goals")
-        page.wait_for_selector(".history-goal-row")
-        self.assertEqual(1, page.locator(".history-goal-row").count())
-
-        page.get_by_role("button", name="Load more").click()
         page.wait_for_function(
             "() => document.querySelectorAll('.history-goal-row').length === 2"
         )
         self.assertIn("Second page Goal", page.locator(".history-goal-row").last.inner_text())
-        self.assertFalse(page.get_by_role("button", name="Load more").is_visible())
+        self.assertEqual(0, page.get_by_role("button", name="Load more").count())
+
+    def test_history_search_narrows_the_list_as_it_is_typed(self) -> None:
+        """The box filters what is already here, and gives it all back empty."""
+
+        context = self.browser.new_context(locale="en-US")
+        self.addCleanup(context.close)
+        page = context.new_page()
+
+        def history_page(route):
+            def run(key, goal):
+                return {
+                    "run_id": f"langgraph_run:{key}",
+                    "workflow_id": "workflow:linear", "workflow_version": 1,
+                    "display_name": goal, "goal": goal,
+                    "status": "completed", "artifact_count": 0,
+                    "created_at": "2026-07-24T08:00:00Z",
+                    "updated_at": "2026-07-24T08:02:00Z",
+                }
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                "schema_version": "1.0", "projection_version": None,
+                "data": {"runs": [
+                    run("a", "Translate the release notes"),
+                    run("b", "Summarise the incident"),
+                    run("c", "Translate the changelog"),
+                ]},
+                "next_cursor": None,
+            }))
+
+        page.route("**/api/v1/langgraph-runs?*", history_page)
+        page.goto(f"{self.base}/ui/#/goals")
+        page.wait_for_function(
+            "() => document.querySelectorAll('.history-goal-row').length === 3"
+        )
+        # No round trip: the request count must not move while typing.
+        requests: list[str] = []
+        page.on("request", lambda request: requests.append(request.url))
+
+        search = page.locator(".history-filter-bar input")
+        search.fill("translate")
+        page.wait_for_function(
+            "() => document.querySelectorAll('.history-goal-row').length === 2"
+        )
+        self.assertNotIn(
+            "Summarise", page.locator(".history-goal-list").inner_text()
+        )
+        self.assertEqual(
+            [], [url for url in requests if "/api/v1/langgraph-runs" in url]
+        )
+
+        # A term nothing matches says so rather than showing a bare list.
+        search.fill("nothing here matches this")
+        page.wait_for_function(
+            "() => document.querySelectorAll('.history-goal-row').length === 0"
+        )
+        self.assertTrue(page.locator(".empty").is_visible())
+
+        search.fill("")
+        page.wait_for_function(
+            "() => document.querySelectorAll('.history-goal-row').length === 3"
+        )
 
     def test_progress_rides_the_live_cursor_and_adds_no_second_channel(self) -> None:
         """One refresh mechanism for the whole shell, including this page."""
@@ -762,6 +820,35 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
             [url for url in polled if "/events" in url or "/stream" in url],
             "the simplified run page must not open a second progress channel",
         )
+
+    def test_home_follows_a_run_started_outside_the_ui(self) -> None:
+        """A short MCP Run must not disappear between Home's live polls."""
+
+        context = self.browser.new_context(locale="en-US")
+        self.addCleanup(context.close)
+        page = context.new_page()
+        page.goto(f"{self.base}/ui/#/home")
+        page.wait_for_selector(".simplified-workspace-composer")
+        page.wait_for_function(
+            "() => window.performance.getEntriesByType('resource')"
+            ".some(entry => entry.name.includes('/api/v1/live'))",
+        )
+
+        run_id = self.engine().start(
+            "workflow:human", {"value": 1},
+            idempotency_key="external-home-run", actor=LOCAL_ACTOR,
+            goal="Started by another Agent App",
+        ).run_id
+        self.addCleanup(self.cancel_goal, run_id)
+
+        # The first poll is immediate and has already gone by; this Run can
+        # only be discovered by the next one, a fixed fifteen seconds later.
+        page.wait_for_function(
+            "id => location.hash === `#/runs/${encodeURIComponent(id)}`",
+            arg=run_id, timeout=25_000,
+        )
+        page.wait_for_selector(".simplified-run-hero")
+        self.assertIn(run_id, page.locator(".simplified-run-hero").inner_text())
 
     def test_history_reads_one_page_rather_than_two_calls_per_row(self) -> None:
         """Twenty-five rows must not become fifty-one requests."""

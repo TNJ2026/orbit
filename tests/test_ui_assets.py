@@ -260,7 +260,7 @@ class AccessibilityTests(unittest.TestCase):
         ):
             self.assertIn(marker, app_js)
         self.assertIn("event.currentTarget.form?.requestSubmit()", app_js)
-        self.assertRegex(css, r"\.simplified-goal-field textarea\s*\{[^}]*min-height:\s*200px")
+        self.assertRegex(css, r"\.simplified-goal-field textarea\s*\{[^}]*min-height:\s*168px")
         self.assertIn(".simplified-workflow-picker { grid-template-columns: 1fr; }", css)
 
     def test_workflow_generation_progress_offers_server_authorized_cancel(self) -> None:

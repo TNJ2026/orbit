@@ -45,29 +45,33 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 
 
 
+/* One column, two thirds of the frame, centred on the page: a goal is one
+   sentence and a choice, and the page has nothing else to be about. */
 .simplified-goal-page {
-  width: min(960px, 100%); margin: 0 auto; padding-block: clamp(20px, 5vh, 56px);
+  width: min(680px, 100%); margin: 0 auto;
+  min-height: 62vh; display: flex; flex-direction: column; justify-content: center;
+  padding-block: clamp(20px, 5vh, 56px);
 }
-.simplified-goal-intro { margin-bottom: 28px; }
+.simplified-goal-intro { margin-bottom: 34px; text-align: center; }
 .simplified-goal-intro h1 {
-  margin: 0 0 10px; font-size: clamp(26px, 4vw, 36px); letter-spacing: -.035em;
+  margin: 0; font-size: 30px; font-weight: 600; letter-spacing: -.02em;
 }
-.simplified-goal-intro p { max-width: 68ch; margin: 0; font-size: 14px; line-height: 1.65; }
+/* The composer is the box; the page around it is not. */
 .simplified-workspace-composer {
-  display: grid; gap: 24px; padding: clamp(22px, 4vw, 36px);
-  border-color: var(--line-soft);
-  background: color-mix(in srgb, var(--panel) 88%, transparent);
-  box-shadow: 0 20px 60px color-mix(in srgb, var(--bg) 55%, transparent);
+  display: grid; gap: 10px; padding: 0; border: 0;
+  background: transparent; box-shadow: none;
 }
-.simplified-composer-fields { display: grid; gap: 26px; }
-.simplified-composer-fields > .field { display: grid; gap: 9px; margin: 0; }
+.simplified-composer-fields { display: grid; gap: 10px; }
+.simplified-composer-fields > .field { display: grid; gap: 0; margin: 0; }
+/* The picker carries a chevron and the box carries a placeholder, so a label
+   over each would name what is already named. Kept for a screen reader. */
 .simplified-composer-fields label {
-  margin: 0; color: var(--text); font-size: 12px; font-weight: 700;
-  letter-spacing: .08em; text-transform: uppercase;
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
 }
 .simplified-workflow-picker {
   display: grid; grid-template-columns: minmax(0, 1fr) auto;
-  align-items: stretch; gap: 12px;
+  align-items: stretch; gap: 10px;
 }
 .simplified-workflow-picker > select,
 .simplified-workflow-picker > .custom-select { width: 100%; min-width: 0; }
@@ -94,38 +98,43 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 .template-edge { color: var(--muted); }
 .simplified-workflow-picker > select,
 .simplified-workflow-picker > .custom-select,
-.simplified-workflow-picker > .button { min-height: 46px; }
+.simplified-workflow-picker > .button { min-height: 44px; }
 .simplified-workflow-picker > .button { padding-inline: 20px; white-space: nowrap; }
+#homeGenerateWorkflow { background: var(--control-bg) !important; }
+#homeGenerateWorkflow:hover:not(:disabled) { background: var(--control-raised) !important; }
 .simplified-goal-field { position: relative; }
 .simplified-goal-field textarea {
-  min-height: 200px; resize: vertical; padding: 18px 18px 42px;
-  border-color: var(--line-soft); background: var(--bg);
-  font-size: 15px; line-height: 1.6;
+  min-height: 168px; resize: none; padding: 16px 16px 52px;
+  border: 1px solid var(--line-soft); border-radius: var(--radius-control);
+  background: var(--panel-2); font-size: 14px; line-height: 1.6;
 }
-.simplified-goal-field textarea:focus {
-  border-color: var(--blue); box-shadow: 0 0 0 1px var(--blue);
-}
+/* The hint moves to the left so the button can have the corner it is thrown
+   at, and it reads as a keyboard shortcut rather than body copy. */
 .simplified-goal-shortcut {
-  position: absolute; right: 14px; bottom: 12px;
-  pointer-events: none; font-size: 11px;
+  position: absolute; left: 16px; bottom: 16px;
+  pointer-events: none; font-family: var(--mono); font-size: 11px;
 }
-.simplified-composer-actions { justify-content: flex-end; }
+/* Inside the box it belongs to, one step above the control surface the box
+   wears, so it reads as raised rather than as more of the box. */
+.simplified-composer-actions {
+  position: absolute; right: 12px; bottom: 10px; margin: 0; justify-content: flex-end;
+}
 .simplified-composer-actions .button.primary {
-  min-height: 46px; padding-inline: 28px; font-weight: 700;
-  box-shadow: 0 10px 28px color-mix(in srgb, var(--blue) 22%, transparent);
+  min-height: 34px; padding-inline: 16px; font-weight: 600;
+  background: var(--control-raised) !important; color: var(--control-fg); box-shadow: none;
 }
-.workflows-page {
-  width: min(1180px, 100%); margin: 0 auto;
-  display: grid; gap: 0;
+.simplified-composer-actions .button.primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--control-raised) 86%, var(--control-fg)) !important;
+  color: var(--control-fg);
 }
+.workflows-page { display: grid; gap: 0; }
 .simplified-workflow-generator {
-  display: block; margin-top: 28px; padding: 28px 24px;
-  border-color: var(--line-soft);
-  background: color-mix(in srgb, var(--panel) 74%, transparent);
+  display: block; margin-top: 24px; padding: 0;
+  border: 0; background: transparent;
 }
 .simplified-workflow-generator-inner { width: 100%; margin: 0 auto; }
 .simplified-workflow-generator-copy { display: grid; gap: 5px; }
-.simplified-workflow-generator-copy h2 { margin: 0 0 2px; font-size: clamp(22px, 3vw, 24px); }
+.simplified-workflow-generator-copy h2 { margin: 0 0 2px; font-size: 20px; font-weight: 600; letter-spacing: -.01em; }
 .simplified-workflow-generator-copy p { margin: 0; max-width: 68ch; font-size: 13px; }
 .simplified-workflow-generator-form {
   display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px;
@@ -134,28 +143,42 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 .simplified-workflow-generator-agent { width: min(280px, 100%); }
 .simplified-workflow-generator-agent:empty { display: none; }
 .simplified-workflow-generator-agent > .field { display: grid; gap: 8px; }
+/* A field label reads as a label, not as a section heading: sentence case at
+   the body size, the same as every other label on these pages. */
 .simplified-workflow-generator-agent label,
 .simplified-workflow-generator-agent .field-label {
-  margin: 0; color: var(--muted); font-size: 11px; font-weight: 700;
-  letter-spacing: .08em; text-transform: uppercase;
+  margin: 0; color: var(--text); font-size: 13px; font-weight: 600;
+  letter-spacing: 0; text-transform: none;
 }
 .simplified-workflow-generator-agent select,
 .simplified-workflow-generator-agent .agent-choice-static {
-  min-height: 42px; border-radius: var(--radius); background: var(--bg);
+  min-height: 40px; border-radius: var(--radius-control);
 }
 .simplified-workflow-generator-form textarea {
-  min-height: 150px; resize: vertical; padding: 16px;
-  border-color: var(--line-soft); border-radius: var(--radius); background: var(--bg);
-  font-family: inherit; font-size: 14px; line-height: 1.55;
+  min-height: 152px; resize: none; padding: 16px 16px 52px;
+  border: 1px solid var(--line-soft); border-radius: var(--radius-control);
+  background: var(--panel-2); font-family: inherit; font-size: 14px; line-height: 1.55;
 }
-.simplified-workflow-generator-form textarea:focus {
-  border-color: var(--blue); box-shadow: 0 0 0 1px var(--blue);
+/* The same composer as the Goal page: the limit on the left of the last line,
+   the button on the right, both inside the box. The textarea keeps room for
+   them at its foot so a long instruction never runs under either. */
+.simplified-workflow-generator-field { position: relative; }
+.simplified-workflow-generator-limit {
+  position: absolute; left: 16px; bottom: 16px;
+  pointer-events: none; font-size: 11px; color: var(--muted-2);
 }
-.simplified-workflow-generator-actions { justify-content: flex-end; padding-bottom: 0; }
+.simplified-workflow-generator-actions {
+  position: absolute; right: 12px; bottom: 10px; margin: 0;
+  justify-content: flex-end; padding-bottom: 0;
+}
 .simplified-workflow-generator-actions .button {
-  min-height: 42px; display: inline-flex; align-items: center;
-  padding-inline: 24px; gap: 8px; border-radius: var(--radius); font-weight: 700;
-  box-shadow: 0 8px 24px color-mix(in srgb, var(--blue) 18%, transparent);
+  min-height: 34px; display: inline-flex; align-items: center;
+  padding-inline: 14px; gap: 7px; border-radius: var(--radius-control); font-weight: 600;
+  background: var(--control-raised) !important; color: var(--control-fg);
+}
+.simplified-workflow-generator-actions .button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--control-raised) 86%, var(--control-fg)) !important;
+  color: var(--control-fg);
 }
 .generate-spark { font-size: 18px; line-height: 1; }
 .workflow-generation-progress { display: grid; gap: 20px; }
@@ -176,14 +199,15 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 .workflow-generation-prompt .field-label,
 .workflow-generation-agent .field-label { margin: 0; color: var(--muted); font-size: 12px; }
 .workflow-generation-prompt-value {
-  min-height: 74px; padding: 12px 14px; border: 1px solid var(--line);
-  border-radius: var(--radius); background: var(--bg); white-space: pre-wrap;
+  min-height: 74px; padding: 12px 14px; border: 0;
+  border-radius: var(--radius-control); background: var(--control-bg);
+  color: var(--control-fg); white-space: pre-wrap;
   overflow-wrap: anywhere; font-family: var(--mono); font-size: 13px; line-height: 1.55;
 }
 .workflow-generation-agent .agent-choice-static { min-height: 38px; }
 .workflow-generation-stages {
   display: grid; gap: 8px; padding: 11px 16px;
-  border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg);
+  border: 0; border-radius: var(--radius); background: var(--panel-3);
 }
 .workflow-generation-stages-head {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
@@ -200,19 +224,20 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 }
 .workflow-generation-step::before {
   content: ""; position: absolute; z-index: 0; top: 11px; right: 50%; left: -50%;
-  height: 2px; background: var(--line);
+  height: 2px; background: var(--line-row);
 }
 .workflow-generation-step:first-child::before { display: none; }
 .workflow-generation-step-marker {
   position: relative; z-index: 1; display: grid; place-items: center;
-  width: 24px; height: 24px; border: 2px solid var(--line); border-radius: 50%;
-  background: var(--panel); color: var(--muted); font-weight: 700;
+  width: 24px; height: 24px; border: 0; border-radius: 50%;
+  background: var(--control-bg); font-weight: 700;
+  color: color-mix(in srgb, var(--control-fg) 68%, transparent);
 }
 .workflow-generation-step.completed::before,
 .workflow-generation-step.current::before { background: var(--blue); }
 .workflow-generation-step.completed .workflow-generation-step-marker,
 .workflow-generation-step.current .workflow-generation-step-marker {
-  border-color: var(--blue); color: white; background: var(--blue);
+  color: white; background: var(--blue);
 }
 .workflow-generation-step.current .workflow-generation-step-marker {
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--blue) 16%, transparent);
@@ -221,11 +246,11 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
   color: var(--text); font-weight: 700;
 }
 .workflow-generation-step.failed .workflow-generation-step-marker {
-  border-color: var(--red); color: var(--red); background: var(--panel);
+  color: var(--red); background: var(--red-soft);
 }
 .workflow-generation-step.failed .workflow-generation-step-label { color: var(--red); }
 .workflow-generation-output {
-  display: grid; gap: 10px; padding-top: 18px; border-top: 1px solid var(--line-soft);
+  display: grid; gap: 10px; padding-top: 18px; border-top: 1px solid var(--line-row);
 }
 .workflow-generation-output-head {
   display: flex; align-items: center; justify-content: space-between; gap: 16px;
@@ -235,14 +260,15 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 .workflow-generation-console {
   width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box;
   min-height: 180px; max-height: 320px; margin: 0; padding: 14px; overflow: auto;
-  border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg);
+  border: 0; border-radius: var(--radius); background: var(--panel-3);
   white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
 }
 .workflow-generation-failure { margin-top: 2px; }
+
 .simplified-workflow-generator-form > .authoring-job-state,
 .simplified-workflow-generation-problem { grid-column: 1 / -1; }
 .simplified-workflow-list-heading { margin-top: 44px; margin-bottom: 20px; }
-.simplified-workflow-list-heading h2 { font-size: 20px; }
+.simplified-workflow-list-heading h2 { font-size: 20px; font-weight: 600; letter-spacing: -.01em; }
 .simplified-workflow-list-heading p { font-size: 12px; }
 .simplified-execution-head { align-items: center; }
 .simplified-execution-head > .actions { justify-content: flex-end; }
@@ -304,7 +330,7 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 .simplified-result .pill { background: transparent; }
 .simplified-result-value { white-space: pre-wrap; overflow-wrap: anywhere; }
 .simplified-artifacts { display: grid; gap: 12px; }
-.simplified-artifacts .section-heading h2 { margin: 0; font-size: 18px; }
+.simplified-artifacts .section-heading h2 { margin: 0; font-size: 15px; font-weight: 600; }
 /* What a modification changed, one step per line. The mark carries the kind so
    the sentence does not have to spell out "added" before every name. */
 .change-summary { margin: 0; padding: 0; display: grid; gap: 8px; list-style: none; }
@@ -322,13 +348,13 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 
 .responsibility-row {
   display: grid; grid-template-columns: minmax(180px, 1fr) auto auto;
-  align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line);
+  align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line-row);
 }
 
 
 
 
-.run-tabs { display: flex; gap: 4px; overflow-x: auto; border-bottom: 1px solid var(--line); }
+.run-tabs { display: flex; gap: 4px; overflow-x: auto; border-bottom: 1px solid var(--line-row); }
 .run-tab {
   padding: 10px 12px; border: 0; border-bottom: 2px solid transparent;
   background: transparent; color: var(--muted); cursor: pointer; white-space: nowrap;
@@ -371,7 +397,7 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 .workbench-facts > div { display: grid; gap: 5px; padding: 11px 0; border-bottom: 1px solid var(--line-soft); }
 .workbench-facts > div:last-child { border-bottom: 0; }
 .workspace-history { display: grid; gap: 12px; margin-top: 8px; }
-.workspace-history .section-heading h2 { margin: 3px 0; font-size: 20px; }
+.workspace-history .section-heading h2 { margin: 3px 0; font-size: 20px; font-weight: 600; }
 .workspace-history .section-heading p { margin: 0; }
 .workflow-card-heading { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .stat-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
@@ -495,8 +521,8 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 }
 .page-modal-panel {
   width: min(1120px, 100%); max-height: 100%; overflow: auto;
-  padding: 24px 28px; background: var(--bg); border: 1px solid var(--line);
-  border-radius: var(--radius); box-shadow: var(--shadow); outline: none;
+  padding: 24px 28px; background: var(--bg); border: 0;
+  border-radius: 14px; box-shadow: var(--shadow); outline: none;
   opacity: 0; transform: translateY(10px) scale(.985);
   transition: opacity .24s ease, transform .24s cubic-bezier(.45, .05, .35, 1);
 }
@@ -511,7 +537,7 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 }
 .page-drawer-panel {
   width: min(880px, calc(100vw - 48px)); height: 100%; max-height: none;
-  padding: 24px 28px; border-width: 0 0 0 1px; border-radius: 0;
+  padding: 24px 28px; border-left: 1px solid var(--line-row); border-radius: 0;
   transform: translateX(32px); overflow-y: auto;
   transition: opacity .2s ease, transform .24s cubic-bezier(.2, .7, .2, 1);
 }
@@ -535,25 +561,33 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
   color: var(--muted-2); background: transparent; border: 0;
   border-radius: var(--radius); cursor: pointer;
 }
-.goal-modal-close:hover { color: var(--muted); background: var(--line-soft); }
+.goal-modal-close { border-radius: var(--radius-control); }
+.goal-modal-close:hover { color: var(--text); background: var(--hover); }
 .goal-modal-close:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
 .goal-modal-body { display: flex; flex-direction: column; gap: 16px; }
 
 /* Goal detail sections. Headings sit outside their card at 16px semibold,
    the prototype's body-md weight; cards are 12px-rounded tonal surfaces with
    a hairline border and 24px of air inside. */
-.goal-section-title { margin: 0; padding: 0 4px; font-size: 16px; font-weight: 600; }
+.goal-section-title { margin: 0; padding: 0; font-size: 15px; font-weight: 600; }
+/* A section under its heading, not a box: the Goal is prose and the Steps are
+   a list that already has rules between its rows. */
 .goal-card {
-  display: flex; flex-direction: column; gap: 16px;
-  background: var(--panel); border: 1px solid var(--line-soft);
-  border-radius: 12px; padding: 24px;
+  display: flex; flex-direction: column; gap: 12px;
+  background: transparent; border: 0; border-radius: var(--radius); padding: 0;
+}
+/* One exception: what the run produced is a thing rather than a grouping, so
+   it is filled — one step above the page, which keeps the recessed output
+   block and the two buttons inside it reading as recessed. */
+.goal-card.goal-result-card {
+  background: var(--panel-3); padding: 16px 18px;
 }
 /* The Goal folds at 120px and unfolds in place; the toggle beneath it is a
    link with a caret, exactly as the prototype draws it. */
 .goal-text-clamp { max-height: 120px; overflow: hidden; }
 .goal-text-clamp.expanded { max-height: none; }
 .goal-text {
-  margin: 0; font-size: 16px; font-weight: 400; line-height: 24px;
+  margin: 0; font-size: 13px; font-weight: 400; line-height: 1.65;
   overflow-wrap: anywhere; white-space: pre-wrap;
 }
 .goal-expand-toggle {
@@ -568,8 +602,8 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
    a tinted hairline, so the fate scans without vibrating on the dark card. */
 .goal-status-pill {
   display: inline-flex; align-items: center; gap: 6px; width: fit-content;
-  padding: 4px 8px; border-radius: 6px; border: 1px solid transparent;
-  font-size: 14px; font-weight: 500;
+  padding: 4px 9px; border-radius: var(--radius-chip); border: 0;
+  font-size: 12px; font-weight: 600;
 }
 .goal-status-pill.completed, .goal-status-pill.succeeded,
 .goal-status-pill.answered {
@@ -586,9 +620,9 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
   border-color: rgba(77, 142, 255, .4);
 }
 .goal-result-code {
-  margin: 0; padding: 16px; border-radius: 8px;
-  background: var(--chip-bg); border: 1px solid var(--line-soft);
-  font-family: var(--mono); font-size: 13px; line-height: 1.5;
+  margin: 0; padding: 14px 16px; border-radius: var(--radius);
+  background: var(--panel-2); border: 0;
+  font-family: var(--mono); font-size: 12.5px; line-height: 1.65;
   overflow-x: auto; white-space: pre;
 }
 /* The full step list, no inner scroll: the drawer's own scrollbar is the
@@ -622,11 +656,15 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 /* The log fold reads as the prototype's link-with-arrow: a caret that turns
    with the open state instead of the browser's disclosure triangle. */
 .goal-step-row .simplified-step-output { grid-column: auto; }
+/* The fold is a control like any other on these pages: recessed, unedged and
+   named. It was the one blue link left among a page of filled buttons. */
 .goal-step-row .simplified-step-output > summary {
   display: inline-flex; align-items: center; gap: 6px; width: fit-content;
-  margin-top: 4px; color: var(--blue); font-size: 12px; font-weight: 500;
+  margin-top: 6px; padding: 5px 10px; border-radius: var(--radius-control);
+  background: var(--panel-2); color: var(--muted); font-size: 12px; font-weight: 600;
   list-style: none; cursor: pointer;
 }
+.goal-step-row .simplified-step-output > summary:hover { background: var(--hover); color: var(--text); }
 .goal-step-row .simplified-step-output > summary::-webkit-details-marker { display: none; }
 .goal-step-row .simplified-step-output > summary::marker { content: ""; }
 .goal-step-row .simplified-step-output > summary::before {
@@ -644,12 +682,12 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
    — gets back what it actually has rather than scrolling the page to reach one
    card. */
 .goal-canvas-card {
-  height: min(600px, calc(100vh - var(--topbar-h, 64px) - 200px));
-  padding: 0; overflow: hidden;
+  height: min(420px, calc(100vh - var(--topbar-h, 64px) - 200px));
+  padding: 0; overflow: hidden; border-radius: var(--radius);
 }
 .goal-canvas-body {
   display: flex; width: 100%; height: 100%;
-  background: var(--bg) radial-gradient(circle, var(--line-soft) 1px, transparent 1px);
+  background: var(--panel-2) radial-gradient(circle, var(--line-soft) 1px, transparent 1px);
   background-size: 20px 20px;
 }
 .goal-canvas-body > .muted { padding: 16px; }
@@ -658,6 +696,10 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 
 @media (max-width: 640px) {
   .page-drawer-panel { width: 100%; padding: 18px 16px; }
+  /* The button and the hint share the composer's last line; on a narrow
+     screen the hint is the one that can go, because the keyboard it names
+     is not the one in front of the reader. */
+  .simplified-goal-shortcut { display: none; }
 }
 
 /* Workflow detail is its own page (design/workflow_detail.html): an identity
@@ -677,17 +719,18 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 }
 .workflow-detail-id { font-size: 11px; letter-spacing: .16em; }
 .workflow-detail-name {
-  margin: 7px 0 0; font-size: 24px; font-weight: 600; line-height: 1.2;
+  margin: 6px 0 0; font-size: 20px; font-weight: 600; line-height: 1.25;
   letter-spacing: -.01em;
 }
 .workflow-detail-desc { margin: 8px 0 0; max-width: 70ch; color: var(--muted); font-size: 13px; }
-/* Ghost button, top-right: a quiet filled surface that lifts on hover. */
 .workflow-detail-back {
-  flex: 0 0 auto; padding: 9px 22px; border-radius: var(--radius);
-  background: var(--chip-bg); border: 1px solid var(--line-soft); color: var(--text);
+  flex: 0 0 auto; padding: 8px 16px; border-radius: var(--radius-control);
+  background: var(--panel-2); border: 0; color: var(--text);
 }
-.workflow-detail-back:hover { background: var(--panel-2); border-color: var(--line); }
-/* Tabs + diagram share one bordered surface; the tab bar is its top edge.
+.workflow-detail-back:hover { background: var(--hover); }
+/* Tabs over a diagram. The bar used to be the top edge of a bordered box;
+   nothing is boxed any more, so the tabs became a segmented control of their
+   own and the canvas below carries its surface instead of an outline.
    Shared verbatim by the read-only detail and the editor — both render the
    same workflowDefinitionTabs, so the chrome must match. (The run view uses
    .run-tabs too but never inside .workflow-tabs / these ancestors, so it is
@@ -699,7 +742,7 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
      away with everything else. The graph tab already lived inside exactly
      this much, so the list gets the same box and scrolls within it. */
   gap: 0; height: 600px; overflow: hidden;
-  border: 1px solid var(--line-soft); border-radius: var(--radius); background: var(--panel);
+  border: 0; border-radius: var(--radius); background: transparent;
 }
 /* The detail opens in a modal, so on a short viewport 600px plus the head
    above it does not fit and the modal scrolls after all. The modal's own
@@ -710,15 +753,19 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
   height: min(600px, calc(100vh - var(--topbar-h, 64px) - 200px));
 }
 .workflow-detail .run-tabs, .workflow-edit-page .run-tabs {
-  gap: 0; border-bottom: 1px solid var(--line-soft); background: transparent;
+  flex: none; align-self: flex-start; gap: 2px; margin-bottom: 14px;
+  padding: 3px; border-bottom: 0; border-radius: var(--radius-chip);
+  background: var(--panel-2); overflow: visible;
 }
 .workflow-detail .run-tab, .workflow-edit-page .run-tab {
-  padding: 12px 24px; border: 0; border-bottom: 2px solid transparent; border-radius: 0;
-  background: transparent; color: var(--muted-2); font-weight: 500;
+  padding: 0 13px; height: 28px; display: inline-flex; align-items: center;
+  border: 0; border-radius: var(--radius-chip);
+  background: transparent; color: var(--muted); font-weight: 500;
 }
-.workflow-detail .run-tab:hover, .workflow-edit-page .run-tab:hover { background: transparent; color: var(--muted); }
+.workflow-detail .run-tab:hover, .workflow-edit-page .run-tab:hover { background: transparent; color: var(--text); }
+/* The selected tab is raised out of the rail rather than underlined. */
 .workflow-detail .run-tab.active, .workflow-edit-page .run-tab.active {
-  background: transparent; color: var(--primary); border-bottom-color: var(--primary);
+  background: var(--hover); color: var(--blue); font-weight: 600; border-bottom: 0;
 }
 .workflow-detail .workflow-tab-content, .workflow-edit-page .workflow-tab-content { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 /* The definition list reads as prose inside the frame; the graph is full-bleed.
@@ -728,7 +775,8 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
   padding: 18px 20px; overflow-y: auto; min-height: 0;
 }
 .workflow-detail .workflow-graph-pane, .workflow-edit-page .workflow-graph-pane {
-  flex: 1; min-height: 0;
+  flex: 1; min-height: 0; border-radius: var(--radius); overflow: hidden;
+  background: var(--panel-2);
 }
 /* The revision editor band is shared by the dedicated Workflow edit page. */
 .workflow-editor-wrap {
@@ -738,8 +786,7 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 .workflow-editor-wrap.open { grid-template-rows: 1fr; }
 .workflow-editor {
   display: grid; gap: 10px; min-height: 0; overflow: hidden;
-  padding: 12px 14px; background: var(--panel-2);
-  border-top: 1px solid var(--line);
+  padding: 12px 0; background: transparent; border-top: 0;
 }
 .workflow-editor .actions { justify-content: flex-end; }
 /* Modify form: an authored-by field over a titled prompt section whose mono
@@ -756,13 +803,13 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
    newlines, scrolls inside its own box, and never stretches the form. */
 .workflow-modify-input-wrap { position: relative; }
 .workflow-modify-input {
-  width: 100%; min-height: 140px; resize: vertical; display: block;
-  padding: 14px; background: var(--panel-2); color: var(--text);
-  border: 1px solid var(--line); border-radius: var(--radius);
+  width: 100%; min-height: 152px; resize: none; display: block;
+  padding: 16px 16px 44px; background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--line-soft); border-radius: var(--radius-control);
   font-size: 13px; line-height: 1.6;
 }
 .workflow-modify-syntax {
-  position: absolute; right: 12px; bottom: 12px; pointer-events: none;
+  position: absolute; left: 16px; bottom: 16px; pointer-events: none;
   font-size: 11px; color: var(--muted-2);
 }
 /* A whole-page route swap, so the entrance is just a short fade with a hair of
@@ -779,27 +826,24 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 .workflow-edit-page > .panel-head { align-items: flex-start; }
 /* Edit-page header: a large action title over the workflow id and the version
    it builds on, with the editor's status as an amber badge to the right. */
-.workflow-edit-head { padding: 18px 20px; }
+.workflow-edit-head { padding: 0 0 4px; }
 .workflow-edit-head > .actions { align-items: center; }
 .workflow-edit-heading { display: grid; gap: 4px; min-width: 0; }
-.workflow-edit-title { margin: 0; font-size: 24px; font-weight: 700; letter-spacing: -.01em; }
+.workflow-edit-title { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -.01em; }
 .workflow-edit-id { overflow-wrap: anywhere; }
-/* Which version is being edited. It was wrapped in an amber warning badge
-   when it shared a box with "awaiting an instruction"; on its own it is a
-   neutral fact and should not read as something needing attention. */
+/* Which version is being edited is a fact, not a control. Beside the one
+   button in this header it read like a second one, so it is no longer drawn —
+   only announced. */
 .workflow-editing-version {
-  padding: 4px 10px; border-radius: var(--radius); font-size: 12px; font-weight: 600;
-  white-space: nowrap; background: var(--panel-2); color: var(--muted);
-  border: 1px solid var(--line);
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
 }
 .workflow-edit-canvas { min-width: 0; overflow: auto; }
 /* On the edit page the form is the page, not a band laid over it: it inherits
    the surrounding surface instead of carrying its own tone. */
-.workflow-edit-page > .workflow-editor-wrap {
-  border-top: 1px solid var(--line); background: transparent;
-}
+.workflow-edit-page > .workflow-editor-wrap { border-top: 0; background: transparent; }
 .workflow-edit-page .workflow-editor {
-  padding: 16px 18px; background: transparent; border-top: 0;
+  padding: 0; background: transparent; border-top: 0;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -822,47 +866,88 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 
 .filter-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .filter-bar input[type="search"] { flex: 1 1 260px; min-width: 160px; }
-.history-filter-bar { margin-bottom: 10px; }
+.history-filter-controls { display: grid; gap: 6px; }
+.history-filter-bar { margin: 0; }
+.history-filter-bar input[type="search"] { height: 44px; }
 .history-status-filters {
-  display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 14px;
+  display: flex; flex-wrap: wrap; gap: 7px; margin: 0;
 }
-.history-status-filter { min-height: 34px; padding: 7px 12px; border-radius: 999px; }
-.history-status-filter.active {
-  color: var(--blue); border-color: color-mix(in srgb, var(--blue) 35%, var(--line));
-  background: var(--blue-soft);
+.history-status-filter {
+  min-height: 32px; padding: 6px 13px; border-radius: var(--radius-control);
+  background: var(--control-bg) !important;
 }
-.history-goal-list { overflow: hidden; }
-.history-day-group + .history-day-group { border-top: 1px solid var(--line); }
+.history-status-filter:hover:not(:disabled) { background: var(--control-raised) !important; }
+/* Which filter is on says so the way the nav does: colour and weight. */
+.history-status-filter.active { color: var(--blue); }
+/* Nothing to clip any more: the list had rounded corners of its own and had
+   to hide what ran past them. Now the only thing that runs past its edge is
+   the hover fill, which is meant to — and `overflow: hidden` was squaring off
+   the very corners it was given. */
+.history-goal-list { overflow: visible; }
+.history-day-group + .history-day-group { border-top: 0; }
+/* A day is a label over its rows, not a bar across the page. */
 .history-day-heading {
-  margin: 0; padding: 12px 18px 8px; color: var(--muted);
-  background: var(--panel-2); font-size: 12px; letter-spacing: .08em;
+  margin: 0; padding: 22px 0 8px; color: var(--muted-2);
+  background: transparent; font-size: 12px; font-weight: 600; letter-spacing: .08em;
   text-transform: uppercase;
 }
 .history-day-rows { display: grid; }
 .history-goal-row {
   display: grid; grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center; gap: 18px; width: 100%; padding: 15px 18px;
-  border: 0; border-top: 1px solid var(--line-soft); background: transparent;
+  align-items: center; gap: 18px; width: 100%; padding: 13px 0;
+  border: 0; border-bottom: 1px solid var(--line-row); background: transparent;
   color: inherit; text-align: left; cursor: pointer;
 }
-.history-goal-row:first-child { border-top: 0; }
-.history-goal-row:hover { background: var(--panel-2); }
+/* The hover fill is drawn as a rounded block behind the row rather than as
+   the row's own background. Two things follow, and both are the point: it can
+   have corners, and it stops at the padding box — so the rule that separates
+   this row from the next stays a rule, instead of being swallowed by the
+   highlight the way a 12px box-shadow spread swallowed it. The bleed is what
+   gives the text the same air on the left that the corner needs on the right. */
+.history-goal-row { position: relative; }
+.history-goal-row::before {
+  content: ""; position: absolute; inset: 2px -12px;
+  border-radius: var(--radius); background: transparent; z-index: 0;
+  transition: background-color .12s ease;
+}
+/* An absolutely positioned pseudo-element paints after the row's in-flow
+   content, so the row's own two halves have to be lifted over it. A negative
+   z-index would have put the fill behind the page's background instead of
+   behind the row: the row makes no stacking context of its own. */
+.history-goal-row > * { position: relative; z-index: 1; }
+.history-goal-row:hover::before { background: var(--hover); }
 .history-goal-row:focus-visible { outline: 2px solid var(--blue); outline-offset: -3px; }
 .history-goal-copy { display: grid; gap: 5px; min-width: 0; }
+/* The goal remains the row's largest sentence, but uses the secondary text
+   tone so a long history list does not become a wall of bright labels. */
 .history-goal-title {
   display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2; line-clamp: 2; line-height: 1.35;
+  -webkit-line-clamp: 2; line-clamp: 2; line-height: 1.4;
+  color: #cccccc; font-size: 14px; font-weight: 400;
 }
-.history-goal-meta { overflow-wrap: anywhere; font-size: 13px; }
-/* Monospaced so the id reads as an identifier rather than as more of the
-   sentence before it, and its own separator so a narrow row may wrap between
-   the two without leaving a dot stranded at the end of a line. */
-.history-goal-id { font-family: var(--mono); }
-.history-goal-id::before { content: " · "; }
-.history-goal-artifacts { color: var(--muted); font-size: 13px; font-weight: 650; }
+html[data-theme="light"] .history-goal-title { color: var(--muted); }
+.history-goal-meta { color: #aaaaaa; overflow-wrap: anywhere; font-size: 12px; }
+html[data-theme="light"] .history-goal-meta { color: var(--muted); }
+/* The run id belongs on the run, which prints it in full at the top of the
+   drawer. In the list it was the longest thing in the row and the least
+   read. Kept for a screen reader and for anything naming the row. */
+.history-goal-id {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.history-goal-artifacts { color: var(--muted-2); font-size: 12px; font-weight: 600; }
+.history-goal-artifacts::before { content: " · "; }
 .history-goal-artifacts.available { color: var(--blue); }
-.history-goal-tail { display: inline-flex; align-items: center; gap: 12px; }
-.history-goal-chevron { color: var(--muted); font-size: 24px; line-height: 1; }
+/* The verdict sits in a slot of its own, right-aligned, so its right edge is
+   the row's right edge and the column reads straight down. The pill hugs its
+   word rather than being stretched to the slot: what varies down the column
+   is the width of the word, and the edge that lines up is the one nearest
+   the eye. */
+.history-goal-tail {
+  flex: none; width: 96px; display: inline-flex; align-items: center;
+  justify-content: flex-end;
+}
+
 .history-list-footer {
   display: flex; align-items: center; justify-content: space-between;
   gap: 12px; min-height: 36px; margin-top: 12px;
@@ -983,7 +1068,7 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
   display: flex; align-items: flex-end; justify-content: space-between; gap: 20px;
   padding: 4px 0 2px;
 }
-.view-intro h2 { margin: 5px 0; font-size: clamp(22px, 3vw, 24px); letter-spacing: -.02em; }
+.view-intro h2 { margin: 5px 0; font-size: 20px; font-weight: 600; letter-spacing: -.01em; }
 .view-intro p { margin: 0; max-width: 68ch; font-size: 13px; }
 .workflow-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; }
 .workflow-card {
@@ -992,22 +1077,22 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
   background: color-mix(in srgb, var(--panel) 74%, transparent);
   transition: border-color .2s ease, box-shadow .2s ease;
 }
-.workflow-card:hover { border-color: color-mix(in srgb, var(--blue) 50%, var(--line)); }
+.workflow-card { border: 1px solid var(--line-card); }
+.workflow-card:hover { border-color: var(--line-card); background: var(--hover); }
 .workflow-card-main {
   display: grid; gap: 8px; width: 100%; margin: 0;
   padding: 20px; border: 0; flex: 1 1 auto; align-content: start;
   background: transparent; color: inherit; text-align: left; cursor: pointer;
 }
 .workflow-card-main:hover { background: transparent; }
-.workflow-card-main strong { min-width: 0; overflow-wrap: anywhere; font-size: 17px; line-height: 1.3; transition: color .2s ease; }
+.workflow-card-main strong { min-width: 0; overflow-wrap: anywhere; font-size: 15px; font-weight: 600; line-height: 1.35; transition: color .2s ease; }
 .workflow-card:hover .workflow-card-main strong { color: var(--blue); }
-/* The workflow id is secondary ASCII metadata, so it drops below the shared
-   eyebrow size to sit quieter above the name, and a long id is truncated to
-   one line rather than wrapping or stretching the card. */
+/* The tile names the workflow; its id belongs on the detail view, which
+   prints it in full. Kept for a screen reader and for anything reading the
+   card by its accessible name. */
 .workflow-card .eyebrow {
-  margin-top: 4px; font-size: 10px; letter-spacing: .12em; text-transform: uppercase;
-  max-width: 100%; min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
 }
 .workflow-meta { color: var(--muted); font-size: 12px; }
 .workflow-stats { display: flex; align-items: center; gap: 16px; margin-top: 2px; }
@@ -1018,11 +1103,13 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
    button is not markup a browser will honour. */
 .workflow-card-actions {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  padding: 14px 20px; border-top: 1px solid var(--line-soft);
+  padding: 12px 20px; border-top: 1px solid var(--line-row);
   background: transparent;
 }
 .workflow-card-primary-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.workflow-card-primary-actions .button { min-height: 30px; padding: 5px 11px; border-radius: var(--radius); font-size: 12px; }
+.workflow-card-actions .button { background: var(--control-bg) !important; }
+.workflow-card-primary-actions .button { min-height: 28px; padding: 4px 11px; border-radius: var(--radius-control); font-size: 12px; }
+.workflow-card-actions .button.danger { min-height: 28px; padding: 4px 11px; font-size: 12px; }
 .workflow-delete-icon {
   width: 30px; height: 30px; flex: 0 0 30px; display: grid; place-items: center;
   padding: 5px; border: 0; background: transparent; color: var(--muted);
@@ -1081,7 +1168,7 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 .defn-id { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .defn-id-text { min-width: 0; flex: 1; }
 .defn-glyph {
-  width: 40px; height: 40px; border-radius: var(--radius); flex: 0 0 auto;
+  width: 36px; height: 36px; border-radius: var(--radius-chip); flex: 0 0 auto;
   display: grid; place-items: center;
   background: color-mix(in srgb, currentColor 12%, transparent);
   transition: background-color .18s ease, color .18s ease;
@@ -1238,14 +1325,16 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 .agent-editor-history { display: grid; gap: 10px; min-width: 0; }
 .agent-editor-prompt[hidden] { display: none; }
 .agent-editor-prompt textarea {
-  width: 100%; min-height: 150px; resize: vertical; color: var(--text);
+  width: 100%; min-height: 150px; resize: none; color: var(--text);
   background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius);
   padding: 12px; font: inherit; line-height: 1.55;
 }
 .field-label { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 600; }
+/* Stands in for the agent select when there is only one choice, so it takes
+   the control surface rather than a frame of its own. */
 .agent-choice-static {
-  padding: 9px 10px; border: 1px solid var(--line-soft); border-radius: var(--radius);
-  background: var(--panel); color: var(--text); font-size: 13px;
+  padding: 9px 10px; border: 0; border-radius: var(--radius-control);
+  background: var(--control-bg); color: var(--control-fg); font-size: 13px;
 }
 .agent-editor-preview .definition-list { max-height: 280px; overflow: auto; }
 .agent-editor-preview .artifact-preview { max-height: 360px; overflow: auto; }
@@ -1291,25 +1380,29 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
   width: 100%; height: 100%; min-height: 420px; border: 0; display: block;
   background: var(--panel);
 }
-.action-editor-dialog textarea { min-height: 150px; resize: vertical; }
+.action-editor-dialog textarea { min-height: 150px; resize: none; }
 
-/* Registered Agent handlers: identity tiles from design/agents.html. Sharp
-   4px corners on purpose — the Agent grid is the one view the design specs
-   tighter corners for. */
-.agents-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(236px, 1fr)); gap: 16px; }
-.agent-card {
-  padding: 20px; border: 1px solid var(--line-soft); border-radius: var(--radius);
-  background: var(--panel); display: grid; gap: 14px; align-content: start;
-  transition: transform .2s ease, border-color .2s ease, background-color .2s ease;
+/* Registered Agent handlers are a single scannable list, not a second set of
+   dashboard cards. The route owns the whole content view and each handler is
+   one row within it. */
+.agents-list { border-top: 1px solid var(--line-card); }
+.agents-list-head, .agent-row {
+  display: grid; grid-template-columns: minmax(220px, 1.5fr) minmax(150px, 1fr) 96px 96px;
+  align-items: center; column-gap: 24px;
 }
-.agent-card:hover {
-  transform: translateY(-2px);
-  border-color: var(--brand-line);
-  background: var(--panel-2);
+.agents-list-head {
+  min-height: 36px; padding: 0 14px; color: var(--muted-2);
+  border-bottom: 1px solid var(--line-card); font-size: 11px; font-weight: 600;
+  letter-spacing: .04em; text-transform: uppercase;
 }
-.agent-head { display: flex; align-items: flex-start; gap: 12px; }
+.agent-row {
+  min-height: 68px; padding: 10px 14px; border-bottom: 1px solid var(--line-card);
+  transition: background-color .2s ease;
+}
+.agent-row:hover { background: var(--hover); }
+.agent-head { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .agent-avatar {
-  width: 40px; height: 40px; border-radius: var(--radius); flex: 0 0 auto;
+  width: 36px; height: 36px; border-radius: var(--radius-chip); flex: 0 0 auto;
   display: grid; place-items: center;
   font-family: var(--mono); font-size: 12px; font-weight: 700; letter-spacing: .04em;
 }
@@ -1326,18 +1419,21 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
   margin: 0; font-size: 14px; font-weight: 600; color: var(--text);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.agent-version { font-size: 12px; margin-top: 3px; color: var(--muted-2); }
-/* Fact rows under the identity: label left, count pill right, hairline above. */
-.agent-stat {
-  display: flex; align-items: center; justify-content: space-between;
-  border-top: 1px solid var(--line-soft); padding-top: 11px;
-}
-.agent-stat-label { font-size: 11px; color: var(--muted-2); }
+.agent-version { min-width: 0; font-size: 12px; color: var(--muted-2); overflow-wrap: anywhere; }
 .agent-stat-pill {
+  width: max-content; min-width: 32px; text-align: center;
   font-size: 11px; font-weight: 600; color: var(--muted);
   background: var(--chip-bg); border-radius: 999px; padding: 2px 9px;
 }
 .agent-stat-pill.err { background: var(--red-soft); color: var(--red); }
+@media (max-width: 700px) {
+  .agents-list-head { display: none; }
+  .agent-row {
+    grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px;
+    padding-block: 14px;
+  }
+  .agent-version { grid-column: 1 / -1; grid-row: 2; padding-left: 48px; }
+}
 /* Live counter in the intro row; the dot breathes while the Runtime is up. */
 .agents-online {
   display: flex; align-items: center; gap: 8px;
@@ -1591,26 +1687,84 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 /* Agents page: proposing one more trusted CLI.
    The diff is the product, so it gets room to be read rather than a one-line
    preview somebody would copy without looking at. */
-.agent-finder { margin-top: var(--space-3); display: grid; gap: var(--space-2); }
+/* The button sits under the grid. The form it opens borrows the Workflow
+   detail's shell outright, so there is nothing to style here but the form. */
+/* In the head now, beside the count: no top margin of its own, and the two
+   sit on one line with the online dot nearest the words it belongs to. */
+.agents-head-tail { display: flex; align-items: center; gap: 16px; flex: 0 0 auto; }
+.agent-finder-launch { display: inline-flex; }
+/* Wide enough to fill in a name, and no wider — until there is a patch, and
+   then wide enough to read one. The shell it borrows is sized for a workflow
+   diagram, which for one text field was most of a screen of nothing. */
+.page-modal-panel.agent-finder-panel { width: min(620px, 100%); }
+.page-modal-panel.agent-finder-panel.has-patch { width: min(960px, 100%); }
+.agent-finder { display: grid; gap: 20px; }
+.agent-finder-stage, .agent-finder-form { display: grid; gap: 20px; }
+.agent-finder-running { margin: 0; font-weight: 600; }
+.agent-finder-output {
+  display: grid; gap: 8px; padding: 14px 16px;
+  background: var(--panel-3); border-radius: var(--radius);
+  max-height: 300px; overflow: auto;
+}
+.agent-finder-output pre {
+  margin: 0; min-height: 96px;
+  white-space: pre-wrap; font-size: 12px; font-weight: 400;
+}
+.agent-finder-output.has-output pre { min-height: 0; }
+.agent-finder-status-title { margin: 0; font-size: 15px; font-weight: 600; }
+.agent-finder-success-detail { white-space: pre-line; }
 /* The panel lays itself out with a grid gap, so the headings' own margins are
    a second spacing system arguing with the first. */
 .agent-finder > h3, .agent-finder > p, .agent-finder h4 { margin: 0; }
-.agent-finder textarea { min-height: 72px; resize: vertical; width: 100%; }
-.agent-finder-actions { display: flex; gap: var(--space-2); align-items: center; }
-.agent-finder-actions select { flex: 0 0 auto; }
-.agent-finder-results { display: grid; gap: var(--space-2); }
-.agent-finder-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
-.agent-finder-item {
-  display: flex; gap: var(--space-2); align-items: center;
-  padding: 6px var(--space-2);
-  border: 1px solid var(--line-soft); border-radius: var(--radius);
+.agent-finder-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
 }
-/* Only the one a reviewer can act on is accented. The rest are answers too —
-   "already trusted" is a useful answer — so they stay quiet rather than red. */
-.agent-finder-item.verdict-proposable { border-color: var(--brand-line); }
-.agent-finder-patch { display: grid; gap: var(--space-2); }
+.agent-finder-head h3 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -.01em; }
+.agent-finder-hint { margin: -14px 0 0; font-size: 13px; line-height: 1.65; }
+.agent-finder-field { display: grid; gap: 8px; }
+.agent-finder-field .field-label { margin: 0; font-size: 13px; font-weight: 600; color: var(--text); }
+.agent-finder-field textarea {
+  width: 100%; min-width: 0; min-height: 112px; padding: 12px 14px;
+  background: var(--panel-2); border: 0; border-radius: var(--radius-control);
+  font-size: 13px; line-height: 1.55; resize: vertical;
+}
+.agent-finder-actions { justify-content: flex-end; gap: var(--space-2); }
+.agent-finder-results:empty { display: none; }
+.agent-finder-results { display: grid; gap: 14px; }
+.agent-finder-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+/* A row rather than a box: recessed like everything else you can read, with
+   the verdict's own wash doing the work the coloured edge used to do. */
+.agent-finder-item {
+  display: flex; gap: 10px; align-items: center;
+  padding: 10px 14px; border: 0; border-radius: var(--radius);
+  background: var(--panel-2); font-size: 13px;
+}
+.agent-finder-item > .mono { flex: 1 1 auto; min-width: 0; font-size: 12.5px; }
+.agent-finder-patch { display: grid; gap: 10px; }
+.agent-finder-patch h4 { font-size: 15px; font-weight: 600; }
+.agent-finder-patch p { margin: 0; font-size: 12.5px; line-height: 1.65; }
+.agent-finder-patch > .button { justify-self: start; }
 .agent-finder-diff {
-  max-height: 340px; overflow: auto; padding: var(--space-2);
-  background: var(--panel-2); border: 1px solid var(--line-soft);
-  border-radius: var(--radius); white-space: pre; font-size: 12px;
+  max-height: 340px; overflow: auto; padding: 14px 16px;
+  background: var(--panel-2); border: 0;
+  border-radius: var(--radius); white-space: pre; font-size: 12px; line-height: 1.6;
+}
+
+/* The revise button sits in the box it acts on, raised back to the page's own
+   surface so it reads as raised rather than as more of the box. */
+.workflow-modify-actions {
+  position: absolute; right: 12px; bottom: 10px; margin: 0; justify-content: flex-end;
+}
+.workflow-modify-actions .button.primary {
+  min-height: 32px; padding-inline: 14px;
+  background: var(--control-bg) !important; color: var(--text);
+}
+.workflow-modify-actions .button.primary:hover:not(:disabled) {
+  background: var(--control-raised) !important;
+}
+/* The header, the form and the diagram are three sections of one page. */
+.workflow-edit-page { display: flex; flex-direction: column; gap: 24px; }
+.workflow-edit-id {
+  font-family: var(--mono); font-size: 11px; font-weight: 400;
+  letter-spacing: .04em; text-transform: none; color: var(--muted-2);
 }

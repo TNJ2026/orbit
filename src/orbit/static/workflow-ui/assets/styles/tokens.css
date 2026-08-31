@@ -13,13 +13,24 @@
   --chrome: #181818;        /* app canvas */
   --bg: #181818;            /* app canvas */
   --panel: #181818;         /* cards share the app canvas */
-  --panel-2: #181818;       /* inputs and buttons share the canvas */
-  --panel-3: #181818;       /* raised neutral surfaces share the canvas */
+  /* Everything you can touch is recessed below the page: buttons, single-line
+     fields, selects and the lists they open. What tells a field from a button
+     is behaviour, not a frame — neither carries one. */
+  --panel-2: #121212;       /* buttons, fields and option lists */
+  --control-bg: #2a2a2a;   /* every text control, option list and button */
+  --control-fg: #e1e2ec;   /* readable text on the dark control surface */
+  /* One step above the control surface: what a control shows under the
+     pointer. --hover is darker than --control-bg and would read as a dip on
+     anything wearing the control colour, so controls lift here instead. */
+  --control-raised: #333333;
+  --panel-3: #212121;       /* a filled card — one step above the page */
   --line: #424754;          /* outline-variant — component boundaries */
-  --line-soft: #2a2d35;     /* quieter dividers inside a card */
-  /* Hover surface: a clear step above --panel-3 so the lift reads on a dark
-     screen. */
-  --hover: #181818;         /* hover remains on the shared canvas */
+  --line-soft: #2a2d35;     /* the edge a multi-line box keeps */
+  /* The one card that is outlined rather than filled is outlined faintly:
+     enough to hold tiles in a grid, not enough to read as a frame. */
+  --line-card: rgba(255, 255, 255, .05);
+  --line-row: rgba(255, 255, 255, .08);  /* one row from the next */
+  --hover: #282828;         /* a fill appears only under the pointer */
   --text: #e1e2ec;          /* on-surface — primary text */
   --muted: #c2c6d6;         /* on-surface-variant — secondary text */
   --muted-2: #8c909f;       /* outline — tertiary / metadata text */
@@ -53,7 +64,13 @@
   --chip-bg: rgba(255, 255, 255, .06);
   /* Overlays keep a shadow (with a backdrop blur); flat cards do not. */
   --shadow: 0 18px 50px rgba(0, 0, 0, .38);
-  --radius: 4px;
+  /* Three radii and no more. A control takes 12px whether it holds one line
+     or many; a card and the blocks inside it take 10px; a tab or a status chip
+     takes 6px. Nothing is a pill: 12px is short of half the height of even the
+     smallest control, so the family reads as one corner at every length. */
+  --radius: 10px;
+  --radius-control: 12px;
+  --radius-chip: 6px;
   --space-2: 8px;
   --space-3: 12px;
   /* The reader's own faces. `ui-sans-serif` and `ui-monospace` resolve to
@@ -77,11 +94,16 @@ html[data-theme="light"] {
   --chrome: #ffffff;
   --bg: #ffffff;
   --panel: #ffffff;
-  --panel-2: #ffffff;
-  --panel-3: #ffffff;
+  --panel-2: #f1f3f8;
+  --control-bg: #2a2a2a;
+  --control-fg: #ffffff;
+  --control-raised: #333333;
+  --panel-3: #f7f8fb;
   --line: #cdd4e0;
   --line-soft: #e4e8f0;
-  --hover: #ffffff;
+  --line-card: rgba(15, 23, 42, .08);
+  --line-row: rgba(15, 23, 42, .08);
+  --hover: #e8ecf4;
   --text: #171a21;
   --muted: #4a5164;   /* >= 4.5:1 on --panel */
   --muted-2: #5a6274; /* decorative/secondary text */
@@ -124,7 +146,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
    border-color tie while this rule's outline:none still applies. */
 input:focus:focus-visible, textarea:focus:focus-visible, select:focus:focus-visible {
   outline: none; border-color: var(--blue);
-  box-shadow: 0 0 0 2px var(--blue-soft);
+  /* An inset line stands in for the border these controls no longer have, so
+     focus is still a ring around the control and not just a faint glow. */
+  box-shadow: inset 0 0 0 1px var(--blue), 0 0 0 2px var(--blue-soft);
 }
 
 .sr-only {

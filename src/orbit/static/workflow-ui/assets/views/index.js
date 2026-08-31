@@ -1,7 +1,6 @@
 import { ApiError } from "../api.js";
 import { dataState } from "../components/data-state.js";
 import { el, svgEl } from "../components/dom.js";
-import { syncCustomSelect } from "../components/custom-select.js";
 import { semanticWorkflowDiff } from "../workflow-diff.js";
 import { resumeActions } from "../run-resume.js";
 import { workflowGenerationProgress } from "../workflow/generation-progress.js";
@@ -46,6 +45,25 @@ export function createViews(context) {
   // the view, so a tick after navigating away redraws rather than patching a
   // page that is gone.
   let liveRun = null;
+  /* The same bargain as `liveRun`, for a view that can redraw its own list
+     without redrawing the page around it. A view installs one; a live tick
+     asks it before falling back to a whole render; anything it cannot answer
+     for, it declines and gets the render it would have got anyway. */
+  let livePatch = null;
+
+  /* Does a tick concern this view?
+   *
+   * `/live` names the parts of its change marker that moved. A view that only
+   * draws finished runs has no business paging its whole list again because
+   * an Agent wrote one more line of output, and this is how it says so.
+   *
+   * An unrecognised shape — an older Runtime, a part this client has no name
+   * for — answers yes. Falling behind the server should cost a refresh too
+   * many, never one too few. */
+  function liveTouches(parts, watched) {
+    if (!Array.isArray(parts) || !parts.length) return true;
+    return parts.some((part) => watched.includes(part));
+  }
   // Whether the view on screen owns something a background redraw would
   // destroy — an instruction half typed, or a finished revision whose account
   // nobody has said they have read yet. The comment on the live tick has
@@ -53,6 +71,9 @@ export function createViews(context) {
   // change; nothing implemented it, so publishing a revision tore down the
   // very account of it that had just been put on screen.
   let viewHolds = null;
+  // A held view must not make a live event disappear. Keep the newest event
+  // per run until the view can safely redraw or navigate to it.
+  let pendingRunChanges = [];
   let focusSimplifiedGoalOnRender = false;
   let simplifiedWorkflowGenerationPending = false;
 
@@ -220,6 +241,11 @@ export function createViews(context) {
         }
       },
     });
+    // An external Run may arrive while somebody is composing a Goal.  The
+    // live tick must not replace what they are typing just to show that Run;
+    // once the field is empty, Home is again free to follow new work.
+    viewHolds = () => !locked && Boolean(goal.value.trim());
+    installViewCleanup(() => { viewHolds = null; });
     const problem = el("div", {
       class: "banner error simplified-composer-problem", hidden: "hidden",
     });
@@ -316,6 +342,8 @@ export function createViews(context) {
             }),
           ]),
         ]),
+        // The shortcut and the button live inside the box they act on: the
+        // composer is one object, not a field with a control parked under it.
         el("div", { class: "field simplified-goal-field" }, [
           el("label", { for: "simplifiedGoal", text: i18n.t("newRun.goal") }),
           goal,
@@ -323,8 +351,8 @@ export function createViews(context) {
             class: "simplified-goal-shortcut muted",
             text: i18n.t("simplified.start.shortcut"),
           }),
+          el("div", { class: "actions simplified-composer-actions" }, [start]),
         ]),
-        el("div", { class: "actions simplified-composer-actions" }, [start]),
         chosen && !allowed ? (
           engineRefusalNotice(chosen) || el("div", {
             class: "banner warn", text: i18n.t("simplified.workflow.unavailable"),
@@ -341,7 +369,7 @@ export function createViews(context) {
           id: "simplifiedGoalTitle", text: i18n.t("simplified.start.title"),
         }),
         el("p", {
-          class: "muted", text: i18n.t("simplified.start.description"),
+          class: "sr-only", text: i18n.t("simplified.start.description"),
         }),
       ]),
       form,
@@ -918,8 +946,12 @@ export function createViews(context) {
 
   function historyGoalRow(run, workflowNames) {
     const duration = historyDuration(run);
+    // The Workflow by the name it was given. When the catalog no longer has
+    // it — deleted, or archived — the row says nothing rather than printing
+    // the id: a hash is not what anyone reads a history list for, and the
+    // search box still finds the run by it.
     const metadata = [
-      workflowNames.get(run.workflow_id) || run.workflow_id,
+      workflowNames.get(run.workflow_id) || "",
       historyTime(run.updated_at),
       duration,
     ].filter(Boolean).join(" · ");
@@ -940,16 +972,19 @@ export function createViews(context) {
           identity ? el("span", {
             class: "history-goal-id", text: identity,
           }) : null,
+          // The artifact count is metadata like the workflow and the time, and
+          // read as a second line under them it looked like a second fact
+          // about the row rather than one more of the same.
+          el("span", {
+            class: `history-goal-artifacts${run.artifact_count ? " available" : ""}`,
+            text: historyArtifactCount(run.artifact_count),
+          }),
         ]),
-        el("span", {
-          class: `history-goal-artifacts${run.artifact_count ? " available" : ""}`,
-          text: historyArtifactCount(run.artifact_count),
-        }),
       ]),
-      el("span", { class: "history-goal-tail" }, [
-        pill(run.status),
-        el("span", { class: "history-goal-chevron", "aria-hidden": "true", text: "›" }),
-      ]),
+      // The verdict alone. The chevron beside it said "this opens", which the
+      // row already says by being a button and by filling under the pointer,
+      // and it pushed the one thing worth lining up off the row's edge.
+      el("span", { class: "history-goal-tail" }, [pill(run.status)]),
     ]);
   }
 
@@ -968,6 +1003,48 @@ export function createViews(context) {
     }
   }
 
+  /* Every run, not the first page of them.
+
+     The list used to arrive twenty-five at a time behind a Load more button,
+     which meant the search box could only ever look at what had been paged in
+     — so a term that matched the fortieth run found nothing until somebody
+     clicked far enough. Following the cursor to the end once, on arrival,
+     makes the whole history present, and the filter below can then be a
+     local one that answers on every keystroke.
+
+     A repeated cursor indicates a broken server-side paginator. Stop with an
+     explicit incomplete result rather than silently presenting a partial list
+     as the whole history. */
+  async function loadAllRuns(status) {
+    const runs = [];
+    let cursor = "";
+    const seenCursors = new Set();
+    while (true) {
+      if (cursor) {
+        if (seenCursors.has(cursor)) return { runs, complete: false };
+        seenCursors.add(cursor);
+      }
+      const response = await api.langGraphRuns({ limit: 200, status, cursor });
+      runs.push(...response.data.runs);
+      cursor = response.next_cursor || "";
+      if (!cursor) break;
+    }
+    return { runs, complete: true };
+  }
+
+  /* What the search box looks at: everything the row shows plus the two ids
+     it can be found by. The Workflow's name is in here and could not be in
+     the server's query — the runs table stores the id, and the name a person
+     would type lives in the catalog. */
+  function historyHaystack(run, workflowNames) {
+    return [
+      runName(run),
+      workflowNames.get(run.workflow_id) || "",
+      run.workflow_id,
+      run.run_id,
+    ].join(" ").toLowerCase();
+  }
+
   async function renderHistory(root) {
     root.append(el("header", { class: "view-intro" }, [
       el("div", {}, [
@@ -980,25 +1057,14 @@ export function createViews(context) {
       placeholder: i18n.t("goals.search.placeholder"),
       "aria-label": i18n.t("goals.search.label"),
     });
-    root.append(el("form", {
+    const searchForm = el("form", {
       class: "filter-bar history-filter-bar",
-      onsubmit: (event) => {
-        event.preventDefault();
-        goalFilters.q = search.value.trim();
-        render();
-      },
-    }, [
-      search,
-      el("button", { class: "button", type: "submit", text: i18n.t("action.search") }),
-      goalFilters.q ? el("button", {
-        class: "button", type: "button", text: i18n.t("action.clear"),
-        onclick: () => {
-          goalFilters.q = "";
-          render();
-        },
-      }) : null,
-    ]));
-    root.append(el("div", {
+      // Nothing to submit and nothing to clear: the list narrows as the words
+      // arrive and comes back whole when the box is emptied, so a button for
+      // either would only be a slower way to do what typing already did.
+      onsubmit: (event) => event.preventDefault(),
+    }, [search]);
+    const statusFilters = el("div", {
       class: "history-status-filters", role: "group",
       "aria-label": i18n.t("goals.filter.status"),
     }, [
@@ -1010,67 +1076,101 @@ export function createViews(context) {
       class: `button history-status-filter${goalFilters.status === status ? " active" : ""}`,
       type: "button", "aria-pressed": String(goalFilters.status === status),
       text: i18n.t(label),
-      onclick: () => {
+      onclick: (event) => {
         goalFilters.status = status;
         render();
       },
-    }))));
+    })));
+    root.append(el("div", { class: "history-filter-controls" }, [
+      searchForm,
+      statusFilters,
+    ]));
     const requestedStatus = goalFilters.status === "succeeded"
       ? "completed" : goalFilters.status;
-    const [response, catalogResponse] = await Promise.all([
-      api.langGraphRuns({
-        limit: 25, status: requestedStatus, q: goalFilters.q,
-      }),
+    const [history, catalogResponse] = await Promise.all([
+      loadAllRuns(requestedStatus),
       api.workflowCatalog(),
     ]);
-    const workflowNames = new Map(
+    let runs = history.runs;
+    let workflowNames = new Map(
       catalogResponse.data.workflows.map((item) => [item.workflow_id, item.name]),
     );
-    const runs = response.data.runs;
-    if (!runs.length) {
+    if (!history.complete) {
       root.append(el("div", {
-        class: "empty panel",
-        text: goalFilters.q || goalFilters.status
-          ? i18n.t("history.noMatches") : i18n.t("history.empty"),
+        class: "banner warn history-incomplete",
+        text: i18n.t("history.incomplete"),
       }));
-      return;
     }
+    let haystacks = new Map(
+      runs.map((run) => [run.run_id, historyHaystack(run, workflowNames)]),
+    );
     const list = el("section", { class: "history-goal-list panel" });
-    appendHistoryRuns(list, runs, workflowNames);
-    root.append(list);
-    let loadedCount = runs.length;
-    let nextCursor = response.next_cursor;
-    const count = el("p", { class: "history-result-count muted" });
-    const updateCount = () => {
-      count.textContent = i18n.t(
-        nextCursor ? "history.resultCount.more" : "history.resultCount",
-        { count: i18n.number(loadedCount) },
+    const empty = el("div", { class: "empty panel" });
+    const draw = () => {
+      const term = goalFilters.q.trim().toLowerCase();
+      const shown = term
+        ? runs.filter((run) => (haystacks.get(run.run_id) || "").includes(term))
+        : runs;
+      list.replaceChildren();
+      appendHistoryRuns(list, shown, workflowNames);
+      list.hidden = shown.length === 0;
+      empty.hidden = shown.length > 0;
+      empty.textContent = i18n.t(
+        term || goalFilters.status ? "history.noMatches" : "history.empty",
       );
     };
-    const loadMore = el("button", {
-      class: "button", hidden: nextCursor ? null : "hidden",
-      text: i18n.t("action.loadMore"),
-      onclick: async () => {
-        loadMore.disabled = true;
-        try {
-          const next = await api.langGraphRuns({
-            cursor: nextCursor, limit: 25, status: requestedStatus,
-            q: goalFilters.q,
-          });
-          appendHistoryRuns(list, next.data.runs, workflowNames);
-          loadedCount += next.data.runs.length;
-          nextCursor = next.next_cursor;
-          loadMore.hidden = !nextCursor;
-          updateCount();
-        } catch (error) {
-          reportError(error);
-        } finally {
-          loadMore.disabled = false;
-        }
-      },
+    search.addEventListener("input", () => {
+      goalFilters.q = search.value;
+      draw();
     });
-    updateCount();
-    root.append(el("footer", { class: "history-list-footer" }, [count, loadMore]));
+    // A term half typed is this view's to keep: a background redraw would go
+    // and fetch the whole history again and empty the box while it did.
+    viewHolds = () => Boolean(search.value.trim());
+    /* A change elsewhere is news about the rows, so the rows are what gets
+       redrawn: the heading, the search box and whatever is in it, the status
+       filters and the scroll position are this view's own and survive.
+       The list is rebuilt rather than diffed row by row on purpose — `draw`
+       is the one place a row is made, and a second path that only knew how
+       to update one would be a second place to keep correct. */
+    // A run settling puts a row here; a workflow renamed puts a new word in
+    // one. An Agent's output chunk and a node event inside a run that is still
+    // going put nothing here at all — and those are the two that move most.
+    livePatch = async (parts) => {
+      if (!liveTouches(parts, ["engine_updated", "audit_position"])) return true;
+      // A goal detail is open over this list, and it is not this patch's to
+      // refresh — redrawing only the rows behind it would leave the thing
+      // being read stale, which is worse than the redraw it replaced. The
+      // render path knows how to rebuild the list and re-attach the drawer.
+      if (goalModalRunId) return false;
+      let fresh;
+      let catalog;
+      try {
+        [fresh, catalog] = await Promise.all([
+          loadAllRuns(requestedStatus), api.workflowCatalog(),
+        ]);
+      } catch (error) {
+        return false;
+      }
+      // Navigated away while the read was in flight: whatever replaced this
+      // view has already drawn itself, so there is nothing to do and nothing
+      // to hand back.
+      if (!list.isConnected) return true;
+      // The incomplete-read warning is a banner this view appends once, above
+      // the list; a patch has nowhere to put it. Hand the page back instead.
+      if (!fresh.complete) return false;
+      runs = fresh.runs;
+      workflowNames = new Map(
+        catalog.data.workflows.map((item) => [item.workflow_id, item.name]),
+      );
+      haystacks = new Map(
+        runs.map((run) => [run.run_id, historyHaystack(run, workflowNames)]),
+      );
+      draw();
+      return true;
+    };
+    installViewCleanup(() => { viewHolds = null; livePatch = null; });
+    draw();
+    root.append(list, empty);
   }
 
 
@@ -1307,45 +1407,18 @@ export function createViews(context) {
   }
 
 
-  function refreshSeconds() {
-    const value = Number(localStorage.getItem("orbit.refreshSeconds") || 15);
-    return Number.isFinite(value) && value >= 5 && value <= 300 ? value : 15;
-  }
-
-  const REFRESH_INTERVAL_SECONDS = [5, 15, 30, 60, 300];
-
-  function syncRefreshIntervalSelect(interval) {
-    const current = String(refreshSeconds());
-    if (!interval.options.length) {
-      for (const seconds of REFRESH_INTERVAL_SECONDS) interval.append(el("option", {
-        value: String(seconds), text: i18n.t("settings.seconds", { count: seconds }),
-      }));
-    } else {
-      for (const option of interval.options) {
-        option.textContent = i18n.t("settings.seconds", { count: Number(option.value) });
-      }
-    }
-    interval.value = current;
-    const label = i18n.t("settings.refresh");
-    interval.setAttribute("aria-label", label);
-    const wrapper = interval.closest(".custom-select");
-    if (wrapper) {
-      for (const option of wrapper.querySelectorAll(".custom-select-option")) {
-        const nativeOption = [...interval.options].find(
-          (item) => item.value === option.dataset.value,
-        );
-        if (nativeOption) option.textContent = nativeOption.textContent;
-      }
-      wrapper.querySelector(".custom-select-options")?.setAttribute("aria-label", label);
-    }
-    syncCustomSelect(interval);
-  }
-
-  function saveRefreshInterval(interval) {
-    localStorage.setItem("orbit.refreshSeconds", interval.value);
-    scheduleLivePolling();
-    announce(i18n.t("settings.saved"));
-  }
+  /* How often the shell asks what changed somewhere else.
+   *
+   * This was a setting for a while: five values in the More menu, remembered
+   * per device. It is one number again — a knob nobody turned is still a knob
+   * every reader has to account for, and every view had to be held past a
+   * tick of whichever value happened to be stored.
+   *
+   * It is also the browser's only way to notice work it did not start. This
+   * page opens no WebSocket, so a Run begun from MCP or another Agent App
+   * arrives on one of these ticks or not at all.
+   */
+  const LIVE_REFRESH_SECONDS = 15;
 
   /* The watched run's own progress, without redrawing the page around it.
    *
@@ -1377,7 +1450,7 @@ export function createViews(context) {
     if (refreshTimer) clearTimeout(refreshTimer);
     let failures = 0;
     const delaySeconds = () =>
-      Math.min(300, refreshSeconds() * 2 ** failures);
+      Math.min(300, LIVE_REFRESH_SECONDS * 2 ** failures);
     const tick = async () => {
       if (runtimeState.stopped) return;
       try {
@@ -1390,15 +1463,51 @@ export function createViews(context) {
           const live = (await api.live(liveCursor)).data;
           liveCursor = live.cursor;
           failures = 0;
+          if (Array.isArray(live.run_changes) && live.run_changes.length) {
+            const latest = new Map(
+              pendingRunChanges.map((item) => [item.run_id, item]),
+            );
+            for (const item of live.run_changes) {
+              if (item?.run_id) latest.set(item.run_id, item);
+            }
+            pendingRunChanges = [...latest.values()].sort(
+              (left, right) => (left.position || 0) - (right.position || 0),
+            );
+          }
           // An Editor owns unsaved local text. Background projection changes
           // must never tear down that view; explicit Draft commands redraw it.
           // A change of fate changes the page's shape — the composer
           // unlocks, the commands change, a result appears — so that one is
           // still a redraw. It happens once, at the end, rather than on
           // every tick of the run it ends.
-          if (live.changed && !viewHolds?.()) {
-            const patched = liveRun ? await patchLiveRun() : false;
-            if (!patched) await render();
+          if ((live.changed || pendingRunChanges.length) && !viewHolds?.()) {
+            // Starts issued by this page navigate as soon as the command
+            // returns.  MCP and other Agent Apps have no browser route to
+            // change, so use the Run identities carried by the live cursor.
+            // This also catches a short Run that settled between two polls.
+            const changedRun = [...(live.run_changes || [])].reverse().find(
+              (item) => item?.run_id,
+            );
+            const pendingRun = [...pendingRunChanges].reverse().find(
+              (item) => item?.run_id,
+            );
+            const targetRun = pendingRun || changedRun;
+            if (targetRun && currentRoute?.view === "home" && !liveRun) {
+              pendingRunChanges = [];
+              navigate({ view: "run", runId: targetRun.run_id });
+              return;
+            }
+            // Patch before redraw. The run page moves its own step rows;
+            // History and the catalog redraw their own list and leave the
+            // page around it standing. Whatever cannot say yes hands the
+            // view back, so a wrong answer still costs only a redraw.
+            const patched = liveRun
+              ? await patchLiveRun()
+              : livePatch ? await livePatch(live.changed_parts) : false;
+            if (!patched) {
+              await render();
+              pendingRunChanges = [];
+            }
           }
         }
       } catch (error) {
@@ -1411,7 +1520,10 @@ export function createViews(context) {
         refreshTimer = setTimeout(tick, delaySeconds() * 1000);
       }
     };
-    refreshTimer = setTimeout(tick, delaySeconds() * 1000);
+    // Establish the cursor immediately. Waiting a full interval for the first
+    // sample leaves a startup gap in which an external Run can begin and end
+    // before the browser has any baseline from which to observe it.
+    refreshTimer = setTimeout(tick, liveCursor ? delaySeconds() * 1000 : 0);
   }
 
 
@@ -1545,6 +1657,10 @@ export function createViews(context) {
       simplifiedWorkflowGenerationPending = false;
     }
 
+    // Reachable from the hold predicate at the foot of this function: what
+    // somebody has typed and not sent is the one thing on this page a
+    // background redraw would throw away.
+    let composer = null;
     {
       // Several writers may be available; the author can choose one and the
       // Runtime's default is selected initially.
@@ -1555,6 +1671,7 @@ export function createViews(context) {
         placeholder: i18n.t("generate.instructionPh"),
         text: activeGeneration?.prompt || "",
       });
+      composer = instruction;
       const problem = el("div", {
         class: "banner error simplified-workflow-generation-problem", hidden: "hidden",
       });
@@ -1603,14 +1720,22 @@ export function createViews(context) {
             (value) => { writerAgent = value; },
           ),
         ]),
-        el("div", { class: "field" }, [
+        // Asking for a workflow is the same gesture as asking for a goal, so
+        // it is the same object: one recessed box with the limit on one end of
+        // its last line and the button on the other, inside it rather than
+        // parked underneath.
+        el("div", { class: "field simplified-workflow-generator-field" }, [
           el("label", {
             class: "sr-only", for: "generateInstruction",
             text: i18n.t("generate.instruction"),
           }),
           instruction,
+          el("span", {
+            class: "simplified-workflow-generator-limit muted",
+            text: i18n.t("generate.lengthHint", { count: i18n.number(4000) }),
+          }),
+          el("div", { class: "actions simplified-workflow-generator-actions" }, [submit]),
         ]),
-        el("div", { class: "actions simplified-workflow-generator-actions" }, [submit]),
         problem,
       ]);
       page.append(el("header", {
@@ -1650,118 +1775,164 @@ export function createViews(context) {
     }
     const cards = el("section", { class: "workflow-grid", "aria-label": i18n.t("workflows.list") });
 
-    for (const entry of sortWorkflows(entries, "recentPublish")) {
-      const kinds = Object.entries(entry.summary.node_kinds || {});
-      const visualNodes = [];
-      for (const [kind, count] of kinds) {
-        for (let index = 0; index < Math.min(count, 4 - visualNodes.length); index += 1) {
-          visualNodes.push(el("span", {
-            class: `workflow-node ${kind}`, title: kind,
-            text: kind === "terminal" ? "✓" : kind === "human" ? "H" : kind === "decision" ? "?" : kind.slice(0, 1).toUpperCase(),
+    /* The grid on its own. A change to the catalog is news about these
+       cards and nothing else, so this is the whole of what a live tick
+       redraws — everything above it stays exactly as it was. */
+    const drawCards = () => {
+      cards.replaceChildren();
+      for (const entry of sortWorkflows(entries, "recentPublish")) {
+        const kinds = Object.entries(entry.summary.node_kinds || {});
+        const visualNodes = [];
+        for (const [kind, count] of kinds) {
+          for (let index = 0; index < Math.min(count, 4 - visualNodes.length); index += 1) {
+            visualNodes.push(el("span", {
+              class: `workflow-node ${kind}`, title: kind,
+              text: kind === "terminal" ? "✓" : kind === "human" ? "H" : kind === "decision" ? "?" : kind.slice(0, 1).toUpperCase(),
+            }));
+          }
+          if (visualNodes.length === 4) break;
+        }
+        if (entry.summary.node_count > visualNodes.length) visualNodes.push(el("span", {
+          class: "workflow-node more", text: `+${entry.summary.node_count - visualNodes.length}`,
+        }));
+        const cardActions = [];
+        if (entry.editing_available) cardActions.push(el("button", {
+          class: `button${entry.goal_readiness === "needs_upgrade" ? " upgrade-workflow" : " edit-workflow"}`,
+          text: i18n.t(entry.goal_readiness === "needs_upgrade"
+            ? "workflows.upgrade" : "workflows.editWorkflow"),
+          onclick: () => navigate({
+            view: "workflowEdit", workflowId: entry.workflow_id, runId: null,
+          }),
+        }));
+        // The same predicate the composer uses. Offering the button on the
+        // command alone meant a workflow that compiles but has nowhere to put
+        // a goal advertised "New goal", and the dialog it opened then declined
+        // to preselect it — the person clicked a named workflow and got an
+        // empty picker, with nothing saying why.
+        if (workflowRunnable(entry) && workflowStartCommand(entry)) {
+          cardActions.push(el("button", {
+            class: "button", text: i18n.t("action.newGoal"),
+            onclick: () => newRunDialog(entry.workflow_id),
+          }));
+        } else if (entry.goal_readiness === "needs_migration" && generateCommand) {
+          cardActions.push(el("button", {
+            class: "button", text: i18n.t("generate.action"),
+            onclick: () => generateWorkflowDialog(generateCommand),
           }));
         }
-        if (visualNodes.length === 4) break;
-      }
-      if (entry.summary.node_count > visualNodes.length) visualNodes.push(el("span", {
-        class: "workflow-node more", text: `+${entry.summary.node_count - visualNodes.length}`,
-      }));
-      const cardActions = [];
-      if (entry.editing_available) cardActions.push(el("button", {
-        class: `button${entry.goal_readiness === "needs_upgrade" ? " upgrade-workflow" : " edit-workflow"}`,
-        text: i18n.t(entry.goal_readiness === "needs_upgrade"
-          ? "workflows.upgrade" : "workflows.editWorkflow"),
-        onclick: () => navigate({
-          view: "workflowEdit", workflowId: entry.workflow_id, runId: null,
-        }),
-      }));
-      // The same predicate the composer uses. Offering the button on the
-      // command alone meant a workflow that compiles but has nowhere to put
-      // a goal advertised "New goal", and the dialog it opened then declined
-      // to preselect it — the person clicked a named workflow and got an
-      // empty picker, with nothing saying why.
-      if (workflowRunnable(entry) && workflowStartCommand(entry)) {
-        cardActions.push(el("button", {
-          class: "button", text: i18n.t("action.newGoal"),
-          onclick: () => newRunDialog(entry.workflow_id),
-        }));
-      } else if (entry.goal_readiness === "needs_migration" && generateCommand) {
-        cardActions.push(el("button", {
-          class: "button", text: i18n.t("generate.action"),
-          onclick: () => generateWorkflowDialog(generateCommand),
-        }));
-      }
-      const deleteCommand = (entry.allowed_commands || []).find(
-        (item) => item.command === "workflow.delete",
-      );
-      const deleteButton = deleteCommand ? el("button", {
-        class: "workflow-delete-icon delete-workflow",
-        "aria-label": i18n.t("workflows.delete"), title: i18n.t("workflows.delete"),
-        onclick: () => workflowViews().openWorkflowDeleteDialog(entry, deleteCommand, render),
-      }, [workflowViews().deleteGlyph()]) : null;
-      const card = el("article", {
-        class: "workflow-card panel",
-        "data-workflow-id": entry.workflow_id,
-        "data-workflow-slug": entry.slug || "",
-      }, [
-        el("button", { class: "workflow-card-main" }, [
-          el("span", { class: "workflow-visual", "aria-hidden": "true" }, visualNodes),
-          el("span", { class: "eyebrow", text: entry.workflow_id.replace(/^workflow:/i, "") }),
-          el("span", { class: "workflow-card-heading" }, [
-            el("strong", { text: entry.name }),
+        const deleteCommand = (entry.allowed_commands || []).find(
+          (item) => item.command === "workflow.delete",
+        );
+        // A word, not a glyph, and the same shape as the two buttons beside it:
+        // the colour is what says it is the destructive one. A bin drawn at 24px
+        // was the one control on this card you had to hover to identify.
+        const deleteButton = deleteCommand ? el("button", {
+          class: "button danger delete-workflow",
+          // The word the button says is the word it is called: one short label
+          // beside the other two, with the longer warning on the tooltip and in
+          // the dialog it opens, which is where the decision is actually made.
+          text: i18n.t("workflows.delete"),
+          title: i18n.t("workflows.deleteAction"),
+          onclick: () => workflowViews().openWorkflowDeleteDialog(entry, deleteCommand, render),
+        }) : null;
+        const card = el("article", {
+          class: "workflow-card panel",
+          "data-workflow-id": entry.workflow_id,
+          "data-workflow-slug": entry.slug || "",
+        }, [
+          el("button", { class: "workflow-card-main" }, [
+            el("span", { class: "workflow-visual", "aria-hidden": "true" }, visualNodes),
+            el("span", { class: "eyebrow", text: entry.workflow_id.replace(/^workflow:/i, "") }),
+            el("span", { class: "workflow-card-heading" }, [
+              el("strong", { text: entry.name }),
+              entry.goal_readiness !== "ready" ? el("span", {
+                class: `pill ${entry.goal_readiness === "needs_upgrade" ? "waiting" : "failed"}`,
+                text: i18n.t(`workflows.readiness.${entry.goal_readiness}`),
+              }) : null,
+            ]),
+            entry.description ? el("span", { class: "muted", text: entry.description }) : null,
             entry.goal_readiness !== "ready" ? el("span", {
-              class: `pill ${entry.goal_readiness === "needs_upgrade" ? "waiting" : "failed"}`,
-              text: i18n.t(`workflows.readiness.${entry.goal_readiness}`),
+              class: "muted",
+              // A definition that cannot be upgraded is normally answered by
+              // generating a replacement. Where this deployment has no generating
+              // Agent that answer does not exist, so the card says what is true
+              // instead of pointing at a button nobody can press.
+              text: i18n.t(
+                entry.goal_readiness === "needs_migration" && !generateCommand
+                  ? "workflows.readiness.needs_migration.noAgent"
+                  : `workflows.readiness.${entry.goal_readiness}.description`,
+              ),
             }) : null,
+            // The card's own silent case: a goal binds perfectly well and the
+            // engine still will not run it. Said here rather than only in the
+            // dialog, because the card is where the missing Start button is.
+            entry.goal_readiness === "ready" && engineRefusal(entry)
+              ? el("span", {
+                class: "muted workflow-card-blocked",
+                text: engineRefusal(entry).summary,
+              }) : null,
+            el("span", { class: "workflow-meta workflow-stats" }, [
+              el("span", { text: i18n.t("workflows.nodeCount", {
+                count: i18n.number(entry.summary.node_count),
+              }) }),
+              el("span", { text: i18n.t("workflows.inputCount", {
+                count: i18n.number(entry.inputs.length),
+              }) }),
+            ]),
+            // Which version is current, and whether anyone has run it: the two
+            // facts that tell two similarly named workflows apart.
+            el("span", { class: "workflow-card-facts", text: entry.last_run_at
+              ? i18n.t("workflows.lastRun", { when: i18n.dateTime(entry.last_run_at) })
+              : i18n.t("workflows.neverRun") }),
           ]),
-          entry.description ? el("span", { class: "muted", text: entry.description }) : null,
-          entry.goal_readiness !== "ready" ? el("span", {
-            class: "muted",
-            // A definition that cannot be upgraded is normally answered by
-            // generating a replacement. Where this deployment has no generating
-            // Agent that answer does not exist, so the card says what is true
-            // instead of pointing at a button nobody can press.
-            text: i18n.t(
-              entry.goal_readiness === "needs_migration" && !generateCommand
-                ? "workflows.readiness.needs_migration.noAgent"
-                : `workflows.readiness.${entry.goal_readiness}.description`,
-            ),
-          }) : null,
-          // The card's own silent case: a goal binds perfectly well and the
-          // engine still will not run it. Said here rather than only in the
-          // dialog, because the card is where the missing Start button is.
-          entry.goal_readiness === "ready" && engineRefusal(entry)
-            ? el("span", {
-              class: "muted workflow-card-blocked",
-              text: engineRefusal(entry).summary,
-            }) : null,
-          el("span", { class: "workflow-meta workflow-stats" }, [
-            el("span", { text: i18n.t("workflows.nodeCount", {
-              count: i18n.number(entry.summary.node_count),
-            }) }),
-            el("span", { text: i18n.t("workflows.inputCount", {
-              count: i18n.number(entry.inputs.length),
-            }) }),
-          ]),
-          // Which version is current, and whether anyone has run it: the two
-          // facts that tell two similarly named workflows apart.
-          el("span", { class: "workflow-card-facts", text: entry.last_run_at
-            ? i18n.t("workflows.lastRun", { when: i18n.dateTime(entry.last_run_at) })
-            : i18n.t("workflows.neverRun") }),
-        ]),
-        cardActions.length || deleteButton
-          ? el("div", { class: "workflow-card-actions" }, [
-            el("div", { class: "workflow-card-primary-actions" }, cardActions),
-            deleteButton,
-          ]) : null,
-      ]);
-      card.querySelector(".workflow-card-main").addEventListener("click", () => navigate({
-        view: "workflow", workflowId: entry.workflow_id, runId: null,
-      }));
-      cards.append(card);
-    }
-    if (!entries.length) {
-      cards.append(el("div", { class: "empty panel", text: i18n.t("workflows.empty") }));
-    }
+          cardActions.length || deleteButton
+            ? el("div", { class: "workflow-card-actions" }, [
+              el("div", { class: "workflow-card-primary-actions" }, cardActions),
+              deleteButton,
+            ]) : null,
+        ]);
+        card.querySelector(".workflow-card-main").addEventListener("click", () => navigate({
+          view: "workflow", workflowId: entry.workflow_id, runId: null,
+        }));
+        cards.append(card);
+      }
+      if (!entries.length) {
+        cards.append(el("div", { class: "empty panel", text: i18n.t("workflows.empty") }));
+      }
+    };
+    drawCards();
+    /* A generation owns a poll of its own and the composer holds unsent
+       text; neither survives a redraw and neither needs one. This page
+       had no hold at all, so a change somewhere else could tear down a
+       running generation panel in the middle of its job. */
+    viewHolds = () => Boolean(activeGeneration) || Boolean(composer?.value.trim());
+    // Publishes and deletes are audited, a generation job's fate is its own
+    // part, and every card carries a last-run stamp. What is deliberately not
+    // watched is the Agent output chunk: the progress panel above owns that,
+    // and it polls three times a minute faster than this ever could.
+    livePatch = async (parts) => {
+      if (!liveTouches(
+        parts, ["audit_position", "authoring_updated", "engine_updated"],
+      )) return true;
+      // Same bargain as History's: a workflow detail is open over these cards
+      // and this patch cannot refresh it, so the whole view goes back to the
+      // render path that can.
+      if (currentRoute?.view === "workflow") return false;
+      let fresh;
+      try {
+        fresh = (await api.workflowCatalog()).data;
+      } catch (error) {
+        return false;
+      }
+      if (!cards.isConnected) return true;
+      entries = fresh.workflows;
+      generateCommand = (fresh.allowed_commands || []).find(
+        (item) => item.command === "workflow.generate",
+      );
+      drawCards();
+      return true;
+    };
+    installViewCleanup(() => { viewHolds = null; livePatch = null; });
     page.append(cards);
     root.append(page);
   }
@@ -1787,133 +1958,284 @@ export function createViews(context) {
 
   async function renderAgents(root) {
     const catalog = (await api.handlerCatalog()).data;
-    const agents = catalog.handlers.filter((handler) => handler.name.startsWith("agent."));
+    let agents = catalog.handlers.filter((handler) => handler.name.startsWith("agent."));
+    // The count is redrawn by a live tick along with the rows it counts, so
+    // it is a node this function keeps rather than text baked into a heading.
+    const online = el("span", {
+      text: i18n.t("agents.online", { count: i18n.number(agents.length) }),
+    });
     root.append(el("header", { class: "view-intro" }, [
       el("div", {}, [
         el("h2", { text: i18n.t("agents.handlers") }),
         el("p", { class: "muted", text: i18n.t("agents.subtitle") }),
       ]),
-      el("div", { class: "agents-online" }, [
-        el("span", { class: "agents-online-dot", "aria-hidden": "true" }),
-        el("span", { text: i18n.t("agents.online", { count: i18n.number(agents.length) }) }),
+      // How many are here, and the one way to make it one more: both belong
+      // to the heading that counts them. Below the grid the button was a
+      // footnote to a list it is not part of, and on a short page it sat
+      // wherever the last row happened to end.
+      el("div", { class: "agents-head-tail" }, [
+        el("div", { class: "agents-online" }, [
+          el("span", { class: "agents-online-dot", "aria-hidden": "true" }),
+          online,
+        ]),
+        // Deliberately outside the redraw below. What this button offers comes
+        // from `allowed_commands`, which changes when the server's permissions
+        // do and not when an Agent registers; rebuilding it on every tick
+        // would be a button replaced under whoever was about to press it.
+        agentFinderLauncher(catalog.allowed_commands || []),
       ]),
     ]));
-    root.append(el("div", { class: "agents-grid" }, agents.length
-      ? agents.map((handler) => {
-        const shortName = handler.name.replace(/^agent\./, "");
-        return el("article", { class: "agent-card" }, [
-          el("div", { class: "agent-head" }, [
-            el("span", {
-              class: `agent-avatar ${agentHue(shortName)}`,
-              "aria-hidden": "true", text: shortName.slice(0, 2).toUpperCase(),
-            }),
-            el("div", { class: "agent-id" }, [
-              el("h3", { class: "agent-name", text: shortName, title: handler.name }),
+    const list = el("div", { class: "agents-list", role: "list" });
+    /* The roster on its own: the count and the rows. A change elsewhere is
+       news about which Agents are registered and how they have fared, and
+       nothing above this list is an answer to that. */
+    const drawAgents = () => {
+      online.textContent = i18n.t("agents.online", {
+        count: i18n.number(agents.length),
+      });
+      list.replaceChildren(...(agents.length
+        ? [
+          el("div", { class: "agents-list-head", "aria-hidden": "true" }, [
+            el("span", { text: i18n.t("agents.column.name") }),
+            el("span", { text: i18n.t("agents.column.version") }),
+            el("span", { text: i18n.t("agents.runCountLabel") }),
+            el("span", { text: i18n.t("agents.failedLabel") }),
+          ]),
+          ...agents.map((handler) => {
+            const shortName = handler.name.replace(/^agent\./, "");
+            return el("div", { class: "agent-row", role: "listitem" }, [
+              el("div", { class: "agent-head" }, [
+                el("span", {
+                  class: `agent-avatar ${agentHue(shortName)}`,
+                  "aria-hidden": "true", text: shortName.slice(0, 2).toUpperCase(),
+                }),
+                el("div", { class: "agent-id" }, [
+                  el("h3", { class: "agent-name", text: shortName, title: handler.name }),
+                ]),
+              ]),
               el("div", { class: "mono agent-version", text: handler.version }),
-            ]),
-          ]),
-          el("div", { class: "agent-stat" }, [
-            el("span", { class: "agent-stat-label", text: i18n.t("agents.runCountLabel") }),
-            el("span", {
-              class: "agent-stat-pill",
-              text: i18n.t("agents.runCount", {
-                count: i18n.number(handler.attempt_count ?? 0),
+              el("span", {
+                class: "agent-stat-pill",
+                text: i18n.number(handler.attempt_count ?? 0),
+                title: i18n.t("agents.runCount", {
+                  count: i18n.number(handler.attempt_count ?? 0),
+                }),
               }),
-            }),
-          ]),
-          handler.failed_count > 0 ? el("div", { class: "agent-stat" }, [
-            el("span", { class: "agent-stat-label", text: i18n.t("agents.failedLabel") }),
-            el("span", {
-              class: "agent-stat-pill err",
-              text: i18n.t("agents.failedTimes", {
-                count: i18n.number(handler.failed_count),
+              el("span", {
+                class: `agent-stat-pill${handler.failed_count > 0 ? " err" : ""}`,
+                text: i18n.number(handler.failed_count ?? 0),
+                title: i18n.t("agents.failedTimes", {
+                  count: i18n.number(handler.failed_count ?? 0),
+                }),
               }),
-            }),
-          ]) : null,
-        ]);
-      })
-      : [el("div", { class: "muted", text: i18n.t("agents.empty") })]));
-
-    root.append(agentFinder(agents, catalog.allowed_commands || []));
+            ]);
+          }),
+        ]
+        : [el("div", { class: "muted", text: i18n.t("agents.empty") })]));
+    };
+    drawAgents();
+    /* The Agent finder opens in a page modal rather than a `<dialog>`, so the
+       tick's own dialog guard does not see it — and a probe runs an Agent CLI,
+       which is long enough for a tick to land in the middle of it. Hold the
+       view while it is open. */
+    viewHolds = () => Boolean(document.querySelector(".agent-finder-panel"));
+    // No part of the change marker tracks handler registration, so there is
+    // nothing here to narrow against and this reads on any tick that reported
+    // a change. One catalog read is cheap; guessing at a part that does not
+    // cover registration would be a roster that quietly stopped updating.
+    livePatch = async () => {
+      let fresh;
+      try {
+        fresh = (await api.handlerCatalog()).data;
+      } catch (error) {
+        return false;
+      }
+      if (!list.isConnected) return true;
+      agents = fresh.handlers.filter((handler) => handler.name.startsWith("agent."));
+      drawAgents();
+      return true;
+    };
+    installViewCleanup(() => { viewHolds = null; livePatch = null; });
+    root.append(list);
   }
 
-  /* Ask an installed Agent what to look for; let the server do the looking.
-   *
-   * The button produces a patch and never a registration, which is the whole
-   * reason this is allowed to exist on a page: the allowlist it proposes into
-   * is the thing standing between a workflow step and arbitrary execution, and
-   * it grows by review or not at all. So the result is text, the proposed spec
-   * carries no invocation, and the copy below says both out loud rather than
-   * leaving somebody to assume the button did more than it did. */
-  function agentFinder(installed, allowedCommands) {
+  /* A selected registered Agent interprets the request; Orbit then probes
+   * only the candidate executable names it returned and produces an inert,
+   * reviewable patch. */
+  function agentFinderLauncher(allowedCommands) {
     const allowed = allowedCommands.find(
       (item) => item.command === "agent.proposal.probe",
     );
-    // No command, no form. Whether this may be reached is the server's answer,
-    // and a box that posts nowhere is worse than an absent one.
     if (!allowed) return el("div", { hidden: "hidden" });
-    const names = installed.map((handler) => handler.name.replace(/^agent\./, ""));
-    const chooser = el("select", { class: "input", id: "agentFinderAgent" },
-      names.map((name) => el("option", { value: name, text: name })));
-    const prompt = el("textarea", {
-      class: "input", id: "agentFinderPrompt", required: "required",
-      // The server refuses beyond this; saying so here stops a long paste
-      // where it is typed instead of after a round trip.
-      maxlength: "2000",
-      placeholder: i18n.t("agents.find.placeholder"),
-    });
-    const submit = el("button", {
-      class: "button primary", type: "submit",
-      text: i18n.t("agents.find.submit"),
-      disabled: names.length ? null : "disabled",
-    });
-    const problem = el("div", { class: "banner error", hidden: "hidden" });
-    const results = el("div", { class: "agent-finder-results" });
-
-    const form = el("form", { class: "panel agent-finder" }, [
-      el("h3", { text: i18n.t("agents.find.title") }),
-      el("p", { class: "muted", text: i18n.t("agents.find.hint") }),
-      problem, prompt,
-      el("div", { class: "agent-finder-actions" }, [chooser, submit]),
-      results,
+    return el("div", { class: "agent-finder-launch" }, [
+      el("button", {
+        class: "button", type: "button", id: "agentFinderOpen",
+        text: i18n.t("agents.find.open"),
+        // The same shell the Workflow detail opens in, so this reads as part
+        // of the application rather than a second kind of modal: scrim under
+        // the topbar, Escape and a scrim click both closing, the page behind
+        // held still.
+        onclick: () => {
+          const { panel, dismiss } = openPageModal({
+            label: i18n.t("agents.find.title"),
+            // Every other caller walks back to the route that owned it. This
+            // one has no address — it opens over the Agents page and closing
+            // leaves you there — so `back` is one that never matches rather
+            // than a route that does not exist.
+            back: { matches: () => false, route: null },
+          });
+          panel.classList.add("agent-finder-panel");
+          panel.replaceChildren(agentFinder(allowed, dismiss, panel));
+        },
+      }),
     ]);
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      if (!prompt.value.trim() || !prompt.reportValidity()) return;
-      submit.disabled = true;
-      problem.hidden = true;
-      results.replaceChildren(el("div", {
-        class: "muted",
-        text: i18n.t("agents.find.searching", { agent: chooser.value }),
-      }));
-      try {
-        const { data } = await api.execute(
-          allowed,
-          { prompt: prompt.value.trim(), agent: chooser.value },
-          // Each press is a fresh look, so each gets its own key rather than
-          // replaying the previous answer.
-          `agent.proposal.probe:${Date.now()}`,
-        );
-        results.replaceChildren(...agentFinderResults(data));
-      } catch (error) {
-        results.replaceChildren();
-        problem.hidden = false;
-        problem.textContent = error?.message || String(error);
-      } finally {
-        submit.disabled = false;
-      }
-    });
-    return form;
   }
+
+  function agentFinder(allowed, close, panel) {
+    let writerAgent = defaultGenerationAgent();
+    const closeButton = el("button", {
+      class: "goal-modal-close", type: "button",
+      "aria-label": i18n.t("action.close"), title: i18n.t("action.close"),
+      onclick: () => close(),
+    }, [
+      svgEl("svg", {
+        viewBox: "0 0 24 24", width: "16", height: "16",
+        "aria-hidden": "true", fill: "none", stroke: "currentColor",
+        "stroke-width": "1.8", "stroke-linecap": "round",
+      }, [
+        svgEl("path", { d: "M6 6l12 12" }),
+        svgEl("path", { d: "M18 6L6 18" }),
+      ]),
+    ]);
+    const stage = el("div", { class: "agent-finder-stage" });
+    const shell = el("div", { class: "agent-finder" }, [
+      el("div", { class: "agent-finder-head" }, [
+        el("h3", { text: i18n.t("agents.find.title") }),
+        closeButton,
+      ]),
+      stage,
+    ]);
+
+    const outputBlock = (output) => {
+      const hasOutput = typeof output === "string" && output.length > 0;
+      return el("div", {
+        class: `agent-finder-output ${hasOutput ? "has-output" : "waiting"}`,
+        "aria-live": "polite",
+      }, [el("pre", {
+        class: "mono",
+        text: hasOutput ? output : i18n.t("agents.find.outputWaiting"),
+      })]);
+    };
+    const renderFailure = (message, output = "") => {
+      stage.replaceChildren(...[
+        output ? outputBlock(output) : null,
+        el("h4", { class: "agent-finder-status-title", text: i18n.t("agents.find.failure") }),
+        el("div", { class: "banner error", text: message }),
+        el("div", { class: "actions agent-finder-actions" }, [el("button", {
+          class: "button primary", type: "button", text: i18n.t("action.retry"),
+          onclick: () => renderInitial(),
+        })]),
+      ].filter(Boolean));
+    };
+    const renderSuccess = (data) => {
+      const added = (data.proposals || []).filter(
+        (item) => item.verdict === "proposable" || item.verdict === "already_trusted",
+      );
+      const detail = added.map((item) => i18n.t("agents.find.successDetail", {
+        agent: item.executable, version: item.version || "—",
+      })).join("\n");
+      stage.replaceChildren(
+        outputBlock(data.agent_output),
+        el("h4", { class: "agent-finder-status-title", text: i18n.t("agents.find.success") }),
+        el("div", { class: "banner success agent-finder-success-detail", text: detail }),
+        el("div", { class: "actions agent-finder-actions" }, [el("button", {
+          class: "button primary", type: "button", text: i18n.t("action.confirm"),
+          onclick: async () => { close(); await render(); },
+        })]),
+      );
+    };
+    const renderInitial = () => {
+      writerAgent = defaultGenerationAgent();
+      panel?.classList.remove("has-patch");
+      const prompt = el("textarea", {
+        class: "input", id: "agentFinderPrompt", required: "required", maxlength: "2000",
+        "aria-label": i18n.t("agents.find.promptLabel"),
+        placeholder: i18n.t("agents.find.placeholder"),
+      });
+      const writerField = generationAgentField(
+        "agentFinderAgent", writerAgent, (value) => { writerAgent = value; },
+        i18n.t("agents.find.executorLabel"),
+      );
+      const form = el("form", { class: "agent-finder-form" }, [
+        el("p", { class: "muted agent-finder-hint", text: i18n.t("agents.find.hint") }),
+        writerField,
+        el("div", { class: "field agent-finder-field" }, [
+          el("label", { for: "agentFinderPrompt", text: i18n.t("agents.find.promptLabel") }), prompt,
+        ]),
+        el("div", { class: "actions agent-finder-actions" }, [el("button", {
+          class: "button primary", type: "submit", text: i18n.t("agents.find.submit"),
+        })]),
+      ]);
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        if (!prompt.value.trim() || !prompt.reportValidity()) return;
+        const chosenAgent = writerAgent;
+        const request = prompt.value.trim();
+        let liveOutput = outputBlock("");
+        stage.replaceChildren(
+          el("p", { class: "agent-finder-running", text: i18n.t("agents.find.searching", { agent: chosenAgent }) }),
+          liveOutput,
+        );
+        try {
+          let { data } = await api.execute(
+            allowed, { prompt: request, agent: chosenAgent, apply: true },
+            `agent.proposal.probe:${Date.now()}`,
+          );
+          while (["queued", "running"].includes(data.status)) {
+            await new Promise((resolve) => setTimeout(resolve, 5000));
+            if (!shell.isConnected) return;
+            data = (await api.get(data.status_href)).data;
+            const nextOutput = outputBlock(data.agent_output || "");
+            liveOutput.replaceWith(nextOutput);
+            liveOutput = nextOutput;
+            if (data.status === "failed") throw new Error(data.error || i18n.t("error.generic"));
+          }
+          if (data.status === "failed") throw new Error(data.error || i18n.t("error.generic"));
+          if (data.result) data = data.result;
+          const succeeded = data.applied || data.proposals?.some(
+            (item) => item.verdict === "already_trusted",
+          );
+          if (succeeded) renderSuccess(data);
+          else renderFailure(
+            data.proposals?.[0]?.detail || i18n.t("agents.find.noCandidates"),
+            data.agent_output,
+          );
+        } catch (error) {
+          renderFailure(error?.message || String(error));
+        }
+      });
+      stage.replaceChildren(form);
+    };
+    renderInitial();
+    return shell;
+  }
+
+  const AGENT_VERDICT_TONE = {
+    proposable: "blue", already_trusted: "green", unpinned: "amber",
+    not_installed: "", refused: "red",
+  };
 
   function agentFinderResults(data) {
     const out = [];
-    if (data.asked_agent) {
-      out.push(el("p", {
-        class: "muted",
-        text: i18n.t("agents.find.asked", { agent: data.asked_agent }),
-      }));
-    }
+    if (data.applied) out.push(el("div", {
+      class: "banner success",
+      text: i18n.t(data.restart_required
+        ? "agents.find.appliedRestart" : "agents.find.applied"),
+    }));
+    if (data.asked_agent) out.push(el("p", {
+      class: "muted",
+      text: i18n.t("agents.find.asked", { agent: data.asked_agent }),
+    }));
     if (!data.proposals.length) {
       out.push(el("div", { class: "muted", text: i18n.t("agents.find.noCandidates") }));
       return out;
@@ -1922,7 +2244,7 @@ export function createViews(context) {
       el("li", { class: `agent-finder-item verdict-${item.verdict}` }, [
         el("span", { class: "mono", text: item.executable }),
         el("span", {
-          class: "agent-stat-pill",
+          class: `pill ${AGENT_VERDICT_TONE[item.verdict] || ""}`,
           text: i18n.t(`agents.verdict.${item.verdict}`),
         }),
         el("span", { class: "muted", text: item.version || "" }),
@@ -2431,9 +2753,11 @@ export function createViews(context) {
             ]),
             el("div", { class: "actions" }, [
               // Which version is being edited, and nothing about how the work
-              // is going: the panel below owns that, and a header saying
-              // "awaiting an instruction" while the panel says the Agent is
-              // working was two answers to one question.
+              // is going: the panel below owns that. It is no longer drawn —
+              // in the header it sat beside the only control up here and read
+              // like a second one — but it stays in the accessibility tree,
+              // because a reader who cannot see the workflow page behind this
+              // one has nowhere else to learn it. See .workflow-editing-version.
               editingVersion,
               el("button", {
                 class: "button", id: "closeWorkflowEditor",
@@ -3106,6 +3430,7 @@ export function createViews(context) {
       );
       const prompt = el("textarea", {
         class: "mono workflow-modify-input", required: "required", maxlength: "4000",
+        "aria-labelledby": "workflowModifyTitle",
         placeholder: i18n.t("editor.agentPromptPlaceholder"),
         text: promptText,
       });
@@ -3117,33 +3442,38 @@ export function createViews(context) {
         promptText = prompt.value.trim();
         submit(mode);
       };
+      // The box says what to put in it and the button sits in the box: the
+      // heading and the sentence above it were a third and fourth way of
+      // saying "type the change here". Both stay for a screen reader, which
+      // has no placeholder to read.
       return [
         writerField,
-        // An "authored by" section over a titled prompt section whose textarea
-        // carries a syntax hint.
         el("section", { class: "workflow-modify-prompt" }, [
-          el("h3", { class: "field-label", text: i18n.t("editor.agentPromptTitle") }),
-          el("p", { class: "muted", text: i18n.t("editor.agentPromptHint") }),
+          el("h3", {
+            class: "field-label sr-only", id: "workflowModifyTitle",
+            text: i18n.t("editor.agentPromptTitle"),
+          }),
+          el("p", { class: "sr-only", text: i18n.t("editor.agentPromptHint") }),
           el("div", { class: "workflow-modify-input-wrap" }, [
             prompt,
             el("span", {
               class: "workflow-modify-syntax", text: i18n.t("editor.promptSyntaxHint"),
             }),
+            el("div", { class: "actions workflow-modify-actions" }, [
+              el("button", {
+                type: "button", class: "button primary",
+                text: i18n.t("editor.agentRevise"), onclick: start("modify"),
+              }),
+              regenerateOffered ? el("button", {
+                type: "button", class: "button", id: "regenerateWorkflow",
+                text: i18n.t("simplified.workflow.regenerate"), onclick: start("regenerate"),
+              }) : null,
+            ].filter(Boolean)),
           ]),
         ]),
         regenerateOffered ? el("p", {
           class: "muted", text: i18n.t("simplified.workflow.regenerate.hint"),
         }) : null,
-        el("div", { class: "actions" }, [
-          el("button", {
-            type: "button", class: "button primary",
-            text: i18n.t("editor.agentRevise"), onclick: start("modify"),
-          }),
-          regenerateOffered ? el("button", {
-            type: "button", class: "button", id: "regenerateWorkflow",
-            text: i18n.t("simplified.workflow.regenerate"), onclick: start("regenerate"),
-          }) : null,
-        ].filter(Boolean)),
       ].filter(Boolean);
     };
 
@@ -3260,6 +3590,6 @@ export function createViews(context) {
     renderSimplifiedWorkspace, renderHistory, renderWorkflows, openWorkflowModal,
     openGoalModal, reopenGoalModal,
     renderWorkflowEdit, renderAgents, refreshRuntimeCard,
-    syncRefreshIntervalSelect, saveRefreshInterval, scheduleLivePolling,
+    scheduleLivePolling,
   };
 }
