@@ -850,6 +850,48 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         page.wait_for_selector(".simplified-run-hero")
         self.assertIn(run_id, page.locator(".simplified-run-hero").inner_text())
 
+    def test_a_settling_run_re_reads_itself_rather_than_the_whole_history(
+        self,
+    ) -> None:
+        """History holds every run, so a live tick must not fetch every run.
+
+        The list is loaded in full on arrival — that is what lets the search
+        box match a workflow's name, which the server's query cannot. It made
+        every background refresh a full re-page of the history, and the cost
+        of that grows with the archive. `/live` names the runs that moved, and
+        a run already drawn keeps its place, so each one is re-read on its own.
+        """
+
+        waiting = self.start_goal(
+            "history-incremental", "Wait to be settled", "workflow:human",
+        )
+        page = self.open("en-US", "/ui/#/goals")
+        page.wait_for_selector(".history-goal-row")
+        # Drawn once, from the full read this test is about avoiding a repeat
+        # of. Everything counted below happens after that.
+        page.wait_for_timeout(500)
+        paged: list[str] = []
+        single: list[str] = []
+        page.on("request", lambda request: (
+            paged.append(request.url) if "/langgraph-runs?" in request.url
+            else single.append(request.url)
+            if "/langgraph-runs/" in request.url
+            and request.url.endswith(quote(waiting, safe=""))
+            else None
+        ))
+
+        self.cancel_goal(waiting)
+        # One tick of the shell's own chain, plus room for the read it makes.
+        page.wait_for_timeout(19_000)
+
+        self.assertTrue(
+            single, "the settled run was never re-read on its own"
+        )
+        self.assertEqual(
+            [], paged,
+            "a run that was already on the page re-paged the whole history",
+        )
+
     def test_history_reads_one_page_rather_than_two_calls_per_row(self) -> None:
         """Twenty-five rows must not become fifty-one requests."""
 

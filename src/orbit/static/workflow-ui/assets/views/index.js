@@ -1135,18 +1135,40 @@ export function createViews(context) {
     // A run settling puts a row here; a workflow renamed puts a new word in
     // one. An Agent's output chunk and a node event inside a run that is still
     // going put nothing here at all — and those are the two that move most.
-    livePatch = async (parts) => {
+    livePatch = async (parts, changedRunIds) => {
       if (!liveTouches(parts, ["engine_updated", "audit_position"])) return true;
       // A goal detail is open over this list, and it is not this patch's to
       // refresh — redrawing only the rows behind it would leave the thing
       // being read stale, which is worse than the redraw it replaced. The
       // render path knows how to rebuild the list and re-attach the drawer.
       if (goalModalRunId) return false;
-      let fresh;
+      /* Re-read only what moved, when the tick can say what that was.
+         `created_at` orders this list and settling does not change it, so a
+         run already drawn can be fetched on its own and dropped back into its
+         own place. Three cases page the lot instead, because each needs a
+         position or a membership only the server knows: a tick that named no
+         run, one that named more than a page of them, and one that named a
+         run this list has never drawn — which is also how a status filter
+         admitting a newly finished run comes out. */
+      const known = new Map(runs.map((run, index) => [run.run_id, index]));
+      const touched = [...(changedRunIds || [])];
+      const incremental = touched.length > 0
+        && touched.length <= 25
+        && touched.every((runId) => known.has(runId));
       let catalog;
+      let refreshed = null;
+      let reloaded = null;
       try {
-        [fresh, catalog] = await Promise.all([
-          loadAllRuns(requestedStatus), api.workflowCatalog(),
+        // The names come from the catalog either way: a Workflow renamed puts
+        // a new word in rows whose runs have not moved at all.
+        [catalog, refreshed, reloaded] = await Promise.all([
+          api.workflowCatalog(),
+          incremental
+            ? Promise.all(touched.map(
+              (runId) => api.langGraphRun(runId).then((answer) => answer.data),
+            ))
+            : Promise.resolve(null),
+          incremental ? Promise.resolve(null) : loadAllRuns(requestedStatus),
         ]);
       } catch (error) {
         return false;
@@ -1155,10 +1177,15 @@ export function createViews(context) {
       // view has already drawn itself, so there is nothing to do and nothing
       // to hand back.
       if (!list.isConnected) return true;
-      // The incomplete-read warning is a banner this view appends once, above
-      // the list; a patch has nowhere to put it. Hand the page back instead.
-      if (!fresh.complete) return false;
-      runs = fresh.runs;
+      if (refreshed) {
+        runs = runs.slice();
+        for (const run of refreshed) runs[known.get(run.run_id)] = run;
+      } else {
+        // The incomplete-read warning is a banner this view appends once,
+        // above the list; a patch has nowhere to put it. Hand the page back.
+        if (!reloaded.complete) return false;
+        runs = reloaded.runs;
+      }
       workflowNames = new Map(
         catalog.data.workflows.map((item) => [item.workflow_id, item.name]),
       );
@@ -1501,13 +1528,23 @@ export function createViews(context) {
             // History and the catalog redraw their own list and leave the
             // page around it standing. Whatever cannot say yes hands the
             // view back, so a wrong answer still costs only a redraw.
+            // What this pass is answering for. Anything that arrives while
+            // it is away stays queued: the point of the queue is that a held
+            // view must not make an event disappear.
+            const consumed = new Set(pendingRunChanges.map((item) => item.run_id));
             const patched = liveRun
               ? await patchLiveRun()
-              : livePatch ? await livePatch(live.changed_parts) : false;
+              : livePatch ? await livePatch(live.changed_parts, consumed) : false;
             if (!patched) {
               await render();
-              pendingRunChanges = [];
             }
+            // Cleared whichever way it was handled. Clearing only on the
+            // redraw left a patching view re-handling the same events every
+            // tick for as long as it stayed open, and then, on the way back
+            // to Home, navigating to a Run that had finished long ago.
+            pendingRunChanges = pendingRunChanges.filter(
+              (item) => !consumed.has(item.run_id),
+            );
           }
         }
       } catch (error) {
