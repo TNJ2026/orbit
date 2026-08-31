@@ -109,11 +109,63 @@ def build_routes(ctx) -> list[Route]:
             previous = decode_cursor(request.query_params.get("cursor"))
         except CursorError as exc:
             return error("invalid_cursor", str(exc))
+        run_changes = []
+        events_after = getattr(ctx.langgraph_service, "events_after", None)
+        events = ()
+        previous_position = previous.get("event_position")
+        if (
+            previous
+            and events_after is not None
+            and isinstance(previous_position, int)
+            and not isinstance(previous_position, bool)
+            and previous_position >= 0
+        ):
+            # `/live` used to say only that *something* changed.  A Run started
+            # by MCP could begin and finish between two UI polls; by the time
+            # the Home view refreshed there was no active Run left to discover.
+            # Carry the bounded event identities already covered by this cursor
+            # so clients can open the exact Run even after it has settled.
+            latest_by_run = {}
+            events = events_after(previous_position, limit=500)
+            for item in events:
+                latest_by_run[item["run_id"]] = {
+                    "run_id": item["run_id"],
+                    "event_type": item["event_type"],
+                    "position": int(item["position"]),
+                }
+            run_changes = sorted(
+                latest_by_run.values(), key=lambda item: item["position"],
+            )
         marker = ctx.change_marker()
+        # Advance the event part of the opaque cursor only through events this
+        # response actually returned. This preserves a retry point when the
+        # bounded read is full, and also closes the race where a new event is
+        # appended while the marker is being assembled.
+        if previous and isinstance(previous_position, int) and not isinstance(
+            previous_position, bool
+        ) and previous_position >= 0 and events_after is not None:
+            marker = dict(marker)
+            marker["event_position"] = (
+                int(events[-1]["position"]) if events else previous_position
+            )
         cursor = encode_cursor(marker)
+        # Which part of the marker moved, not only that one did. `changed`
+        # alone made every client re-read everything it draws: one chunk of an
+        # Agent's output moved the same boolean as a run settling, so a page
+        # listing finished runs paged the whole history again to find nothing
+        # new in it. The names are the marker's own keys; a client that does
+        # not recognise one is expected to refresh as it always did, so this
+        # can gain a part without breaking a reader that predates it.
+        changed_parts = sorted(
+            key
+            for key in set(marker) | set(previous or {})
+            if (previous or {}).get(key) != marker.get(key)
+        ) if previous else []
         return JSONResponse(envelope({
             "cursor": cursor,
             "changed": bool(previous) and previous != marker,
+            "changed_parts": changed_parts,
+            "run_changes": run_changes,
             "observed_at": ctx.now().isoformat(),
         }))
 

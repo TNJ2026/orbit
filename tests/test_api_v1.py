@@ -2154,6 +2154,13 @@ class OperationsReadTests(ApiTestCase):
                 f"/api/v1/live?cursor={initial['cursor']}", actor="reader"
             ).json()["data"]
             self.assertTrue(changed["changed"])
+            self.assertEqual(
+                [started.json()["data"]["run"]["run_id"]],
+                [item["run_id"] for item in changed["run_changes"]],
+            )
+            self.assertTrue(changed["run_changes"][0]["event_type"].startswith(
+                "langgraph_run."
+            ))
 
     def test_live_cursor_moves_when_authoring_progress_is_written(self) -> None:
         with AsgiHarness(self.app) as client:
@@ -2183,6 +2190,30 @@ class OperationsReadTests(ApiTestCase):
                 f"/api/v1/live?cursor={before['cursor']}", actor="reader",
             ).json()["data"]
             self.assertTrue(after["changed"])
+            # And it says which part moved. A client drawing finished runs
+            # re-read its whole list on this tick while `changed` was the only
+            # thing it had to go on; naming the parts is what lets it decline.
+            self.assertEqual(
+                ["authoring_output_position", "authoring_updated"],
+                after["changed_parts"],
+            )
+
+    def test_live_cursor_names_the_engine_when_a_run_moves(self) -> None:
+        """The other half of the discrimination: a run is not an Agent's output."""
+
+        with AsgiHarness(self.app) as client:
+            before = client.get("/api/v1/live", actor="reader").json()["data"]
+            self.assertEqual([], before["changed_parts"])
+            started = client.post(
+                "/api/v1/langgraph-runs", actor="writer", key="live-parts-run",
+                body={"workflow_id": "workflow:linear", "input": {"value": 1}},
+            )
+            self.assertEqual(200, started.status_code, started.text)
+            after = client.get(
+                f"/api/v1/live?cursor={before['cursor']}", actor="reader",
+            ).json()["data"]
+            self.assertIn("engine_updated", after["changed_parts"])
+            self.assertNotIn("authoring_output_position", after["changed_parts"])
 
     def test_operator_can_watch_another_apps_job_without_its_commands(self) -> None:
         with connect_workflow_database(self.db) as connection:
