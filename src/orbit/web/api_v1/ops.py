@@ -12,6 +12,7 @@ from starlette.routing import Route
 from ...workflow.api.dto import CursorError, decode_cursor, encode_cursor, envelope
 from ...workflow.domain.serialization import to_primitive
 from ...workflow.persistence.database import connect_workflow_database
+from ..run_visibility import reading_actor
 
 from .common import (
     OPS_READ_SCOPE, OPS_WRITE_SCOPE, READ_SCOPE, WRITE_SCOPE,
@@ -126,7 +127,14 @@ def build_routes(ctx) -> list[Route]:
             # Carry the bounded event identities already covered by this cursor
             # so clients can open the exact Run even after it has settled.
             latest_by_run = {}
-            events = events_after(previous_position, limit=500)
+            # Through the same question every other Run read asks, and for the
+            # same reason: the Workspace is the boundary and which Runtime you
+            # reached is what enforces it. The answer is nobody today, so this
+            # changes nothing — but `/live` was the one Run read whose call
+            # site did not say which rule it was following.
+            events = events_after(
+                previous_position, limit=500, actor=reading_actor(actor),
+            )
             for item in events:
                 latest_by_run[item["run_id"]] = {
                     "run_id": item["run_id"],

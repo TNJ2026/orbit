@@ -2969,6 +2969,33 @@ class WorkspaceScopedReadsTests(ApiTestCase):
                 )
                 self.assertEqual(200, answered.status_code, path)
 
+    def test_live_reports_the_Workspace_whoever_is_watching(self) -> None:
+        """`/live` reads Runs, so it reads them under the one rule.
+
+        Raised as a leak — `/live` names Run ids the caller did not start.
+        It is the rule: a Runtime serves one Workspace, that is the boundary,
+        and every other Run read answers the same way (see the test above).
+        Pinned here because a reviewer cannot tell a deliberate policy from an
+        oversight by reading the call site, and because if the rule ever does
+        change this is where `/live` has to change with it.
+        """
+
+        with AsgiHarness(self.app) as client:
+            before = client.get("/api/v1/live", actor="reader").json()["data"]
+            started = self._started_by(client, "writer", "watched-by-another")
+            after = client.get(
+                f"/api/v1/live?cursor={before['cursor']}", actor="reader",
+            ).json()["data"]
+            self.assertEqual(
+                [started["run_id"]],
+                [item["run_id"] for item in after["run_changes"]],
+            )
+            # And the scope still gates it: watching is a read, not a right
+            # every caller has.
+            self.assertEqual(
+                403, client.get("/api/v1/live", actor="no-scope").status_code,
+            )
+
     def test_asking_for_an_owner_is_asking_for_what_already_happens(self) -> None:
         """The parameter is gone rather than accepted and ignored.
 
