@@ -5,7 +5,15 @@ description = "Local durable workflow runtime for agent work"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    # Borrowed from starlette until now, but `web.api_v1.common` calls
+    # anyio.to_thread.run_sync itself — the same reason pydantic is declared
+    # below. Only to_thread is used, which anyio has had since 3.0.
+    "anyio>=3.6.2,<5",
     "jsonschema>=4.23",
+    # langgraph's own dependency, but `langgraph_runtime.compiler` imports
+    # RunnableConfig from it directly, so it is declared here too. The major
+    # is pinned to langgraph's, which carries the tighter floor.
+    "langchain-core>=1.0,<2",
     "langgraph>=1.0,<2",
     "langgraph-checkpoint-sqlite>=3.0,<4",
     # Declared rather than borrowed. langgraph already requires pydantic, so
