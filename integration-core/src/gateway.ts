@@ -1,20 +1,17 @@
-import { spawn, type ChildProcess } from 'node:child_process'
-import { createHash, randomUUID } from 'node:crypto'
-import { open, realpath, stat } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
+import { open, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AuthoringJob, AuthoringOutputPage, GenerateAndRunOptions, GenerateAndRunResult, WorkspaceRef, RunDto } from './types.js'
 import { decodeRun, decodeToolResult } from './codecs.js'
 
 interface DiscoveredRuntime { project_root?: string; transport?: string; mcp_url?: string; base_url?: string }
-interface Managed { mcpUrl: string; baseUrl: string; nextId: number; capabilities: Record<string, unknown> }
+interface Managed { mcpUrl: string; baseUrl: string; uiUrl: string; nextId: number; capabilities: Record<string, unknown> }
 type Fetch = typeof globalThis.fetch
 class OrbitTransportError extends Error {}
 const STARTUP_TIMEOUT_MS = 10_000
 const STARTUP_POLL_MS = 100
-/* Enough of the end of a failed start to carry a Python traceback's last
-   frames and its exception line, which is the part that says what happened. */
-const STARTUP_LOG_TAIL_BYTES = 4096
 export interface GatewayDiagnostics {
   discoveryAttempts: number
   rpcCalls: number
@@ -47,6 +44,7 @@ export class OrbitGateway {
     private readonly commandPrefix: readonly string[] = [],
     private readonly fetchImpl: Fetch = globalThis.fetch,
     private readonly discoveryRoot = process.env.ORBIT_RUNTIME_ROOT || undefined,
+    private readonly hubUrl = process.env.ORBIT_HUB_URL || 'http://127.0.0.1:8848',
   ) {}
 
   diagnostics(): GatewayDiagnostics {
@@ -141,17 +139,10 @@ export class OrbitGateway {
     return decodeToolResult(name, envelope.structuredContent)
   }
 
-  /**
-   * Where a person reads this Runtime, as the Runtime itself reports it.
-   *
-   * Never assembled from the MCP endpoint: the two are published together by
-   * the process that owns the database, and guessing one from the other would
-   * survive exactly until they differ.
-   */
+  /** Stable Hub UI namespace for this Workspace. */
   async uiUrl(workspace: WorkspaceRef): Promise<string> {
     const runtime = await this.runtime(workspace)
-    if (!runtime.baseUrl) throw new Error('Orbit Runtime did not publish a browser address')
-    return `${runtime.baseUrl.replace(/\/$/, '')}/ui/`
+    return runtime.uiUrl
   }
 
   /**
@@ -301,15 +292,16 @@ export class OrbitGateway {
   }
 
   private async connect(workspaceRoot: string, startIfMissing: boolean): Promise<Managed> {
-    let discovered = await this.discover(workspaceRoot)
-      ?? (startIfMissing ? await this.startAndDiscover(workspaceRoot) : undefined)
-    if (discovered === undefined) throw new Error(
-      `No independent Orbit Runtime is serving Workspace ${workspaceRoot}`,
-    )
+    const workspaceId = await this.registerWorkspace(workspaceRoot)
+    const hub = this.hubUrl.replace(/\/$/, '')
+    const mcpUrl = `${hub}/workspaces/${workspaceId}/mcp`
     const deadline = Date.now() + STARTUP_TIMEOUT_MS
+    let started = false
     while (true) {
+      const discovered = await this.discover(workspaceRoot)
       const runtime: Managed = {
-        mcpUrl: discovered.mcp_url!, baseUrl: discovered.base_url ?? '',
+        mcpUrl, baseUrl: discovered?.base_url ?? '',
+        uiUrl: `${hub}/workspaces/${workspaceId}/ui/`,
         nextId: 1, capabilities: {},
       }
       try {
@@ -321,15 +313,60 @@ export class OrbitGateway {
         if (runtime.capabilities.integration_protocol !== 'orbit-harness/1') throw new Error('incompatible Orbit integration protocol')
         this.telemetry.lastConnectedAt = new Date().toISOString()
         this.telemetry.lastTransportError = undefined
+        const ready = await this.discover(workspaceRoot)
+        runtime.baseUrl = ready?.base_url ?? runtime.baseUrl
         return runtime
       } catch (error) {
-        // The owner publishes its address immediately before HTTP starts
-        // accepting connections. Auto-start treats that gap as readiness.
         if (!startIfMissing || !(error instanceof OrbitTransportError) || Date.now() >= deadline) throw error
+        if (!started) {
+          await this.startHub()
+          started = true
+        }
         await new Promise(resolve => setTimeout(resolve, STARTUP_POLL_MS))
-        discovered = await this.discover(workspaceRoot) ?? discovered
       }
     }
+  }
+
+  private async registerWorkspace(workspaceRoot: string): Promise<string> {
+    const output = await this.runOrbit(['hub', 'register', workspaceRoot], workspaceRoot)
+    try {
+      const value = JSON.parse(output) as { workspace_id?: unknown }
+      if (typeof value.workspace_id === 'string' && value.workspace_id) return value.workspace_id
+    } catch {}
+    throw new Error('Orbit Hub workspace registration returned invalid JSON')
+  }
+
+  private async runOrbit(args: readonly string[], cwd: string): Promise<string> {
+    return await new Promise<string>((resolve, reject) => {
+      const child = spawn(this.command, [...this.commandPrefix, ...args], {
+        cwd, stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      let stdout = '', stderr = ''
+      child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => { stdout += chunk })
+      child.stderr.setEncoding('utf8'); child.stderr.on('data', chunk => { stderr += chunk })
+      child.once('error', reject)
+      child.once('exit', code => code === 0 ? resolve(stdout) : reject(new Error(
+        `Orbit command failed: ${args.join(' ')} (code ${String(code)})${stderr ? `: ${stderr.trim()}` : ''}`,
+      )))
+    })
+  }
+
+  private async startHub(): Promise<void> {
+    const url = new URL(this.hubUrl)
+    if (url.protocol !== 'http:' || !['127.0.0.1', 'localhost', '::1'].includes(url.hostname)) {
+      throw new Error(`Orbit Hub auto-start requires a loopback HTTP URL: ${this.hubUrl}`)
+    }
+    const port = url.port ? Number(url.port) : 80
+    const log = await open(join(tmpdir(), `dsh-orbit-hub-${String(port)}.log`), 'w')
+    try {
+      const child = spawn(this.command, [
+        ...this.commandPrefix, 'hub', 'serve', '--host', url.hostname, '--port', String(port),
+      ], { detached: true, stdio: ['ignore', log.fd, log.fd] })
+      await new Promise<void>((resolve, reject) => {
+        child.once('spawn', resolve); child.once('error', reject)
+      })
+      child.unref()
+    } finally { await log.close() }
   }
 
   private async discover(workspaceRoot: string): Promise<DiscoveredRuntime | undefined> {
@@ -353,104 +390,10 @@ export class OrbitGateway {
     try { entries = JSON.parse(output) as DiscoveredRuntime[] }
     catch { throw new Error('Orbit Runtime discovery returned invalid JSON') }
     if (!Array.isArray(entries)) throw new Error('Orbit Runtime discovery must return an array')
-    const matches = entries.filter(entry => entry.project_root === workspaceRoot && entry.mcp_url)
+    const matches = entries.filter(entry => entry.project_root === workspaceRoot && entry.base_url)
     if (matches.length === 0) return undefined
     if (matches.length > 1) throw new Error(`Multiple Orbit Runtimes claim Workspace ${workspaceRoot}`)
-    if (matches[0].transport !== 'http') throw new Error('Orbit Runtime is not reachable over HTTP MCP')
     return matches[0]
-  }
-
-  private async startAndDiscover(workspaceRoot: string): Promise<DiscoveredRuntime> {
-    const logPath = this.startupLogPath(workspaceRoot)
-    const child = await this.startRuntime(workspaceRoot)
-    const deadline = Date.now() + STARTUP_TIMEOUT_MS
-    while (Date.now() < deadline) {
-      // Discover first: the process may have published its endpoint just before
-      // an unrelated late shutdown, and that endpoint is still the useful fact.
-      const discovered = await this.discover(workspaceRoot)
-      if (discovered !== undefined) return discovered
-      if (child.exitCode !== null) throw new Error(
-        `Orbit Runtime auto-start failed with code ${String(child.exitCode)} `
-        + `for Workspace ${workspaceRoot}${await this.startupLogTail(logPath)}`,
-      )
-      await new Promise(resolve => setTimeout(resolve, STARTUP_POLL_MS))
-    }
-    // Still running, just not answering: its own output is the only account of
-    // what it spent the time on.
-    throw new Error(
-      `Orbit Runtime auto-start timed out for Workspace ${workspaceRoot}`
-      + `${await this.startupLogTail(logPath)}`,
-    )
-  }
-
-  /**
-   * Where a starting Runtime's stderr goes.
-   *
-   * Named for the Workspace so a second Workspace starting at the same moment
-   * writes somewhere else, and truncated on each attempt so what is read back
-   * is this start's output rather than a previous one's.
-   */
-  private startupLogPath(workspaceRoot: string): string {
-    const stem = createHash('sha256').update(workspaceRoot).digest('hex').slice(0, 12)
-    return join(tmpdir(), `dsh-orbit-runtime-${stem}.log`)
-  }
-
-  /**
-   * The end of a failed start, or nothing.
-   *
-   * Nothing is a real answer here: the file may not exist, may be empty, or
-   * may be unreadable, and none of those is worth replacing the exit code with
-   * an error about reading a log file.
-   */
-  private async startupLogTail(logPath: string): Promise<string> {
-    try {
-      const { size } = await stat(logPath)
-      if (size === 0) return ''
-      const handle = await open(logPath, 'r')
-      try {
-        const length = Math.min(size, STARTUP_LOG_TAIL_BYTES)
-        const buffer = Buffer.alloc(length)
-        await handle.read(buffer, 0, length, size - length)
-        const text = buffer.toString('utf8').trim()
-        return text ? `: ${text}` : ''
-      } finally { await handle.close() }
-    } catch { return '' }
-  }
-
-  /**
-   * Start a Runtime for this Workspace, keeping what it says on the way out.
-   *
-   * stderr goes to a file rather than to `'ignore'` or to a pipe. Discarding
-   * it left a failed start with nothing but an exit code — the panel could
-   * only say that something went wrong. A pipe would carry the text, but this
-   * child is detached and outlives the Host: nobody would be draining the pipe
-   * afterwards, and a Runtime that filled it would block on its own logging,
-   * or take an EPIPE when the Host exited. A file has neither problem, and the
-   * child holds its own descriptor once spawn has duplicated it.
-   */
-  private async startRuntime(workspaceRoot: string): Promise<ChildProcess> {
-    const log = await open(this.startupLogPath(workspaceRoot), 'w')
-    try {
-      const child = spawn(this.command, [
-        ...this.commandPrefix, 'serve', '--port', '0',
-        // `harness`, and written here rather than passed in: the only caller
-        // is the Harness. A Runtime's profile also decides whether it honours
-        // `x-orbit-actor` at all — `harness` installs the scoped authenticator
-        // under the `harness:session:` prefix, `full` ignores the header — so
-        // this is not a knob to turn without deciding about actors too.
-        '--project-root', workspaceRoot, '--mcp-tool-profile', 'harness',
-      ], {
-        cwd: workspaceRoot,
-        detached: true,
-        stdio: ['ignore', log.fd, log.fd],
-      })
-      await new Promise<void>((resolve, reject) => {
-        child.once('spawn', resolve)
-        child.once('error', reject)
-      })
-      child.unref()
-      return child
-    } finally { await log.close() }
   }
 
   private async rpc(runtime: Managed, method: string, params: object): Promise<unknown> {

@@ -68,6 +68,8 @@ export interface PanelError {
    call with a transport failure, and a workflow that was deleted is also a
    workflow that is not found. The more specific reading goes first. */
 const READINGS: readonly (readonly [RegExp, OrbitErrorKey])[] = [
+  [/Hub workspace registration returned invalid JSON|Orbit command failed/i, 'errDiscoveryFailed'],
+  [/Hub auto-start requires a loopback HTTP URL/i, 'errRuntimeAddress'],
   // The Runtime is not there. Nothing else can be true at the same time, and
   // it is the one a person can fix by opening the panel again.
   [/No independent Orbit Runtime is serving/i, 'errNoRuntime'],

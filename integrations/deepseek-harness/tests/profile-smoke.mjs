@@ -9,13 +9,14 @@ const here = dirname(fileURLToPath(import.meta.url))
 const bundle = resolve(here, '..')
 const installSpec = process.env.DSH_BUNDLE_SPEC || bundle
 const dsh = process.env.DSH_BIN || (process.platform === 'win32' ? 'dsh.cmd' : 'dsh')
+const dshPrefix = process.env.DSH_BIN_ARGS ? JSON.parse(process.env.DSH_BIN_ARGS) : []
 const home = await mkdtemp(resolve(tmpdir(), 'orbit-dsh-profile-'))
 const environment = { ...process.env, DSH_HOME: home }
 let web
 
 function run(args) {
   return new Promise((resolveRun, reject) => {
-    const child = spawn(dsh, args, { cwd: bundle, env: environment, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(dsh, [...dshPrefix, ...args], { cwd: bundle, env: environment, stdio: ['ignore', 'pipe', 'pipe'] })
     let stdout = '', stderr = ''
     child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => { stdout += chunk })
     child.stderr.setEncoding('utf8'); child.stderr.on('data', chunk => { stderr += chunk })
@@ -28,7 +29,7 @@ function run(args) {
 
 async function startWeb() {
   return await new Promise((resolveWeb, reject) => {
-    const child = spawn(dsh, ['web', '--port', '0'], {
+    const child = spawn(dsh, [...dshPrefix, 'web', '--port', '0'], {
       cwd: bundle, env: environment, stdio: ['ignore', 'pipe', 'pipe'],
     })
     let output = ''
@@ -73,7 +74,16 @@ try {
   assert.match(installed.stdout, /name: '@orbit-runtime\/dsh-orbit'/)
 
   web = await startWeb()
-  const response = await fetch(`${web.url}/`)
+  // alpha profiles put a one-time authentication token in the printed URL;
+  // appending a slash after its query string corrupts that token.
+  let response = await fetch(web.url, { redirect: 'manual' })
+  if (response.status >= 300 && response.status < 400) {
+    const location = response.headers.get('location') || '/'
+    const cookie = response.headers.get('set-cookie')?.split(';', 1)[0]
+    response = await fetch(new URL(location, web.url), {
+      headers: cookie ? { cookie } : {},
+    })
+  }
   assert.equal(response.status, 200)
   await stop(web.child); web = undefined
 

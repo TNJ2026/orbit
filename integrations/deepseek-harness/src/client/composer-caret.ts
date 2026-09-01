@@ -18,7 +18,7 @@
 /** The composer's textarea. `data-phase` is the input machine's own phase,
  *  written on the element it belongs to, so it marks a composer rather than
  *  any textarea a page happens to contain. */
-export const COMPOSER_SELECTOR = 'textarea[data-phase]'
+export const COMPOSER_SELECTOR = 'textarea[data-phase], [contenteditable="true"][data-phase]'
 
 /** How many frames to wait for the draft to arrive before giving up.
  *
@@ -74,12 +74,20 @@ export function caretToEnd(expected: string, attempts = CARET_ATTEMPTS): void {
   if (typeof document === 'undefined' || typeof requestAnimationFrame !== 'function') return
   const attempt = (left: number): void => {
     const found = [...document.querySelectorAll(COMPOSER_SELECTOR)]
-      .filter((node): node is HTMLTextAreaElement => node instanceof HTMLTextAreaElement)
+      .filter((node): node is HTMLTextAreaElement | HTMLElement =>
+        node instanceof HTMLTextAreaElement || node instanceof HTMLElement)
     const composer = pickComposer(found, document.activeElement)
-    if (composer !== null && draftHasLanded(composer.value, expected)) {
-      const end = composer.value.length
+    const value = composer instanceof HTMLTextAreaElement ? composer.value : composer?.textContent ?? ''
+    if (composer !== null && draftHasLanded(value, expected)) {
       composer.focus({ preventScroll: true })
-      composer.setSelectionRange(end, end)
+      if (composer instanceof HTMLTextAreaElement) {
+        composer.setSelectionRange(value.length, value.length)
+      } else {
+        const selection = composer.ownerDocument.getSelection()
+        const range = composer.ownerDocument.createRange()
+        range.selectNodeContents(composer); range.collapse(false)
+        selection?.removeAllRanges(); selection?.addRange(range)
+      }
       return
     }
     if (left > 0) requestAnimationFrame(() => { attempt(left - 1) })

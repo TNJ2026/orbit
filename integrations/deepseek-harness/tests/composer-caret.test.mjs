@@ -16,7 +16,7 @@ import {
 test('the composer is identified by the input machine\'s own attribute', () => {
   // Not `textarea`: a page may hold others, and only a composer carries the
   // phase the input machine writes on it.
-  assert.equal(COMPOSER_SELECTOR, 'textarea[data-phase]')
+  assert.equal(COMPOSER_SELECTOR, 'textarea[data-phase], [contenteditable="true"][data-phase]')
 })
 
 test('a focused composer wins, a lone one is taken, and a tie is refused', () => {

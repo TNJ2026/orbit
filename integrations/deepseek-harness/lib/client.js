@@ -102,6 +102,8 @@ window.__ModuleLoader__.load({
 		//#endregion
 		//#region ../../integration-core/lib/error-text.js
 		const READINGS = [
+			[/Hub workspace registration returned invalid JSON|Orbit command failed/i, "errDiscoveryFailed"],
+			[/Hub auto-start requires a loopback HTTP URL/i, "errRuntimeAddress"],
 			[/No independent Orbit Runtime is serving/i, "errNoRuntime"],
 			[/auto-start (failed|timed out)/i, "errStartFailed"],
 			[/Runtime discovery (failed|returned invalid JSON|must return an array)/i, "errDiscoveryFailed"],
@@ -2406,7 +2408,7 @@ window.__ModuleLoader__.load({
 		/** The composer's textarea. `data-phase` is the input machine's own phase,
 		*  written on the element it belongs to, so it marks a composer rather than
 		*  any textarea a page happens to contain. */
-		const COMPOSER_SELECTOR = "textarea[data-phase]";
+		const COMPOSER_SELECTOR = "textarea[data-phase], [contenteditable=\"true\"][data-phase]";
 		/**
 		* The composer to act on, or nothing.
 		*
@@ -2446,11 +2448,19 @@ window.__ModuleLoader__.load({
 		function caretToEnd(expected, attempts = 6) {
 			if (typeof document === "undefined" || typeof requestAnimationFrame !== "function") return;
 			const attempt = (left) => {
-				const composer = pickComposer([...document.querySelectorAll(COMPOSER_SELECTOR)].filter((node) => node instanceof HTMLTextAreaElement), document.activeElement);
-				if (composer !== null && draftHasLanded(composer.value, expected)) {
-					const end = composer.value.length;
+				const composer = pickComposer([...document.querySelectorAll(COMPOSER_SELECTOR)].filter((node) => node instanceof HTMLTextAreaElement || node instanceof HTMLElement), document.activeElement);
+				const value = composer instanceof HTMLTextAreaElement ? composer.value : composer?.textContent ?? "";
+				if (composer !== null && draftHasLanded(value, expected)) {
 					composer.focus({ preventScroll: true });
-					composer.setSelectionRange(end, end);
+					if (composer instanceof HTMLTextAreaElement) composer.setSelectionRange(value.length, value.length);
+					else {
+						const selection = composer.ownerDocument.getSelection();
+						const range = composer.ownerDocument.createRange();
+						range.selectNodeContents(composer);
+						range.collapse(false);
+						selection?.removeAllRanges();
+						selection?.addRange(range);
+					}
 					return;
 				}
 				if (left > 0) requestAnimationFrame(() => {

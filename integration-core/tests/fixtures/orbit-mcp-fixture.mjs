@@ -1,9 +1,14 @@
 import { createServer } from 'node:http'
+import { createHash } from 'node:crypto'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 const args = process.argv.slice(2)
-if (args.slice(-2).join(' ') === 'runtimes --json') {
+if (args[0] === 'hub' && args[1] === 'register') {
+  const root = args[2]
+  const workspace_id = createHash('sha256').update(root).digest('hex').slice(0, 12)
+  process.stdout.write(JSON.stringify({ workspace_id }))
+} else if (args.slice(-2).join(' ') === 'runtimes --json') {
   process.stdout.write(await readFile(join(process.cwd(), 'runtime.json'), 'utf8'))
 } else if (args[0] === 'serve') {
   const projectAt = args.indexOf('--project-root')

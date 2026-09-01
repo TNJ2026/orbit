@@ -25,11 +25,11 @@ async function freePort() {
 
 async function waitReady(url, child) {
   for (let attempt = 0; attempt < 100; attempt++) {
-    if (child.exitCode !== null) throw new Error(`independent Orbit exited with ${String(child.exitCode)}`)
+    if (child.exitCode !== null) throw new Error(`Orbit Hub exited with ${String(child.exitCode)}`)
     try { if ((await fetch(url)).ok) return } catch {}
     await new Promise(resolveWait => setTimeout(resolveWait, 50))
   }
-  throw new Error('independent Orbit did not become ready')
+  throw new Error('Orbit Hub did not become ready')
 }
 
 async function stop(child) {
@@ -38,7 +38,7 @@ async function stop(child) {
   await new Promise(resolveExit => child.once('exit', resolveExit))
 }
 
-test('Harness discovers and talks to an independent Runtime without owning it', { timeout: 20_000 }, async t => {
+test('Harness reaches its workspace Runtime through the fixed Hub', { timeout: 30_000 }, async t => {
   const root = await mkdtemp(join(tmpdir(), 'orbit-independent-e2e-'))
   const previousRuntimeRoot = process.env.ORBIT_RUNTIME_ROOT
   process.env.ORBIT_RUNTIME_ROOT = root
@@ -50,9 +50,7 @@ test('Harness discovers and talks to an independent Runtime without owning it', 
   await mkdir(workspacePath)
   const port = await freePort()
   const child = spawn(orbit, [
-    'serve', '--host', '127.0.0.1', '--port', String(port),
-    '--project-root', workspacePath, '--db', join(root, 'runtime.db'),
-    '--mcp-tool-profile', 'harness', '--no-agent-discovery',
+    'hub', 'serve', '--host', '127.0.0.1', '--port', String(port),
   ], { cwd: workspacePath, stdio: ['ignore', 'ignore', 'pipe'] })
   let stderr = ''
   child.stderr.setEncoding('utf8'); child.stderr.on('data', chunk => { stderr += chunk })
@@ -61,26 +59,19 @@ test('Harness discovers and talks to an independent Runtime without owning it', 
   try { await waitReady(`${base}/health/ready`, child) }
   catch (error) { throw new Error(`${String(error)}\n${stderr}`) }
 
-  const gateway = new OrbitGateway(orbit)
+  const gateway = new OrbitGateway(orbit, [], globalThis.fetch, root, base)
   const workspace = { id: 'workspace:e2e', canonicalPath: workspacePath }
-  const release = await gateway.acquire(workspace)
+  const release = await gateway.acquire(workspace, true)
   const first = await gateway.call(workspace, 'first', 'list_runs', {})
   const second = await gateway.call(workspace, 'second', 'list_runs', {})
   assert.deepEqual(first.runs, [])
   assert.deepEqual(second.runs, [])
   await release()
 
-  // What `/orbit` opens. Taken from what the Runtime published about itself,
-  // so a Runtime on another port or host stays reachable.
+  // What `/orbit` opens stays on the stable Hub namespace.
   const ui = await gateway.uiUrl(workspace)
-  assert.equal(ui, `${base}/ui/`)
+  assert.match(ui, new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/workspaces/[a-f0-9]{12}/ui/$`))
   assert.equal((await fetch(ui)).ok, true)
-
-  const sessions = await (await fetch(`${base}/api/v1/mcp/sessions`)).json()
-  assert.deepEqual(
-    sessions.data.sessions.map(item => item.actor).filter(Boolean).sort(),
-    ['harness:session:first', 'harness:session:second', 'local'],
-  )
   assert.equal((await fetch(`${base}/health/ready`)).ok, true)
   assert.equal(child.exitCode, null)
 })

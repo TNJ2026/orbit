@@ -23,9 +23,10 @@ export declare class OrbitGateway {
     private readonly commandPrefix;
     private readonly fetchImpl;
     private readonly discoveryRoot;
+    private readonly hubUrl;
     private readonly runtimes;
     private readonly telemetry;
-    constructor(command?: string, commandPrefix?: readonly string[], fetchImpl?: Fetch, discoveryRoot?: string | undefined);
+    constructor(command?: string, commandPrefix?: readonly string[], fetchImpl?: Fetch, discoveryRoot?: string | undefined, hubUrl?: string);
     diagnostics(): GatewayDiagnostics;
     acquire(workspace: WorkspaceRef, startIfMissing?: boolean): Promise<() => Promise<void>>;
     /**
@@ -43,13 +44,7 @@ export declare class OrbitGateway {
      */
     stopRuntime(workspace: WorkspaceRef, sessionId: string): Promise<void>;
     call(workspace: WorkspaceRef, sessionId: string, name: string, args: object): Promise<unknown>;
-    /**
-     * Where a person reads this Runtime, as the Runtime itself reports it.
-     *
-     * Never assembled from the MCP endpoint: the two are published together by
-     * the process that owns the database, and guessing one from the other would
-     * survive exactly until they differ.
-     */
+    /** Stable Hub UI namespace for this Workspace. */
     uiUrl(workspace: WorkspaceRef): Promise<string>;
     /**
      * Read the same durable attempt totals as Orbit's Agent page.
@@ -76,36 +71,10 @@ export declare class OrbitGateway {
     private runtime;
     private runtimeFor;
     private connect;
+    private registerWorkspace;
+    private runOrbit;
+    private startHub;
     private discover;
-    private startAndDiscover;
-    /**
-     * Where a starting Runtime's stderr goes.
-     *
-     * Named for the Workspace so a second Workspace starting at the same moment
-     * writes somewhere else, and truncated on each attempt so what is read back
-     * is this start's output rather than a previous one's.
-     */
-    private startupLogPath;
-    /**
-     * The end of a failed start, or nothing.
-     *
-     * Nothing is a real answer here: the file may not exist, may be empty, or
-     * may be unreadable, and none of those is worth replacing the exit code with
-     * an error about reading a log file.
-     */
-    private startupLogTail;
-    /**
-     * Start a Runtime for this Workspace, keeping what it says on the way out.
-     *
-     * stderr goes to a file rather than to `'ignore'` or to a pipe. Discarding
-     * it left a failed start with nothing but an exit code — the panel could
-     * only say that something went wrong. A pipe would carry the text, but this
-     * child is detached and outlives the Host: nobody would be draining the pipe
-     * afterwards, and a Runtime that filled it would block on its own logging,
-     * or take an EPIPE when the Host exited. A file has neither problem, and the
-     * child holds its own descriptor once spawn has duplicated it.
-     */
-    private startRuntime;
     private rpc;
     private actorFrom;
     private callRaw;

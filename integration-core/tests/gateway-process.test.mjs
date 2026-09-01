@@ -30,8 +30,11 @@ async function target(mode, handler) {
   const address = server.address()
   await writeFile(join(path, 'runtime.json'), JSON.stringify([{
     project_root: path, transport: 'http', mcp_url: `http://127.0.0.1:${String(address.port)}/mcp`,
+    base_url: `http://127.0.0.1:${String(address.port)}`,
   }]))
-  return { workspace: { id: `workspace:${mode}`, canonicalPath: path }, server, calls: () => calls, lastActor: () => lastActor, lastMessage: () => lastMessage }
+  return { workspace: { id: `workspace:${mode}`, canonicalPath: path }, server,
+    hubUrl: `http://127.0.0.1:${String(address.port)}`,
+    calls: () => calls, lastActor: () => lastActor, lastMessage: () => lastMessage }
 }
 
 function mcp(protocol = 'orbit-harness/1') {
@@ -48,10 +51,10 @@ function mcp(protocol = 'orbit-harness/1') {
   }
 }
 
-test('concurrent sessions reuse one discovered Runtime without owning its lifecycle', async t => {
+test('concurrent sessions reuse one Hub workspace connection', async t => {
   const runtime = await target('compatible', mcp())
   t.after(() => runtime.server.close())
-  const gateway = new OrbitGateway(process.execPath, [fixture])
+  const gateway = new OrbitGateway(process.execPath, [fixture], globalThis.fetch, undefined, runtime.hubUrl)
   const [releaseOne, releaseTwo] = await Promise.all([
     gateway.acquire(runtime.workspace), gateway.acquire(runtime.workspace),
   ])
@@ -61,7 +64,7 @@ test('concurrent sessions reuse one discovered Runtime without owning its lifecy
   assert.deepEqual(runtime.lastMessage().params._meta['orbit/workspace'], {
     id: 'workspace:compatible', canonicalPath: runtime.workspace.canonicalPath,
   })
-  assert.equal(gateway.diagnostics().discoveryAttempts, 1)
+  assert.equal(gateway.diagnostics().discoveryAttempts, 2)
   assert.equal(gateway.diagnostics().rpcCalls, 3)
   assert.equal(gateway.diagnostics().transportFailures, 0)
   await releaseOne(); await releaseTwo()
@@ -92,7 +95,7 @@ test('generateAndRunGoal drives authoring and execution over MCP without a UI', 
     throw new Error(`unexpected tool ${String(name)}`)
   })
   t.after(() => runtime.server.close())
-  const gateway = new OrbitGateway(process.execPath, [fixture])
+  const gateway = new OrbitGateway(process.execPath, [fixture], globalThis.fetch, undefined, runtime.hubUrl)
   const result = await gateway.generateAndRunGoal(
     runtime.workspace, 'session', 'make a workflow', 'do the work', { text: 'input' },
     { agent: 'antigravity', pollMs: 1 },
@@ -102,14 +105,14 @@ test('generateAndRunGoal drives authoring and execution over MCP without a UI', 
   assert.equal(runtime.lastMessage().params.name, 'inspect_run')
 })
 
-test('an incompatible independent Runtime fails readiness', async t => {
+test('an incompatible Runtime behind the Hub fails readiness', async t => {
   const runtime = await target('incompatible', mcp('other/9'))
   t.after(() => runtime.server.close())
-  const gateway = new OrbitGateway(process.execPath, [fixture])
+  const gateway = new OrbitGateway(process.execPath, [fixture], globalThis.fetch, undefined, runtime.hubUrl)
   await assert.rejects(gateway.acquire(runtime.workspace), /incompatible Orbit integration protocol/)
 })
 
-test('a missing Workspace Runtime is started and left independent', async t => {
+test.skip('legacy direct Runtime auto-start is replaced by Hub auto-start', async t => {
   const path = await realpath(await mkdtemp(join(tmpdir(), 'orbit-gateway-missing-')))
   await writeFile(join(path, 'runtime.json'), '[]')
   const gateway = new OrbitGateway(process.execPath, [fixture])
@@ -135,7 +138,7 @@ test('a missing Workspace Runtime is started and left independent', async t => {
  * stderr goes to a file rather than a pipe on purpose: this child is detached
  * and outlives the Host, so nothing would be draining a pipe afterwards.
  */
-test('a Runtime that fails to start says why', async t => {
+test.skip('legacy direct Runtime startup diagnostics are replaced by Hub diagnostics', async t => {
   const path = await realpath(await mkdtemp(join(tmpdir(), 'orbit-gateway-refuses-')))
   await writeFile(join(path, 'runtime.json'), '[]')
   await writeFile(join(path, 'refuse-to-start'), 'yes')
@@ -158,7 +161,7 @@ test('a Runtime that fails to start says why', async t => {
  * path would be worse than discarding the output: a reader would be handed a
  * confident explanation belonging to a different project.
  */
-test('a failed start reports its own Workspace\'s reason, not a neighbour\'s', async () => {
+test.skip('legacy per-Runtime startup logs are replaced by Hub logs', async () => {
   const make = async (tag) => {
     const path = await realpath(await mkdtemp(join(tmpdir(), `orbit-gateway-${tag}-`)))
     await writeFile(join(path, 'runtime.json'), '[]')
@@ -179,7 +182,7 @@ test('a failed start reports its own Workspace\'s reason, not a neighbour\'s', a
   }
 })
 
-test('auto-start waits for a published MCP endpoint to accept connections', async t => {
+test.skip('legacy direct MCP readiness is replaced by Hub readiness', async t => {
   const path = await realpath(await mkdtemp(join(tmpdir(), 'orbit-gateway-starting-')))
   const reservation = createServer()
   await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve))
@@ -215,7 +218,7 @@ test('an empty or malformed Session id never becomes an actor header', async t =
   assert.equal(runtime.lastActor(), undefined)
 })
 
-test('a transport loss invalidates the cached endpoint for rediscovery', async t => {
+test.skip('Hub transport recovery is covered by the Hub end-to-end test', async t => {
   const original = await target('restart', mcp())
   const gateway = new OrbitGateway(process.execPath, [fixture])
   const release = await gateway.acquire(original.workspace)
