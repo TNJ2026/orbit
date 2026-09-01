@@ -2759,10 +2759,12 @@ class SurfaceTests(ApiTestCase):
                 mutating.append(route.path)
         self.assertTrue(mutating)
         for path in mutating:
-            # /mcp is the one other command surface, and it reaches the runtime
-            # through the same application services and the same authorizer.
+            # /mcp is the public command surface. The workspace Hub reaches the
+            # same dispatcher through a loopback-only private envelope rather
+            # than mounting a second MCP endpoint in each Runtime.
             self.assertTrue(
-                path.startswith("/api/v1") or path == "/mcp",
+                path.startswith("/api/v1")
+                or path in {"/mcp", "/internal/v1/agent-tools"},
                 f"{path} can change state but is outside /api/v1",
             )
 

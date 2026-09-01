@@ -7,7 +7,8 @@ from pathlib import Path
 from unittest import mock
 
 from orbit.hub import (
-    WorkspaceRegistry, WorkspaceRuntimeManager, create_hub_app, workspace_urls,
+    HubError, MultipleRuntimesError, WorkspaceRegistry,
+    WorkspaceRuntimeManager, create_hub_app, workspace_urls,
 )
 from orbit.platform.projects import project_id
 from orbit.platform.runtime_ownership import DiscoveredRuntime
@@ -29,6 +30,7 @@ class WorkspaceRegistryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             workspace = root / "project"
+            workspace.mkdir()
             registry = WorkspaceRegistry(root / "workspaces.json")
             identifier, resolved = registry.register(workspace)
 
@@ -47,6 +49,16 @@ class WorkspaceRegistryTests(unittest.TestCase):
                 self.assertEqual(default.resolve(), registry.resolve(None))
             self.assertTrue(default.is_dir())
 
+    def test_explicit_registration_does_not_create_a_misspelled_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            missing = Path(temporary) / "misspelled" / "project"
+            registry = WorkspaceRegistry(Path(temporary) / "workspaces.json")
+
+            with self.assertRaisesRegex(HubError, "not an existing directory"):
+                registry.register(missing)
+
+            self.assertFalse(missing.exists())
+
     def test_workspace_urls_are_namespaced(self) -> None:
         self.assertEqual(
             {
@@ -64,6 +76,7 @@ class WorkspaceRuntimeManagerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             registry = WorkspaceRegistry(root / "workspaces.json")
+            (root / "project").mkdir()
             identifier, workspace = registry.register(root / "project")
             runtime = DiscoveredRuntime(root / "owner.lock", {
                 "project_root": str(workspace), "base_url": "http://127.0.0.1:41001",
@@ -82,6 +95,8 @@ class WorkspaceRuntimeManagerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             registry = WorkspaceRegistry(root / "workspaces.json")
+            (root / "first").mkdir()
+            (root / "second").mkdir()
             first_id, first = registry.register(root / "first")
             second_id, second = registry.register(root / "second")
             active = {}
@@ -107,6 +122,80 @@ class WorkspaceRuntimeManagerTests(unittest.TestCase):
             second_url = manager.ensure(second_id)
             self.assertNotEqual(first_url, second_url)
             self.assertEqual({first.resolve(), second.resolve()}, {item[0] for item in active.values()})
+
+    def test_restart_overlap_waits_for_two_runtimes_to_converge(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = root / "project"
+            workspace.mkdir()
+            registry = WorkspaceRegistry(root / "workspaces.json")
+            identifier, workspace = registry.register(workspace)
+            old = DiscoveredRuntime(root / "old.lock", {
+                "project_root": str(workspace), "base_url": "http://127.0.0.1:41001",
+            })
+            new = DiscoveredRuntime(root / "new.lock", {
+                "project_root": str(workspace), "base_url": "http://127.0.0.1:41002",
+            })
+            observations = iter(((old, new), (old, new), (new,)))
+            launches = []
+            manager = WorkspaceRuntimeManager(
+                registry=registry,
+                runtime_discovery=lambda: next(observations),
+                health_check=lambda _url: True,
+                launcher=lambda path: launches.append(path),
+                sleep=lambda _seconds: None,
+            )
+
+            self.assertEqual("http://127.0.0.1:41002", manager.ensure(identifier))
+            self.assertEqual([], launches)
+
+    def test_startup_timeout_reports_runtime_not_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = root / "project"
+            workspace.mkdir()
+            registry = WorkspaceRegistry(root / "workspaces.json")
+            identifier, _ = registry.register(workspace)
+            now = [0.0]
+            manager = WorkspaceRuntimeManager(
+                registry=registry, runtime_discovery=lambda: (),
+                health_check=lambda _url: False, launcher=lambda _path: None,
+                timeout_seconds=0.25, clock=lambda: now[0],
+                sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+            )
+
+            with self.assertRaisesRegex(HubError, "did not become ready"):
+                manager.ensure(identifier)
+
+    def test_multiple_runtimes_are_reported_only_after_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = root / "project"
+            workspace.mkdir()
+            registry = WorkspaceRegistry(root / "workspaces.json")
+            identifier, workspace = registry.register(workspace)
+            runtimes = tuple(
+                DiscoveredRuntime(root / f"{index}.lock", {
+                    "project_root": str(workspace),
+                    "base_url": f"http://127.0.0.1:{41000 + index}",
+                })
+                for index in (1, 2)
+            )
+            now = [0.0]
+            launches = []
+            manager = WorkspaceRuntimeManager(
+                registry=registry, runtime_discovery=lambda: runtimes,
+                health_check=lambda _url: True,
+                launcher=lambda path: launches.append(path),
+                timeout_seconds=0.25, clock=lambda: now[0],
+                sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+            )
+
+            with self.assertRaisesRegex(
+                MultipleRuntimesError, "remained live.*after 0.25s",
+            ):
+                manager.ensure(identifier)
+            self.assertEqual([], launches)
 
 
 class HubHttpTests(unittest.TestCase):
@@ -155,6 +244,34 @@ class HubHttpTests(unittest.TestCase):
             {"operation": "list"},
             json.loads(forward.call_args_list[0].args[1]),
         )
+        self.assertEqual(
+            {"content-type": "application/json"},
+            forward.call_args_list[0].args[2],
+        )
+
+    def test_explicit_actor_is_forwarded_to_the_internal_backend(self) -> None:
+        manager = self.Manager()
+        answer = {"result": {"tools": []}}
+        with mock.patch(
+            "orbit.hub._forward",
+            return_value=(200, json.dumps(answer).encode(), "application/json"),
+        ) as forward, AsgiHarness(create_hub_app(manager)) as client:
+            client.request(
+                "POST", "/mcp", headers={"x-orbit-actor": "harness:session:abc"},
+                body={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+            )
+
+        self.assertEqual(
+            "harness:session:abc",
+            forward.call_args.args[2]["x-orbit-actor"],
+        )
+
+    def test_blocking_forwards_have_a_dedicated_capacity_budget(self) -> None:
+        app = create_hub_app(self.Manager(), forward_concurrency=24)
+
+        self.assertEqual(24, app.state.forward_limiter.total_tokens)
+        with self.assertRaisesRegex(ValueError, "must be positive"):
+            create_hub_app(self.Manager(), forward_concurrency=0)
 
     def test_a_session_can_select_a_workspace_by_readable_name(self) -> None:
         manager = self.Manager()

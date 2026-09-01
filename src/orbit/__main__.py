@@ -687,7 +687,9 @@ def _agent_app(args) -> None:
         Path(args.workspace).expanduser().resolve()
         if args.workspace is not None else default_workspace()
     )
-    identifier, _ = WorkspaceRegistry().register(workspace)
+    identifier, _ = WorkspaceRegistry().register(
+        workspace, create=args.workspace is None,
+    )
     try:
         ensured = host.ensure(args.manifest)
     except (AgentAppHostError, ValueError) as exc:

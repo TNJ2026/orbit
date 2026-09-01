@@ -39,14 +39,23 @@ class HubError(RuntimeError):
     pass
 
 
+class MultipleRuntimesError(HubError):
+    pass
+
+
 class WorkspaceRegistry:
     def __init__(self, path: Path | str | None = None) -> None:
         self.path = Path(path or DEFAULT_HUB_ROOT / "workspaces.json").expanduser()
         self._lock = threading.Lock()
 
-    def register(self, workspace: Path | str) -> tuple[str, Path]:
+    def register(
+        self, workspace: Path | str, *, create: bool = False,
+    ) -> tuple[str, Path]:
         requested = Path(workspace).expanduser().resolve()
-        requested.mkdir(parents=True, exist_ok=True)
+        if create:
+            requested.mkdir(parents=True, exist_ok=True)
+        elif not requested.is_dir():
+            raise HubError(f"Orbit workspace is not an existing directory: {requested}")
         root = resolve_project_root(requested)
         identifier = project_id(root)
         with self._lock:
@@ -63,7 +72,7 @@ class WorkspaceRegistry:
 
     def resolve(self, identifier: str | None) -> Path:
         if identifier is None or identifier == "default":
-            _, root = self.register(default_workspace())
+            _, root = self.register(default_workspace(), create=True)
             return root
         value = self._read().get(identifier)
         if value is None:
@@ -85,7 +94,7 @@ class WorkspaceRegistry:
         }
 
     def list(self) -> list[dict[str, str]]:
-        default_id, default_root = self.register(default_workspace())
+        default_id, default_root = self.register(default_workspace(), create=True)
         entries = self._read()
         return [
             {
@@ -136,6 +145,7 @@ class WorkspaceRuntimeManager:
         launcher: Callable[[Path], subprocess.Popen] | None = None,
         health_check: Callable[[str], bool] | None = None,
         timeout_seconds: float = 60,
+        clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         log_root: Path | str | None = None,
     ) -> None:
@@ -144,6 +154,7 @@ class WorkspaceRuntimeManager:
         self.launcher = launcher or self._launch
         self.health_check = health_check or self._healthy
         self.timeout_seconds = timeout_seconds
+        self.clock = clock
         self.sleep = sleep
         self.log_root = Path(log_root or DEFAULT_HUB_ROOT / "runtimes").expanduser()
         self._locks: dict[str, threading.Lock] = {}
@@ -155,16 +166,33 @@ class WorkspaceRuntimeManager:
         with self._guard:
             lock = self._locks.setdefault(key, threading.Lock())
         with lock:
-            found = self._find(workspace)
+            deadline = self.clock() + self.timeout_seconds
+            multiple = False
+            try:
+                found = self._find(workspace)
+            except MultipleRuntimesError:
+                # A predecessor can remain healthy while its successor becomes
+                # ready during graceful shutdown. Do not launch a third Runtime;
+                # let the overlap converge inside the ordinary readiness window.
+                found, multiple = None, True
             if found is not None:
                 return found
-            self.launcher(workspace)
-            deadline = time.monotonic() + self.timeout_seconds
-            while time.monotonic() < deadline:
-                found = self._find(workspace)
+            if not multiple:
+                self.launcher(workspace)
+            while self.clock() < deadline:
+                try:
+                    found = self._find(workspace)
+                    multiple = False
+                except MultipleRuntimesError:
+                    found, multiple = None, True
                 if found is not None:
                     return found
                 self.sleep(0.1)
+        if multiple:
+            raise MultipleRuntimesError(
+                f"multiple Orbit Runtimes remained live for {workspace} "
+                f"after {self.timeout_seconds:g}s"
+            )
         raise HubError(f"Orbit Runtime did not become ready for {workspace}")
 
     def _find(self, workspace: Path) -> str | None:
@@ -178,7 +206,9 @@ class WorkspaceRuntimeManager:
             if actual == expected and runtime.base_url and self.health_check(runtime.base_url):
                 matches.append(runtime.base_url.rstrip("/"))
         if len(matches) > 1:
-            raise HubError(f"multiple Orbit Runtimes are live for {workspace}")
+            raise MultipleRuntimesError(
+                f"multiple Orbit Runtimes are live for {workspace}"
+            )
         return matches[0] if matches else None
 
     def _launch(self, workspace: Path) -> subprocess.Popen:
@@ -223,11 +253,19 @@ def _forward(url: str, body: bytes, headers: dict[str, str]) -> tuple[int, bytes
         raise HubError(f"Orbit Runtime is unavailable: {exc}") from exc
 
 
-def create_hub_app(manager: WorkspaceRuntimeManager | None = None) -> Starlette:
+def create_hub_app(
+    manager: WorkspaceRuntimeManager | None = None, *, forward_concurrency: int = 24,
+) -> Starlette:
+    if forward_concurrency < 1:
+        raise ValueError("forward concurrency must be positive")
     runtimes = manager or WorkspaceRuntimeManager()
     sessions = McpSessionRegistry()
     selections: dict[str, str] = {}
     selection_lock = threading.Lock()
+    # A stuck Runtime must not consume AnyIO's entire default worker pool (40
+    # threads at present) and prevent health checks or other workspaces from
+    # making progress. Waiting callers remain async tasks, not worker threads.
+    forward_limiter = anyio.CapacityLimiter(forward_concurrency)
 
     def result(request_id: Any, payload: Mapping[str, Any]) -> dict[str, Any]:
         return {"jsonrpc": "2.0", "id": request_id, "result": payload}
@@ -239,14 +277,18 @@ def create_hub_app(manager: WorkspaceRuntimeManager | None = None) -> Starlette:
         }
 
     async def workspace_tools(
-        identifier: str | None, envelope: Mapping[str, Any], actor: str,
+        identifier: str | None, envelope: Mapping[str, Any], actor: str | None,
     ) -> Mapping[str, Any]:
         base = await anyio.to_thread.run_sync(runtimes.ensure, identifier)
+        headers = {"content-type": "application/json"}
+        if actor is not None:
+            headers["x-orbit-actor"] = actor
         status, payload, _ = await anyio.to_thread.run_sync(
             _forward,
             f"{base}/internal/v1/agent-tools",
             json.dumps(envelope).encode("utf-8"),
-            {"content-type": "application/json", "x-orbit-actor": actor},
+            headers,
+            limiter=forward_limiter,
         )
         try:
             decoded = json.loads(payload)
@@ -259,7 +301,7 @@ def create_hub_app(manager: WorkspaceRuntimeManager | None = None) -> Starlette:
 
     async def dispatch_gateway(
         message: Mapping[str, Any], identifier: str | None, actor: str,
-        session_id: str | None,
+        session_id: str | None, forwarded_actor: str | None,
     ) -> dict[str, Any] | None:
         request_id = message.get("id")
         method = message.get("method")
@@ -314,7 +356,9 @@ def create_hub_app(manager: WorkspaceRuntimeManager | None = None) -> Starlette:
                 },
             }]})
         if method == "tools/list":
-            backend = await workspace_tools(identifier, {"operation": "list"}, actor)
+            backend = await workspace_tools(
+                identifier, {"operation": "list"}, forwarded_actor,
+            )
             tools = list(backend.get("result", {}).get("tools", ()))
             tools.extend((
                 {
@@ -372,7 +416,7 @@ def create_hub_app(manager: WorkspaceRuntimeManager | None = None) -> Starlette:
                 "operation": "call",
                 "name": name,
                 "arguments": arguments,
-            }, actor)
+            }, forwarded_actor)
         else:
             return failure(request_id, METHOD_NOT_FOUND, f"unknown method {method}")
         if "protocol_error" in backend:
@@ -391,19 +435,24 @@ def create_hub_app(manager: WorkspaceRuntimeManager | None = None) -> Starlette:
             message = json.loads(await request.body() or b"")
         except json.JSONDecodeError:
             return JSONResponse(failure(None, PARSE_ERROR, "request body must be JSON"))
-        actor = request.headers.get("x-orbit-actor", "local")
+        forwarded_actor = request.headers.get("x-orbit-actor")
+        actor = forwarded_actor or "local"
         try:
             if isinstance(message, list):
                 responses = []
                 for item in message:
                     if isinstance(item, Mapping):
-                        response = await dispatch_gateway(item, identifier, actor, session_id)
+                        response = await dispatch_gateway(
+                            item, identifier, actor, session_id, forwarded_actor,
+                        )
                         if response is not None:
                             responses.append(response)
                 return JSONResponse(responses) if responses else JSONResponse(None, status_code=202)
             if not isinstance(message, Mapping) or message.get("jsonrpc") != "2.0":
                 return JSONResponse(failure(None, INVALID_REQUEST, "expected a JSON-RPC 2.0 message"))
-            response = await dispatch_gateway(message, identifier, actor, session_id)
+            response = await dispatch_gateway(
+                message, identifier, actor, session_id, forwarded_actor,
+            )
             if message.get("method") == "initialize" and not session_id:
                 session_id = uuid.uuid4().hex
             headers = {} if not session_id else {"mcp-session-id": session_id}
@@ -470,7 +519,7 @@ def create_hub_app(manager: WorkspaceRuntimeManager | None = None) -> Starlette:
             except RuntimeError:
                 pass
 
-    return Starlette(routes=[
+    app = Starlette(routes=[
         Route("/health/ready", ready, methods=["GET"]),
         Route("/mcp", mcp, methods=["POST"]),
         Route("/workspaces/{workspace_id}/mcp", mcp, methods=["POST"]),
@@ -481,3 +530,5 @@ def create_hub_app(manager: WorkspaceRuntimeManager | None = None) -> Starlette:
         WebSocketRoute("/events", events),
         WebSocketRoute("/workspaces/{workspace_id}/events", events),
     ])
+    app.state.forward_limiter = forward_limiter
+    return app
