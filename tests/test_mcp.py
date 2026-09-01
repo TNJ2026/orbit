@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import unittest
 
 from orbit.web.mcp import HARNESS_TOOL_NAMES, McpSessionRegistry
+from orbit.web.mcp_app import ORBIT_WORKFLOWS_URI
 from tests.test_api_v1 import ApiTestCase
 from tests.test_web_composition import AsgiHarness
 
@@ -90,6 +91,54 @@ class HandshakeTests(ApiTestCase):
                 self.assertIn("openPromptEditor", content["text"])
                 self.assertIn("dispatchPrompt", content["text"])
 
+    def test_the_catalogue_is_offered_twice_with_and_without_a_card(self) -> None:
+        """One reading, two offers: look at this, or work something out.
+
+        A host that mounts App cards prints the card *and* the JSON under it,
+        so a tool that draws a card answers twice. Shortening the text is not
+        the way out — the model reads it too, and with the names gone it goes
+        and fetches each workflow separately, mounting a card for every one.
+        The way out is to let the question choose: `list_workflows` is what a
+        person asked to see, `inspect_workflows` is what the model reads to
+        pick or filter, and only the first is bound to a resource.
+
+        The pair reads the same catalogue. Anything else would be two answers
+        to one question, which is worse than two ways to ask it.
+        """
+
+        with AsgiHarness(self.app) as client:
+            declared = {
+                item["name"]: item
+                for item in rpc(client, "tools/list", actor="reader")
+                .json()["result"]["tools"]
+            }
+            carded = (declared["list_workflows"].get("_meta") or {}).get("ui")
+            plain = (declared["inspect_workflows"].get("_meta") or {}).get("ui")
+            self.assertEqual(ORBIT_WORKFLOWS_URI, carded["resourceUri"])
+            self.assertIsNone(plain)
+
+            # Each points a reader at the other, because a description is the
+            # only thing choosing between them.
+            self.assertIn(
+                "inspect_workflows", declared["list_workflows"]["description"],
+            )
+            self.assertIn(
+                "without opening", declared["inspect_workflows"]["description"],
+            )
+
+            self.assertEqual(
+                payload_of(tool(client, "list_workflows", {}, actor="reader")),
+                payload_of(tool(client, "inspect_workflows", {}, actor="reader")),
+            )
+            self.assertEqual(
+                payload_of(
+                    tool(client, "list_workflows", {"ready_only": True}, actor="reader")
+                ),
+                payload_of(
+                    tool(client, "inspect_workflows", {"ready_only": True}, actor="reader")
+                ),
+            )
+
     def test_resource_templates_are_an_empty_list_not_an_error(self) -> None:
         """Declaring `resources` is a promise to answer how they are addressed.
 
@@ -139,7 +188,8 @@ class DiscoveryTests(ApiTestCase):
                     "list_runtime_events", "get_run_steps", "get_run_graph",
                     "get_run_edges", "read_run_output",
                     "recover_run", "cancel_run", "replay_langgraph_run",
-                    "list_workflows", "get_workflow_definition",
+                    "list_workflows", "inspect_workflows",
+                    "get_workflow_definition",
                     "inspect_workflow_definition", "delete_workflow", "list_agents",
                     "list_artifacts", "read_artifact",
                     "read_artifact_content",
@@ -273,8 +323,8 @@ class DiscoveryTests(ApiTestCase):
             tools = rpc(client, "tools/list", actor="reader").json()["result"]["tools"]
         self.assertEqual(
             {
-                "get_capabilities", "list_workflows", "get_workflow_definition",
-                "inspect_workflow_definition",
+                "get_capabilities", "list_workflows", "inspect_workflows",
+                "get_workflow_definition", "inspect_workflow_definition",
                 "delete_workflow",
                 "list_agents", "list_runs", "inspect_run",
                 "generate_workflow", "modify_workflow", "get_authoring_job",
@@ -1111,7 +1161,7 @@ class StdioTransportTests(ApiTestCase):
 
         self.assertEqual(2, len(responses))
         self.assertEqual("orbit", responses[0]["result"]["serverInfo"]["name"])
-        self.assertEqual(34, len(responses[1]["result"]["tools"]))
+        self.assertEqual(35, len(responses[1]["result"]["tools"]))
 
     def test_a_notification_produces_no_line_at_all(self) -> None:
         """There is no 202 on this transport; silence is the whole answer."""

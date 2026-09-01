@@ -56,8 +56,8 @@ NOT_AUTHORIZED = -32001
 MCP_SESSION_PRESENCE_SECONDS = 60.0
 MCP_TOOL_PROFILES = frozenset({"full", "harness"})
 HARNESS_TOOL_NAMES = frozenset({
-    "get_capabilities", "list_workflows", "get_workflow_definition",
-    "inspect_workflow_definition", "list_agents",
+    "get_capabilities", "list_workflows", "inspect_workflows",
+    "get_workflow_definition", "inspect_workflow_definition", "list_agents",
     "delete_workflow",
     "list_runs", "inspect_run",
     "replay_langgraph_run",
@@ -303,8 +303,11 @@ def build_mcp_dispatcher(
         {
             "name": "list_workflows",
             "description": (
-                "Published workflows a run can be started from, with the inputs "
-                "each one takes and whether it can start from a plain goal."
+                "Show the published workflows to the person, as a card. Use "
+                "this when they asked to see what is available. To choose or "
+                "filter one yourself, call `inspect_workflows` instead: it "
+                "returns the same catalogue without opening a card, and a card "
+                "per question is what fills a conversation with them."
             ),
             "scope": READ_SCOPE,
             "inputSchema": {
@@ -335,6 +338,25 @@ def build_mcp_dispatcher(
             # the read to that same resource lets the mounted card call it;
             # there is deliberately no separate workflow-detail resource.
             "_meta": {"ui": {"resourceUri": ORBIT_WORKFLOWS_URI}},
+        },
+        {
+            "name": "inspect_workflows",
+            "description": (
+                "The published workflows for goal resolution and filtering, "
+                "without opening the workflow App card. Same catalogue as "
+                "`list_workflows`; this is the one to call when the answer is "
+                "yours to work out rather than the person's to look at."
+            ),
+            "scope": READ_SCOPE,
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "ready_only": {
+                        "type": "boolean",
+                        "description": "Keep only workflows a goal can start.",
+                    },
+                },
+            },
         },
         {
             "name": "inspect_workflow_definition",
@@ -1199,7 +1221,7 @@ def build_mcp_dispatcher(
                     if entry.manifest.name.startswith("agent.")
                 ],
             }
-        if name == "list_workflows":
+        if name in {"list_workflows", "inspect_workflows"}:
             items = workflow_reads.list()
             if arguments.get("ready_only"):
                 items = [
