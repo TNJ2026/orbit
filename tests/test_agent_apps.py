@@ -3,6 +3,7 @@ from __future__ import annotations
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import threading
@@ -261,6 +262,27 @@ class HostTests(unittest.TestCase):
         self.assertTrue(ensured.started)
         self.assertEqual(self.workspace.resolve(), launches[0][2])
         self.assertTrue((ensured.state_dir / "pid.json").exists())
+
+    def test_workspace_scope_without_a_path_creates_and_uses_the_default(self) -> None:
+        default = self.root / "home" / ".orbit" / "workspaces" / "default"
+        health = iter((False, False, True))
+        launches = []
+        host = AgentAppHost(
+            state_root=self.root / "state",
+            health_check=lambda _url: next(health),
+            launcher=lambda manifest, state, workspace: (
+                launches.append((manifest, state, workspace)) or _Process()
+            ),
+            sleep=lambda _seconds: None,
+        )
+        with mock.patch.dict(
+            "os.environ", {"ORBIT_DEFAULT_WORKSPACE": str(default)}, clear=False,
+        ):
+            ensured = host.ensure(self.manifest_path)
+
+        self.assertEqual(default.resolve(), ensured.workspace)
+        self.assertEqual(default.resolve(), launches[0][2])
+        self.assertTrue(default.is_dir())
 
     def test_default_launcher_expands_workspace_in_argv(self) -> None:
         health = iter((False, False, True))
@@ -670,6 +692,28 @@ class HostHelperTests(unittest.TestCase):
         environment = {k: v for k, v in os.environ.items() if k != "AGENT_APP_STATE_DIR"}
         with mock.patch.dict("os.environ", environment, clear=True):
             self.assertTrue(str(host_module.default_state_root()).endswith("agent-apps"))
+
+    def test_the_default_workspace_is_under_the_user_home(self) -> None:
+        environment = {
+            key: value for key, value in os.environ.items()
+            if key != "ORBIT_DEFAULT_WORKSPACE"
+        }
+        with mock.patch.dict("os.environ", environment, clear=True), mock.patch(
+            "pathlib.Path.home", return_value=Path("/users/example"),
+        ):
+            self.assertEqual(
+                Path("/users/example/.orbit/workspaces/default"),
+                host_module.default_workspace(),
+            )
+
+    def test_the_default_workspace_can_be_overridden(self) -> None:
+        with mock.patch.dict(
+            "os.environ", {"ORBIT_DEFAULT_WORKSPACE": "~/orbit-default"}, clear=False,
+        ):
+            self.assertEqual(
+                Path("~/orbit-default").expanduser().resolve(),
+                host_module.default_workspace(),
+            )
 
     def test_a_process_check_is_false_for_nothing_and_true_for_this_one(self) -> None:
         import os

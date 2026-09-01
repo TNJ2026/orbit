@@ -52,6 +52,15 @@ def default_state_root() -> Path:
     return Path.home() / ".local" / "state" / "agent-apps"
 
 
+def default_workspace() -> Path:
+    """Cross-platform workspace for Agent Apps without project context."""
+
+    configured = os.environ.get("ORBIT_DEFAULT_WORKSPACE")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return (Path.home() / ".orbit" / "workspaces" / "default").resolve()
+
+
 def _scope_key(manifest: AgentAppManifest, workspace: Path | None) -> str:
     if manifest.scope == "global":
         return "global"
@@ -173,9 +182,15 @@ class AgentAppHost:
 
     def ensure(self, manifest_path: Path | str, *, workspace: Path | str | None = None) -> EnsuredApp:
         manifest = load_manifest(manifest_path)
-        resolved_workspace = (
-            Path(workspace).expanduser().resolve() if workspace is not None else None
-        )
+        if manifest.scope == "global":
+            resolved_workspace = None
+        elif workspace is None:
+            resolved_workspace = default_workspace()
+            resolved_workspace.mkdir(parents=True, exist_ok=True)
+        else:
+            resolved_workspace = (
+                Path(workspace).expanduser().resolve() if workspace is not None else None
+            )
         scope_key = _scope_key(manifest, resolved_workspace)
         state_dir = self.state_root / manifest.app_id / scope_key
         endpoint_key = hashlib.sha256(

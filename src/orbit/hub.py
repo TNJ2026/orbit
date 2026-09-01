@@ -1,0 +1,483 @@
+"""Stable loopback entry point for workspace-scoped Orbit Runtimes."""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import threading
+import time
+import uuid
+from typing import Any, Callable, Iterable, Mapping
+from urllib.error import HTTPError, URLError
+from urllib.request import Request as UrlRequest, urlopen
+
+import anyio
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse, RedirectResponse, Response
+from starlette.routing import Route, WebSocketRoute
+from starlette.websockets import WebSocket, WebSocketDisconnect
+from websockets.asyncio.client import connect as websocket_connect
+
+from .agent_apps.host import default_workspace
+from .platform.projects import project_id, resolve_project_root
+from .platform.runtime_ownership import DiscoveredRuntime, discover_runtimes
+from .web.mcp import (
+    INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR,
+    PROTOCOL_VERSION, SERVER_INFO, McpSessionRegistry,
+)
+from .web.mcp_app import ORBIT_DASHBOARD_MIME_TYPE, ORBIT_MCP_APP_RESOURCES
+
+
+DEFAULT_HUB_ROOT = Path.home() / ".orbit" / "hub"
+
+
+class HubError(RuntimeError):
+    pass
+
+
+class WorkspaceRegistry:
+    def __init__(self, path: Path | str | None = None) -> None:
+        self.path = Path(path or DEFAULT_HUB_ROOT / "workspaces.json").expanduser()
+        self._lock = threading.Lock()
+
+    def register(self, workspace: Path | str) -> tuple[str, Path]:
+        requested = Path(workspace).expanduser().resolve()
+        requested.mkdir(parents=True, exist_ok=True)
+        root = resolve_project_root(requested)
+        identifier = project_id(root)
+        with self._lock:
+            entries = self._read()
+            entries[identifier] = str(root)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_suffix(f".{os.getpid()}.tmp")
+            temporary.write_text(
+                json.dumps({"workspaces": entries}, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            temporary.replace(self.path)
+        return identifier, root
+
+    def resolve(self, identifier: str | None) -> Path:
+        if identifier is None or identifier == "default":
+            _, root = self.register(default_workspace())
+            return root
+        value = self._read().get(identifier)
+        if value is None:
+            raise HubError(f"unknown Orbit workspace: {identifier}")
+        root = Path(value).expanduser().resolve()
+        if not root.is_dir():
+            raise HubError(f"Orbit workspace is unavailable: {identifier}")
+        return root
+
+    def _read(self) -> dict[str, str]:
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {}
+        values = payload.get("workspaces", {}) if isinstance(payload, dict) else {}
+        return {
+            str(key): str(value) for key, value in values.items()
+            if isinstance(key, str) and isinstance(value, str)
+        }
+
+    def list(self) -> list[dict[str, str]]:
+        default_id, default_root = self.register(default_workspace())
+        entries = self._read()
+        return [
+            {
+                "workspace_id": identifier,
+                "name": Path(value).name,
+                "path": value,
+                "kind": "default" if identifier == default_id else "registered",
+            }
+            for identifier, value in sorted(entries.items(), key=lambda item: item[1])
+        ]
+
+    def select(self, *, workspace_id: str | None = None, path: str | None = None, name: str | None = None) -> str:
+        if path:
+            if not Path(path).expanduser().is_absolute():
+                raise HubError("workspace path must be absolute")
+            return self.register(path)[0]
+        entries = self.list()
+        if workspace_id:
+            self.resolve(workspace_id)
+            return workspace_id
+        if name:
+            matches = [item for item in entries if item["name"] == name]
+            if len(matches) != 1:
+                raise HubError(
+                    f"workspace name must match exactly one registered workspace: {name}"
+                )
+            return matches[0]["workspace_id"]
+        raise HubError("workspace_id, path, or name is required")
+
+
+def workspace_urls(identifier: str, hub_url: str = "http://127.0.0.1:8848") -> dict[str, str]:
+    base = hub_url.rstrip("/") + f"/workspaces/{identifier}"
+    events = base.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
+    return {
+        "workspace_id": identifier,
+        "mcp_url": f"{base}/mcp",
+        "ui_url": f"{base}/ui/",
+        "events_url": f"{events}/events",
+    }
+
+
+class WorkspaceRuntimeManager:
+    def __init__(
+        self,
+        *,
+        registry: WorkspaceRegistry | None = None,
+        runtime_discovery: Callable[[], Iterable[DiscoveredRuntime]] = discover_runtimes,
+        launcher: Callable[[Path], subprocess.Popen] | None = None,
+        health_check: Callable[[str], bool] | None = None,
+        timeout_seconds: float = 60,
+        sleep: Callable[[float], None] = time.sleep,
+        log_root: Path | str | None = None,
+    ) -> None:
+        self.registry = registry or WorkspaceRegistry()
+        self.runtime_discovery = runtime_discovery
+        self.launcher = launcher or self._launch
+        self.health_check = health_check or self._healthy
+        self.timeout_seconds = timeout_seconds
+        self.sleep = sleep
+        self.log_root = Path(log_root or DEFAULT_HUB_ROOT / "runtimes").expanduser()
+        self._locks: dict[str, threading.Lock] = {}
+        self._guard = threading.Lock()
+
+    def ensure(self, identifier: str | None = None) -> str:
+        workspace = self.registry.resolve(identifier)
+        key = str(workspace)
+        with self._guard:
+            lock = self._locks.setdefault(key, threading.Lock())
+        with lock:
+            found = self._find(workspace)
+            if found is not None:
+                return found
+            self.launcher(workspace)
+            deadline = time.monotonic() + self.timeout_seconds
+            while time.monotonic() < deadline:
+                found = self._find(workspace)
+                if found is not None:
+                    return found
+                self.sleep(0.1)
+        raise HubError(f"Orbit Runtime did not become ready for {workspace}")
+
+    def _find(self, workspace: Path) -> str | None:
+        expected = str(workspace.resolve())
+        matches = []
+        for runtime in self.runtime_discovery():
+            try:
+                actual = str(Path(str(runtime.facts.get("project_root"))).expanduser().resolve())
+            except (OSError, TypeError, ValueError):
+                continue
+            if actual == expected and runtime.base_url and self.health_check(runtime.base_url):
+                matches.append(runtime.base_url.rstrip("/"))
+        if len(matches) > 1:
+            raise HubError(f"multiple Orbit Runtimes are live for {workspace}")
+        return matches[0] if matches else None
+
+    def _launch(self, workspace: Path) -> subprocess.Popen:
+        identifier = project_id(workspace)
+        directory = self.log_root / identifier
+        directory.mkdir(parents=True, exist_ok=True)
+        stdout = (directory / "stdout.log").open("ab")
+        stderr = (directory / "stderr.log").open("ab")
+        try:
+            return subprocess.Popen(
+                [sys.executable, "-m", "orbit", "serve", "--host", "127.0.0.1",
+                 "--port", "0", "--project-root", str(workspace)],
+                cwd=workspace,
+                env={**os.environ, "ORBIT_HUB_CHILD": "1"},
+                stdin=subprocess.DEVNULL,
+                stdout=stdout,
+                stderr=stderr,
+                close_fds=True,
+                start_new_session=os.name != "nt",
+            )
+        finally:
+            stdout.close()
+            stderr.close()
+
+    @staticmethod
+    def _healthy(base_url: str) -> bool:
+        try:
+            with urlopen(f"{base_url.rstrip('/')}/health/ready", timeout=0.5) as response:
+                return 200 <= response.status < 300
+        except (OSError, URLError, ValueError):
+            return False
+
+
+def _forward(url: str, body: bytes, headers: dict[str, str]) -> tuple[int, bytes, str]:
+    request = UrlRequest(url, data=body, method="POST", headers=headers)
+    try:
+        with urlopen(request, timeout=330) as response:
+            return response.status, response.read(), response.headers.get("content-type", "application/json")
+    except HTTPError as exc:
+        return exc.code, exc.read(), exc.headers.get("content-type", "application/json")
+    except (OSError, URLError) as exc:
+        raise HubError(f"Orbit Runtime is unavailable: {exc}") from exc
+
+
+def create_hub_app(manager: WorkspaceRuntimeManager | None = None) -> Starlette:
+    runtimes = manager or WorkspaceRuntimeManager()
+    sessions = McpSessionRegistry()
+    selections: dict[str, str] = {}
+    selection_lock = threading.Lock()
+
+    def result(request_id: Any, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return {"jsonrpc": "2.0", "id": request_id, "result": payload}
+
+    def failure(request_id: Any, code: int, message: str) -> dict[str, Any]:
+        return {
+            "jsonrpc": "2.0", "id": request_id,
+            "error": {"code": code, "message": message},
+        }
+
+    async def workspace_tools(
+        identifier: str | None, envelope: Mapping[str, Any], actor: str,
+    ) -> Mapping[str, Any]:
+        base = await anyio.to_thread.run_sync(runtimes.ensure, identifier)
+        status, payload, _ = await anyio.to_thread.run_sync(
+            _forward,
+            f"{base}/internal/v1/agent-tools",
+            json.dumps(envelope).encode("utf-8"),
+            {"content-type": "application/json", "x-orbit-actor": actor},
+        )
+        try:
+            decoded = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise HubError("Orbit Runtime returned an invalid tool response") from exc
+        if status >= 400 or not isinstance(decoded, Mapping):
+            message = decoded.get("error") if isinstance(decoded, Mapping) else None
+            raise HubError(str(message or f"Orbit Runtime tool backend failed ({status})"))
+        return decoded
+
+    async def dispatch_gateway(
+        message: Mapping[str, Any], identifier: str | None, actor: str,
+        session_id: str | None,
+    ) -> dict[str, Any] | None:
+        request_id = message.get("id")
+        method = message.get("method")
+        params = message.get("params") or {}
+        if not isinstance(params, Mapping):
+            return failure(request_id, INVALID_PARAMS, "params must be an object")
+        sessions.observe(actor, str(method or ""), params)
+
+        if method == "initialize":
+            return result(request_id, {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {
+                    "tools": {"listChanged": False},
+                    "resources": {"listChanged": False},
+                },
+                "serverInfo": SERVER_INFO,
+            })
+        if method in {"notifications/initialized", "notifications/cancelled"}:
+            return None
+        if method == "ping":
+            return result(request_id, {})
+        if method == "resources/list":
+            return result(request_id, {"resources": [
+                {
+                    "uri": resource["uri"],
+                    "name": resource["name"],
+                    "description": resource["description"],
+                    "mimeType": ORBIT_DASHBOARD_MIME_TYPE,
+                    "_meta": {
+                        "ui": {"prefersBorder": resource["prefers_border"]},
+                        "openai/widgetPrefersBorder": resource["prefers_border"],
+                    },
+                }
+                for resource in ORBIT_MCP_APP_RESOURCES
+            ]})
+        if method == "resources/templates/list":
+            return result(request_id, {"resourceTemplates": []})
+        if method == "resources/read":
+            resource = next(
+                (item for item in ORBIT_MCP_APP_RESOURCES if item["uri"] == params.get("uri")),
+                None,
+            )
+            if resource is None:
+                return failure(request_id, INVALID_PARAMS, "unknown resource")
+            return result(request_id, {"contents": [{
+                "uri": resource["uri"],
+                "mimeType": ORBIT_DASHBOARD_MIME_TYPE,
+                "text": resource["html"],
+                "_meta": {
+                    "ui": {"prefersBorder": resource["prefers_border"]},
+                    "openai/widgetPrefersBorder": resource["prefers_border"],
+                },
+            }]})
+        if method == "tools/list":
+            backend = await workspace_tools(identifier, {"operation": "list"}, actor)
+            tools = list(backend.get("result", {}).get("tools", ()))
+            tools.extend((
+                {
+                    "name": "list_workspaces",
+                    "description": "List Orbit workspaces registered with the local Gateway.",
+                    "inputSchema": {"type": "object", "properties": {}},
+                    "outputSchema": {"type": "object"},
+                },
+                {
+                    "name": "select_workspace",
+                    "description": "Select this MCP session's workspace by readable name or absolute path.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "path": {"type": "string"},
+                        },
+                    },
+                    "outputSchema": {"type": "object"},
+                },
+            ))
+            return result(request_id, {"tools": tools})
+        elif method == "tools/call":
+            name = params.get("name", "")
+            arguments = params.get("arguments") or {}
+            if name == "list_workspaces":
+                return result(request_id, {
+                    "content": [{"type": "text", "text": json.dumps({"workspaces": runtimes.registry.list()})}],
+                    "structuredContent": {"workspaces": runtimes.registry.list()},
+                    "isError": False,
+                })
+            if name == "select_workspace":
+                if not session_id:
+                    return failure(request_id, INVALID_PARAMS, "MCP session id is required")
+                try:
+                    selected = runtimes.registry.select(
+                        path=arguments.get("path"), name=arguments.get("name"),
+                    )
+                except HubError as exc:
+                    return result(request_id, {
+                        "content": [{"type": "text", "text": json.dumps({"error": str(exc)})}],
+                        "structuredContent": {"error": str(exc)}, "isError": True,
+                    })
+                with selection_lock:
+                    selections[session_id] = selected
+                payload = next(
+                    item for item in runtimes.registry.list()
+                    if item["workspace_id"] == selected
+                )
+                return result(request_id, {
+                    "content": [{"type": "text", "text": json.dumps(payload)}],
+                    "structuredContent": payload, "isError": False,
+                })
+            backend = await workspace_tools(identifier, {
+                "operation": "call",
+                "name": name,
+                "arguments": arguments,
+            }, actor)
+        else:
+            return failure(request_id, METHOD_NOT_FOUND, f"unknown method {method}")
+        if "protocol_error" in backend:
+            return {"jsonrpc": "2.0", "id": request_id, "error": backend["protocol_error"]}
+        return result(request_id, backend.get("result", {}))
+
+    async def ready(_request: Request) -> Response:
+        return JSONResponse({"status": "ready", "service": "orbit-hub"})
+
+    async def mcp(request: Request) -> Response:
+        explicit_identifier = request.path_params.get("workspace_id")
+        session_id = request.headers.get("mcp-session-id")
+        with selection_lock:
+            identifier = explicit_identifier or selections.get(session_id or "")
+        try:
+            message = json.loads(await request.body() or b"")
+        except json.JSONDecodeError:
+            return JSONResponse(failure(None, PARSE_ERROR, "request body must be JSON"))
+        actor = request.headers.get("x-orbit-actor", "local")
+        try:
+            if isinstance(message, list):
+                responses = []
+                for item in message:
+                    if isinstance(item, Mapping):
+                        response = await dispatch_gateway(item, identifier, actor, session_id)
+                        if response is not None:
+                            responses.append(response)
+                return JSONResponse(responses) if responses else JSONResponse(None, status_code=202)
+            if not isinstance(message, Mapping) or message.get("jsonrpc") != "2.0":
+                return JSONResponse(failure(None, INVALID_REQUEST, "expected a JSON-RPC 2.0 message"))
+            response = await dispatch_gateway(message, identifier, actor, session_id)
+            if message.get("method") == "initialize" and not session_id:
+                session_id = uuid.uuid4().hex
+            headers = {} if not session_id else {"mcp-session-id": session_id}
+            return (
+                JSONResponse(None, status_code=202, headers=headers)
+                if response is None else JSONResponse(response, headers=headers)
+            )
+        except HubError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503)
+
+    async def ui(request: Request) -> Response:
+        identifier = request.path_params.get("workspace_id")
+        tail = request.path_params.get("path", "")
+        try:
+            base = await anyio.to_thread.run_sync(runtimes.ensure, identifier)
+        except HubError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503)
+        target = f"{base}/ui/{tail}"
+        if request.url.query:
+            target += f"?{request.url.query}"
+        return RedirectResponse(target, status_code=307)
+
+    async def events(websocket: WebSocket) -> None:
+        identifier = websocket.path_params.get("workspace_id")
+        try:
+            base = await anyio.to_thread.run_sync(runtimes.ensure, identifier)
+            upstream_url = base.replace("http://", "ws://", 1).replace(
+                "https://", "wss://", 1,
+            ) + "/events"
+            if websocket.url.query:
+                upstream_url += f"?{websocket.url.query}"
+            async with websocket_connect(upstream_url) as upstream:
+                await websocket.accept()
+
+                async with anyio.create_task_group() as tasks:
+                    async def client_to_runtime() -> None:
+                        try:
+                            while True:
+                                message = await websocket.receive()
+                                if message["type"] == "websocket.disconnect":
+                                    return
+                                if message.get("text") is not None:
+                                    await upstream.send(message["text"])
+                                elif message.get("bytes") is not None:
+                                    await upstream.send(message["bytes"])
+                        finally:
+                            tasks.cancel_scope.cancel()
+
+                    async def runtime_to_client() -> None:
+                        try:
+                            async for message in upstream:
+                                if isinstance(message, bytes):
+                                    await websocket.send_bytes(message)
+                                else:
+                                    await websocket.send_text(message)
+                        finally:
+                            tasks.cancel_scope.cancel()
+
+                    tasks.start_soon(client_to_runtime)
+                    tasks.start_soon(runtime_to_client)
+        except (HubError, OSError, WebSocketDisconnect):
+            try:
+                await websocket.close(code=1011)
+            except RuntimeError:
+                pass
+
+    return Starlette(routes=[
+        Route("/health/ready", ready, methods=["GET"]),
+        Route("/mcp", mcp, methods=["POST"]),
+        Route("/workspaces/{workspace_id}/mcp", mcp, methods=["POST"]),
+        Route("/ui", ui, methods=["GET"]),
+        Route("/ui/{path:path}", ui, methods=["GET"]),
+        Route("/workspaces/{workspace_id}/ui", ui, methods=["GET"]),
+        Route("/workspaces/{workspace_id}/ui/{path:path}", ui, methods=["GET"]),
+        WebSocketRoute("/events", events),
+        WebSocketRoute("/workspaces/{workspace_id}/events", events),
+    ])

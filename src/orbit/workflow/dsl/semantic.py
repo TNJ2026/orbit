@@ -73,6 +73,25 @@ def _is_default_condition(value: Any) -> bool:
     )
 
 
+def _source_references(value: Any) -> tuple[str, ...]:
+    """Collect source paths from either structured or textual conditions."""
+
+    found: list[str] = []
+    if isinstance(value, Mapping):
+        if value.get("op") == "ref" and isinstance(value.get("path"), str):
+            path = value["path"]
+            if path.startswith("source."):
+                found.append(path)
+        for item in value.values():
+            found.extend(_source_references(item))
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            found.extend(_source_references(item))
+    elif isinstance(value, str):
+        found.extend(re.findall(r"\bsource(?:\.[A-Za-z_][A-Za-z0-9_]*)+", value))
+    return tuple(found)
+
+
 def _find_cycle(nodes: set[str], outgoing: Mapping[str, list[str]]) -> tuple[str, ...] | None:
     state: dict[str, int] = {}
     for root in sorted(nodes):
@@ -502,6 +521,22 @@ def analyze_dsl(
             diagnostics.append(_diagnostic(document, "DSL_REFERENCE_NOT_FOUND", f"target node {target_id!r} is not defined", edge_path + ("to", "node")))
         if source is None or target is None:
             continue
+        if source.get("kind") == "human" and not _is_default_condition(
+            edge.get("condition")
+        ):
+            expected = f"source.{edge['from']['port']}.decision"
+            invalid = sorted({
+                path for path in _source_references(edge.get("condition"))
+                if path != expected
+            })
+            if invalid:
+                diagnostics.append(_diagnostic(
+                    document,
+                    "DSL_GRAPH_CONDITION_INVALID",
+                    "human approval conditions may only read the standard "
+                    f"decision field {expected!r}; found {invalid}",
+                    edge_path + ("condition",),
+                ))
         outgoing[source_id].append(target_id)
         incoming[target_id].append(source_id)
         if not edge.get("back_edge", False):

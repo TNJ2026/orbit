@@ -303,6 +303,12 @@ class AccessibilityTests(unittest.TestCase):
         self.assertIn("<Viewer />", main)
         self.assertNotIn("<App />", main)
 
+    def test_every_native_canvas_keeps_zoom_at_or_above_half(self) -> None:
+        viewer = (EDITOR_SOURCE / "Viewer.jsx").read_text(encoding="utf-8")
+        self.assertIn("const MIN_ZOOM = 0.5", viewer)
+        self.assertIn("minZoom: MIN_ZOOM", viewer)
+        self.assertIn("minZoom={MIN_ZOOM}", viewer)
+
 
 class HandlerConsoleRenderingTests(unittest.TestCase):
     def test_the_console_follows_only_while_the_run_is_alive(self) -> None:

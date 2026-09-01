@@ -131,6 +131,29 @@ interface SessionInput {
 interface Conversation { readonly input: { for(actx: unknown): SessionInput } }
 interface Sessions { scope(id: string): unknown }
 
+/** Write the workflow invocation prefix into the active conversation draft.
+ *
+ * Workflow rows live in the resident panel, but the goal belongs in the
+ * conversation composer. Keeping this bridge in the host-facing module means
+ * the panel stays a presentational component and the draft is written through
+ * the same session-scoped input API used by `/orbit-workflows`.
+ */
+function writeWorkflowDraft(
+  ctx: ClientContext,
+  t: Translate,
+  workflow: { workflow_id: string; name?: string },
+  sessionId: string,
+): void {
+  const conversation = ctx.get('conversation') as unknown as Conversation | undefined
+  const sessions = ctx.get('sessions') as unknown as Sessions | undefined
+  const actx = sessions?.scope(sessionId)
+  if (!conversation || actx === undefined) return
+  const input = conversation.input.for(actx)
+  const label = workflow.name || workflow.workflow_id
+  input.setDraft(`${t('runHead')}${MARK_OPEN}${label}${MARK_CLOSE}${t('runTail')}`)
+  caretToEnd(input.state.getSnapshot().draft)
+}
+
 /**
  * Bring the panel out, wherever it was put.
  *
@@ -261,7 +284,7 @@ function registerWorkflowPopup(ctx: ClientContext, t: Translate): void {
   }), 'orbit: workflow popup')
 }
 
-export const inject = ['inputTriggers', 'slots', 'locale', 'commandUi']
+export const inject = ['inputTriggers', 'slots', 'locale', 'commandUi', 'conversation', 'sessions']
 
 export function apply(ctx: ClientContext): void {
   ctx.effect(
@@ -277,7 +300,11 @@ export function apply(ctx: ClientContext): void {
   registerWorkflowPopup(ctx, t)
   const Panel = ({ t, useSessions }: PropsLocale<'orbit'> & {
     useSessions: <T>(selector: (state: { current?: string }) => T) => T
-  }) => <OrbitPanel t={t} useSessions={useSessions} />
+  }) => <OrbitPanel
+    t={t}
+    useSessions={useSessions}
+    onSelectWorkflow={(workflow, sessionId) => writeWorkflowDraft(ctx, t, workflow, sessionId)}
+  />
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({
     name: 'shell.overlay',
     id: 'orbit-runs',

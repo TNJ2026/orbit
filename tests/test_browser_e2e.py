@@ -16,6 +16,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+import re
 import socket
 import tempfile
 import threading
@@ -249,8 +250,8 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
 
         views = (
             ("#/workflows", "#content"),
-            ("#/goals", "#content"),
-            (f"#/goals/{run_id}", ".page-modal-panel .goal-detail"),
+            ("#/history", "#content"),
+            (f"#/history/{run_id}", ".page-modal-panel .goal-detail"),
             (f"#/runs/{run_id}", ".simplified-run-hero"),
             ("#/home", ".simplified-workspace-composer"),
         )
@@ -355,16 +356,16 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         self.assertNotIn(generated_id, original_values)
         self.assertIn(generated_id, current_values)
 
-    def test_goal_starts_and_stays_in_one_workspace(self) -> None:
-        """The composer keeps what was typed while the run it started is live.
+    def test_starting_a_goal_opens_it_over_an_emptied_composer(self) -> None:
+        """The box is for drafts, and a sent goal is not one.
 
-        It is withheld once that run is over — you are looking at a finished
-        run, not composing — so the workflow started here has to be one that
-        waits. With `workflow:linear`, which finishes in milliseconds, this
-        raced: under the load of a full suite the browser rendered slowly
-        enough for the run to reach `succeeded` first, the composer was
-        correctly withheld, and reading the goal back failed. A human step
-        makes "still running" a fact rather than a hope.
+        It used to keep the text while the run it started was live, from where
+        it was read beside the run drawn under this page. The run is a modal
+        now and carries the goal at its own top, so what was left behind was a
+        submitted goal sitting in a box that invites editing.
+
+        Only on success: a refusal leaves the text where it was typed, which
+        the test below holds.
         """
 
         page = self.open("en-US")
@@ -427,9 +428,144 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         page.wait_for_selector(".simplified-run-hero")
 
         self.assertTrue(started["run_id"])
-        self.assertIn("Prepare a concise report", page.input_value("#simplifiedGoal"))
+        self.assertEqual("", page.input_value("#simplifiedGoal"))
+        # The picker still says which workflow is running: it is locked, not
+        # emptied, and it is the one fact about the run this page keeps.
         self.assertEqual("workflow:linear", page.input_value("#simplifiedWorkflow"))
+        self.assertTrue(page.locator(".run-modal-panel").is_visible())
         self.assertTrue(page.locator(".simplified-run-hero").is_visible())
+        self.assertTrue(page.locator("#liveRegion").is_hidden())
+
+    def test_a_refused_start_leaves_the_typed_goal_alone(self) -> None:
+        """The other half of emptying the box: only a sent goal is sent.
+
+        Clearing a line earlier would lose the paragraph somebody wrote every
+        time the Runtime said no — and a refusal is exactly the moment they
+        need it back to try again.
+        """
+
+        page = self.open("en-US")
+
+        def advertise_goal_ready_workflow(route):
+            response = route.fetch()
+            payload = response.json()
+            entry = next(
+                item for item in payload["data"]["workflows"]
+                if item["workflow_id"] == "workflow:linear"
+            )
+            entry["goal_readiness"] = "ready"
+            route.fulfill(
+                status=200, content_type="application/json",
+                body=json.dumps(payload),
+            )
+
+        page.route("**/api/v1/workflows", advertise_goal_ready_workflow)
+        # A plain refusal. `active_goal_exists` and `handler_unavailable` are
+        # deliberately not it: both navigate somewhere on purpose, and what is
+        # under test here is the branch that stays put and reports.
+        page.route("**/api/v1/langgraph-runs", lambda route: route.fulfill(
+            status=400, content_type="application/json",
+            body=json.dumps({
+                "schema_version": "1.0",
+                "error": {
+                    "code": "invalid_request",
+                    "message": "the Runtime declined this goal",
+                },
+            }),
+        ) if route.request.method == "POST" else route.continue_())
+        page.reload()
+        page.wait_for_selector(".simplified-workspace-composer")
+        page.locator("#simplifiedWorkflow").evaluate(
+            "node => { node.value = 'workflow:linear';"
+            " node.dispatchEvent(new Event('change', {bubbles: true})); }"
+        )
+        page.fill("#simplifiedGoal", "A paragraph worth keeping")
+        page.click("#newGoalStart")
+        page.wait_for_timeout(800)
+        self.assertFalse(page.evaluate("location.hash.startsWith('#/runs/')"))
+
+        # Away and back, because the box still holding the text proves nothing
+        # on its own: a refusal redraws nothing, so the DOM keeps whatever was
+        # typed either way. What is under test is the state the composer is
+        # rebuilt from, and this is what reads it.
+        page.click('.nav-button[data-view="workflows"]')
+        page.wait_for_selector(".workflow-grid")
+        page.click('.nav-button[data-view="home"]')
+        page.wait_for_selector(".simplified-workspace-composer")
+
+        self.assertEqual(
+            "A paragraph worth keeping", page.input_value("#simplifiedGoal"),
+        )
+
+    def test_only_a_named_file_is_offered_for_download(self) -> None:
+        """A port's value is something to read; a file is something to save.
+
+        Every artifact these workflows commit is a port value, so the button
+        was on every one of them and meant something on none. `filename` is
+        how the producer says which kind this is, and the dialog's own title
+        already leans on the same fact.
+        """
+
+        run_id = self.start_run("artifact-download")
+
+        def artifact(filename):
+            body = {
+                "artifact_id": "langgraph_artifact:deadbeef",
+                "run_id": run_id, "node_id": "n1", "attempt_id": None,
+                "port_id": "result", "schema_id": "schema:text",
+                "content_type": "text/markdown", "size_bytes": 12,
+                "status": "committed", "filename": filename,
+            }
+            return body
+
+        for label, filename, expected in (
+            ("a port value", None, ["Close"]),
+            ("a named file", "report.md", ["Download", "Close"]),
+        ):
+            with self.subTest(artifact=label):
+                context = self.browser.new_context(locale="en-US")
+                self.addCleanup(context.close)
+                page = context.new_page()
+                def envelope(payload):
+                    return json.dumps({
+                        "schema_version": "1.0", "projection_version": None,
+                        "data": payload, "next_cursor": None,
+                    })
+
+                # One parameter each, deliberately: a two-parameter handler is
+                # given the Request as its second argument, so a default there
+                # is not a closure — it is overwritten on every call.
+                def serve_list(route):
+                    route.fulfill(
+                        status=200, content_type="application/json",
+                        body=envelope({"artifacts": [artifact(filename)]}),
+                    )
+
+                def serve_one(route):
+                    if "/content" in route.request.url:
+                        route.fulfill(
+                            status=200, content_type="text/markdown",
+                            body="# hello",
+                        )
+                        return
+                    route.fulfill(
+                        status=200, content_type="application/json",
+                        body=envelope(artifact(filename)),
+                    )
+
+                # A glob would read the `?` as a wildcard; these have to tell
+                # a list apart from one artifact by it.
+                page.route(re.compile(r"/api/v1/langgraph-artifacts\?"), serve_list)
+                page.route(re.compile(r"/api/v1/langgraph-artifacts/"), serve_one)
+                page.goto(f"{self.base}/ui/#/runs/{quote(run_id, safe='')}")
+                page.wait_for_selector(".artifact-card-main")
+                page.click(".artifact-card-main")
+                page.wait_for_selector(".artifact-dialog .actions")
+                self.assertEqual(
+                    expected,
+                    page.locator(".artifact-dialog .actions").inner_text().split("\n"),
+                )
+                page.close()
 
     def test_run_detail_has_no_runtime_tabs(self) -> None:
         run_id = self.start_goal("simplified-run", "Prepare a concise report")
@@ -438,15 +574,26 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
 
         self.assertEqual(0, page.locator(".run-tabs").count())
         self.assertEqual(0, page.locator(".why-panel").count())
-        self.assertEqual(0, page.locator(".simplified-workspace-composer").count())
         self.assertEqual(0, page.get_by_role("button", name="Run again").count())
         self.assertTrue(page.locator(".simplified-run-hero").is_visible())
-        # Which run this is and how it went. The goal is read on the goal
-        # page; a paragraph of it here pushed the rest of the card down.
+        # A modal over the composer that started it, rather than a page
+        # reached by navigating away from it. The composer behind is the page
+        # this opened over, and dismissing lands back on it — which is why it
+        # is present here where it used to be asserted absent.
+        self.assertTrue(page.locator(".run-modal-panel").is_visible())
+        self.assertEqual(1, page.locator(
+            ".run-modal-panel .simplified-run-hero"
+        ).count())
+        self.assertEqual(1, page.locator(".simplified-workspace-composer").count())
+        # Which run this is and how it went. The goal is read above, in the
+        # modal's own head; a paragraph of it in here pushed the rest down.
         hero = page.inner_text(".simplified-run-hero")
         self.assertIn("workflow:linear", hero)
         self.assertIn(run_id, hero)
         self.assertNotIn("Prepare a concise report", hero)
+        self.assertIn(
+            "Prepare a concise report", page.inner_text(".run-modal-head"),
+        )
 
     def test_a_step_that_printed_nothing_offers_no_log_to_view(self) -> None:
         """A fold that opens on "nothing yet" is a promise the row could keep.
@@ -496,6 +643,16 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         page.goto(f"{self.base}/ui/#/runs/{run_id}")
         page.wait_for_selector(".run-canvas")
         page.wait_for_selector("iframe.workflow-graph-frame")
+        heading_box = page.locator(".simplified-steps-head").bounding_box()
+        steps_box = page.locator(".simplified-steps").bounding_box()
+        self.assertAlmostEqual(
+            8, steps_box["y"] - heading_box["y"] - heading_box["height"], delta=1,
+        )
+        self.assertAlmostEqual(
+            page.locator(".simplified-steps").bounding_box()["width"],
+            page.locator("iframe.workflow-graph-frame").bounding_box()["width"],
+            delta=1,
+        )
         frame = page.frame_locator("iframe.workflow-graph-frame")
         frame.locator(".node").first.wait_for(timeout=15000)
         # The run is drawn on the definition: every node carries the state it
@@ -615,7 +772,7 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         finished = self.start_goal("simplified-history", "Summarise the quarter")
         self.wait_for_status(self.open("en-US"), finished, "completed")
 
-        page = self.open("en-US", "/ui/#/goals")
+        page = self.open("en-US", "/ui/#/history")
         page.wait_for_selector(".history-goal-row")
         rows = page.locator(".history-goal-row")
         self.assertIn("Summarise the quarter", rows.first.inner_text())
@@ -651,7 +808,7 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
             viewport["width"], drawer_box["x"] + drawer_box["width"], delta=1,
         )
         self.assertTrue(page.locator(".history-goal-list").is_visible())
-        self.assertEqual("#/goals", page.evaluate("location.hash"))
+        self.assertEqual("#/history", page.evaluate("location.hash"))
         self.assertEqual(0, page.locator(".simplified-workspace-composer").count())
         self.assertEqual(0, page.get_by_role("button", name="Run again").count())
 
@@ -668,7 +825,7 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         anonymous = self.start_goal("simplified-history-anon", "")
         self.wait_for_status(page, anonymous, "completed")
 
-        page = self.open("en-US", "/ui/#/goals")
+        page = self.open("en-US", "/ui/#/history")
         page.wait_for_selector(".history-goal-row")
         rows = page.locator(".history-goal-row")
 
@@ -688,23 +845,23 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         finished = self.start_goal("simplified-history-dismiss", "Read a goal back")
         self.wait_for_status(self.open("en-US"), finished, "completed")
 
-        page = self.open("en-US", "/ui/#/goals")
+        page = self.open("en-US", "/ui/#/history")
         page.wait_for_selector(".history-goal-row")
         page.locator(".history-goal-row").first.click()
         page.wait_for_selector(".page-drawer-panel .goal-text-card")
-        self.assertEqual("#/goals", page.evaluate("location.hash"))
+        self.assertEqual("#/history", page.evaluate("location.hash"))
 
         page.get_by_role("button", name="Close").click()
         page.wait_for_function("() => !document.querySelector('.page-modal-root')")
         page.wait_for_selector(".history-goal-list")
-        self.assertEqual("#/goals", page.evaluate("location.hash"))
+        self.assertEqual("#/history", page.evaluate("location.hash"))
 
         # A pasted address still opens the detail, and from there the route
         # is what Escape walks back.
-        page.goto(f"{self.base}/ui/#/goals/{quote(finished, safe='')}")
+        page.goto(f"{self.base}/ui/#/history/{quote(finished, safe='')}")
         page.wait_for_selector(".page-drawer-panel .goal-text-card")
         page.keyboard.press("Escape")
-        page.wait_for_function("() => location.hash === '#/goals'")
+        page.wait_for_function("() => location.hash === '#/history'")
         page.wait_for_function("() => !document.querySelector('.page-modal-root')")
 
     def test_history_follows_the_cursor_to_the_end_on_its_own(self) -> None:
@@ -732,7 +889,7 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
             }))
 
         page.route("**/api/v1/langgraph-runs?*", history_page)
-        page.goto(f"{self.base}/ui/#/goals")
+        page.goto(f"{self.base}/ui/#/history")
         page.wait_for_function(
             "() => document.querySelectorAll('.history-goal-row').length === 2"
         )
@@ -767,7 +924,7 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
             }))
 
         page.route("**/api/v1/langgraph-runs?*", history_page)
-        page.goto(f"{self.base}/ui/#/goals")
+        page.goto(f"{self.base}/ui/#/history")
         page.wait_for_function(
             "() => document.querySelectorAll('.history-goal-row').length === 3"
         )
@@ -865,7 +1022,7 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         waiting = self.start_goal(
             "history-incremental", "Wait to be settled", "workflow:human",
         )
-        page = self.open("en-US", "/ui/#/goals")
+        page = self.open("en-US", "/ui/#/history")
         page.wait_for_selector(".history-goal-row")
         # Drawn once, from the full read this test is about avoiding a repeat
         # of. Everything counted below happens after that.
@@ -905,7 +1062,7 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         page.on("request", lambda request: per_row.append(request.url) if (
             "/outcome" in request.url or "/api/v1/artifacts?" in request.url
         ) else None)
-        page.goto(f"{self.base}/ui/#/goals")
+        page.goto(f"{self.base}/ui/#/history")
         page.wait_for_selector(".history-goal-row")
         page.wait_for_timeout(500)
 
@@ -1692,7 +1849,7 @@ class GoalHomeTests(BrowserE2ETestCase):
     def test_a_long_goal_folds_and_offers_the_way_out_of_the_fold(self) -> None:
         """A goal is frequently a paragraph, and the goal page is where it is read.
 
-        It keeps its line breaks, folds at 120px and unfolds in place. The
+        It keeps its line breaks, folds at five lines and unfolds in place. The
         measurement that decides whether the fold needs a toggle once ran in
         a single animation frame — before the block was in the document, so
         it compared 0 against 0 and hid the toggle on a goal that needed it.
@@ -1704,7 +1861,7 @@ class GoalHomeTests(BrowserE2ETestCase):
         goal = "\n".join(f"line {index} of a long pasted goal" for index in range(30))
         run = self.start(page, workflow_id, goal=goal)
 
-        page.goto(f"{self.base}/ui/#/goals/{quote(run['run_id'], safe='')}")
+        page.goto(f"{self.base}/ui/#/history/{quote(run['run_id'], safe='')}")
         card = page.locator(".goal-text-card")
         card.wait_for()
 
@@ -1718,10 +1875,35 @@ class GoalHomeTests(BrowserE2ETestCase):
         )
 
         toggle.click()
+        self.assertTrue(toggle.is_visible())
+        self.assertEqual("Collapse", toggle.inner_text())
         self.assertEqual(
             clamped.bounding_box()["height"],
             card.locator(".goal-text").bounding_box()["height"],
         )
+
+        page.goto(f"{self.base}/ui/#/runs/{quote(run['run_id'], safe='')}")
+        self.assertEqual("Execution", page.locator(".run-modal-title").inner_text())
+        self.assertEqual(
+            "auto", page.locator(".run-modal-scroll").evaluate(
+                "node => getComputedStyle(node).overflowY"
+            ),
+        )
+        self.assertEqual(
+            "Goal", page.locator(".run-modal-goal-title").inner_text(),
+        )
+        self.assertEqual(
+            1, page.locator(".run-modal-goal-card .goal-text-clamp").count(),
+        )
+        goal_width = page.locator(".run-modal-goal-card").bounding_box()["width"]
+        steps_width = page.locator(".simplified-steps").bounding_box()["width"]
+        self.assertAlmostEqual(goal_width, steps_width, delta=1)
+        modal_toggle = page.locator(".run-modal-head .goal-expand-toggle")
+        modal_toggle.wait_for()
+        self.assertEqual("Expand", modal_toggle.inner_text())
+        modal_toggle.click()
+        self.assertTrue(modal_toggle.is_visible())
+        self.assertEqual("Collapse", modal_toggle.inner_text())
 
     def test_the_run_card_carries_identity_status_and_the_way_to_stop(self) -> None:
         """What a watcher came for, above everything the run produced.
@@ -1741,13 +1923,18 @@ class GoalHomeTests(BrowserE2ETestCase):
         hero = page.locator(".simplified-run-hero")
         hero.wait_for()
 
-        ids = hero.locator(".simplified-run-ids").inner_text()
+        meta = hero.locator(".simplified-run-meta-card")
+        ids = meta.locator(".simplified-run-ids").inner_text()
+        self.assertIn("Workflow name", ids)
+        self.assertIn("Workflow", ids)
+        self.assertIn("LangGraph Run", ids)
         self.assertIn(workflow_id, ids)
         self.assertIn(run["run_id"], ids)
         # The goal is read on the goal page; this card is not where it goes.
         self.assertNotIn("a goal long enough", hero.inner_text())
 
-        state = hero.locator(".simplified-run-state")
+        state = meta.locator(".simplified-run-state")
+        self.assertNotIn("Status", state.inner_text())
         self.assertEqual(1, state.locator(".pill").count())
         cancel = state.locator("button.danger")
         self.assertTrue(cancel.is_visible())
@@ -1802,21 +1989,14 @@ class GoalHomeTests(BrowserE2ETestCase):
             "取消执行", state.locator("button.danger").inner_text(),
         )
 
-    def test_a_finished_run_offers_the_way_to_the_next_goal(self) -> None:
-        """The run page is somewhere a reader is finished with.
-
-        Its only exits were the browser's back button and the nav, neither of
-        which says that starting the next goal is what happens next. The way
-        out appears where the stop button was, and only once there is nothing
-        left to stop.
-        """
+    def test_the_run_card_does_not_duplicate_the_modals_close_control(self) -> None:
+        """The fixed title bar owns the one way to close this modal."""
 
         page = self.open("zh-CN")
         page.wait_for_selector(".simplified-workspace-composer")
         workflow_id = self.publish(page, self.runnable(human=True))
 
-        # While it is still running there is a stop, and no way out: leaving a
-        # working run behind is not what the button beside it should mean.
+        # While it is still running there is a stop, but no textual Close.
         running = self.start(page, workflow_id, goal="仍在执行")
         page.goto(f"{self.base}/ui/#/runs/{quote(running['run_id'], safe='')}")
         page.wait_for_selector(".simplified-run-hero")
@@ -1836,16 +2016,12 @@ class GoalHomeTests(BrowserE2ETestCase):
         page.goto(f"{self.base}/ui/#/runs/{quote(finished['run_id'], safe='')}")
         page.wait_for_selector(".simplified-run-hero")
 
-        page.locator(".simplified-run-state").get_by_role(
+        self.assertEqual(0, page.locator(".simplified-run-state").get_by_role(
             "button", name="关闭", exact=True,
-        ).click()
-
-        page.wait_for_selector(".simplified-workspace-composer")
-        self.assertEqual("#/home", page.evaluate("location.hash"))
-        # A fresh composer, not the finished goal reloaded into it.
-        self.assertEqual("", page.locator(
-            ".simplified-workspace-composer textarea"
-        ).input_value())
+        ).count())
+        self.assertEqual(1, page.locator(".run-modal-titlebar").get_by_role(
+            "button", name="关闭", exact=True,
+        ).count())
 
     def test_watching_a_run_does_not_redraw_the_page_around_it(self) -> None:
         """A tick changes which steps got where, so that is what it changes.
@@ -1955,7 +2131,19 @@ class GoalHomeTests(BrowserE2ETestCase):
 
         page.goto(f"{self.base}/ui/#/runs/{quote(run['run_id'], safe='')}")
         page.wait_for_selector(".simplified-workspace-composer")
-        self.assertTrue(page.locator("#newGoalStart").is_disabled())
+        # The lock is on the two things that would start a second goal. The
+        # primary button is no longer a disabled sentence about the run: the
+        # goal page stopped drawing the run underneath itself, so this is the
+        # way to it, and the only one this page has.
+        self.assertTrue(page.locator("#simplifiedGoal").is_disabled())
+        self.assertTrue(page.locator("#simplifiedWorkflow").is_disabled())
+        self.assertFalse(page.locator("#newGoalStart").is_disabled())
+
+        page.goto(f"{self.base}/ui/#/home")
+        page.wait_for_selector(".simplified-workspace-composer")
+        page.click("#newGoalStart")
+        page.wait_for_selector(".run-modal-panel")
+        self.assertIn(quote(run["run_id"], safe=""), page.evaluate("location.hash"))
 
     def cancel(self, page, run) -> None:
         page.evaluate(
@@ -2297,6 +2485,16 @@ class AgentSubstitutionNoticeTests(BrowserE2ETestCase):
         )
         self.assertIn("data", run, run)
 
+        long_prompt = "\n".join(f"instruction line {index}" for index in range(1, 8))
+
+        def serve_long_prompt(route):
+            response = route.fetch()
+            payload = response.json()
+            payload["data"]["steps"][0]["prompt"] = long_prompt
+            route.fulfill(response=response, json=payload)
+
+        page.route("**/api/v1/langgraph-runs/*/steps", serve_long_prompt)
+
         page.goto(f"{self.base}/ui/#/runs/"
                   f"{quote(run['data']['run']['run_id'], safe='')}")
         page.wait_for_selector(".simplified-step-output summary")
@@ -2304,7 +2502,17 @@ class AgentSubstitutionNoticeTests(BrowserE2ETestCase):
         prompt = page.locator(".simplified-step-prompt").first
         prompt.wait_for()
 
-        self.assertIn("do the thing", prompt.inner_text())
+        self.assertIn("instruction line 7", prompt.inner_text())
+        toggle = page.locator(".step-prompt-toggle").first
+        toggle.wait_for()
+        self.assertLess(prompt.evaluate("node => node.clientHeight"),
+                        prompt.evaluate("node => node.scrollHeight"))
+        self.assertEqual("Expand", toggle.inner_text())
+        toggle.click()
+        self.assertEqual("true", toggle.get_attribute("aria-expanded"))
+        self.assertEqual(prompt.evaluate("node => node.clientHeight"),
+                         prompt.evaluate("node => node.scrollHeight"))
+        self.assertEqual("Collapse", toggle.inner_text())
         # Above what the step said back, not after it.
         self.assertLess(
             prompt.bounding_box()["y"],

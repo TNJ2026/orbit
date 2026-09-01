@@ -133,7 +133,7 @@ class AgentCliSpec:
 # its refusal as prose and exits 0. The step is recorded a success that wrote
 # nothing. So each entry either gets the setting that lets an unattended run
 # actually work, or it gets none because it never prompted to begin with —
-# kimi, pi, hermes and opencode all write without asking.
+# pi, hermes and opencode all write without asking.
 #
 # The two settings are not the same strength, and the weaker one is preferred
 # where a CLI offers it. Codex has a real sandbox of its own, so it is confined
@@ -159,9 +159,6 @@ TRUSTED_AGENT_CLIS: tuple[AgentCliSpec, ...] = (
         args=("--dangerously-skip-permissions",), prompt_flag="-p",
         process_timeout_flag="--print-timeout",
     )),
-    # `kimi -p "<prompt>"` runs one prompt non-interactively and prints the
-    # reply on stdout; probed against kimi 0.28.1.
-    AgentCliSpec("kimi", "kimi", invocation=AgentInvocation(prompt_flag="-p")),
     # `pi -p "<prompt>"` is non-interactive print mode, text output by default.
     # `-p` is a boolean and the prompt is a positional message, but the argv is
     # identical to the flag form, and pi rejects the `--` fence a positional
@@ -174,6 +171,9 @@ TRUSTED_AGENT_CLIS: tuple[AgentCliSpec, ...] = (
     # The only one that reads the prompt from stdin, so the only one whose
     # prompt never appears in the process list.
     AgentCliSpec("opencode", "opencode", invocation=AgentInvocation(args=("run",))),
+    # Proposed from a system probe: installed here, reporting version
+    # 0.37.2.
+    AgentCliSpec("kimi", "kimi", invocation=AgentInvocation(prompt_flag="-p")),
 )
 
 

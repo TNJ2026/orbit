@@ -72,6 +72,15 @@ the user explicitly asks to start the run too.
    for missing required values. Reject invalid types, invalid enumerations, and
    unknown fields unless the workflow explicitly permits additional fields.
    Offer an obvious spelling correction rather than applying it silently.
+   When a goal-ready workflow declares a required inline object input named
+   `prompt` and binds `run.goal` to its `goal` property, materialize that input
+   explicitly as `input.prompt.goal=<normalized goal>` unless the user already
+   supplied `input.prompt`. Do not assume every connected Runtime version will
+   synthesize this object from `goal` alone.
+   Never call `start_run` to probe or discover the accepted input shape: the
+   tool is bound to the goal-execution MCP App, so even a validation failure can
+   leave a separate error card in the conversation. Resolve the shape from the
+   inspected workflow definition and make the first `start_run` call valid.
 3. Validate option values exactly:
    - `follow`: `none`, `interrupt`, or `terminal`.
    - `on_missing`: `ask`, `generate`, or `fail`.

@@ -31,12 +31,35 @@ def tool(client, name, arguments, *, actor):
 
 
 def payload_of(result):
-    """Unwrap the MCP text content back into the object the tool returned."""
+    """The object the tool returned, read the way its consumers read it.
 
-    return json.loads(result["result"]["content"][0]["text"])
+    `structuredContent`, not the text block. Both carried the whole payload
+    for a while and this reached for whichever was easier; they are no longer
+    the same thing for a tool bound to an App card, whose text block is a
+    summary so a host does not print the answer twice. `integration-core`
+    has always read this field (`gateway.ts`), so this is what the assertions
+    below are about.
+    """
+
+    return result["result"]["structuredContent"]
 
 
 class HandshakeTests(ApiTestCase):
+    def test_private_agent_tool_backend_is_not_an_mcp_endpoint(self) -> None:
+        with AsgiHarness(self.app) as client:
+            listed = client.request(
+                "POST", "/internal/v1/agent-tools", actor="reader",
+                body={"operation": "list"},
+            ).json()
+            refused = client.request(
+                "POST", "/internal/v1/agent-tools", actor="reader",
+                body={"jsonrpc": "2.0", "method": "tools/list"},
+            )
+
+        self.assertIn("tools", listed["result"])
+        self.assertEqual(400, refused.status_code)
+        self.assertEqual("unknown operation", refused.json()["error"])
+
     def test_initialize_reports_protocol_and_server(self) -> None:
         with AsgiHarness(self.app) as client:
             body = rpc(client, "initialize", {}, actor="reader").json()
@@ -48,17 +71,39 @@ class HandshakeTests(ApiTestCase):
     def test_dashboard_resource_is_discoverable_and_readable(self) -> None:
         with AsgiHarness(self.app) as client:
             listed = rpc(client, "resources/list", actor="reader").json()
-            resource = listed["result"]["resources"][0]
-            self.assertEqual("ui://orbit/workflows.html", resource["uri"])
-            self.assertEqual("text/html;profile=mcp-app", resource["mimeType"])
-            read = rpc(
-                client, "resources/read", {"uri": resource["uri"]}, actor="reader",
-            ).json()
-        content = read["result"]["contents"][0]
-        # The document a host mounts: it speaks the MCP Apps handshake, and it
-        # reads. What it reads with is pinned in tests/test_orbit_panel.py.
-        self.assertIn("'ui/initialize'", content["text"])
-        self.assertIn("list_workflows", content["text"])
+            resources = listed["result"]["resources"]
+            self.assertEqual(
+                {
+                    "ui://orbit/current-task-v30.html", "ui://orbit/workflows-v10.html",
+                    "ui://orbit/workflow-authoring-v5.html", "ui://orbit/goal-run-v11.html",
+                    "ui://orbit/goals-v5.html",
+                },
+                {resource["uri"] for resource in resources},
+            )
+            for resource in resources:
+                self.assertEqual("text/html;profile=mcp-app", resource["mimeType"])
+                read = rpc(
+                    client, "resources/read", {"uri": resource["uri"]}, actor="reader",
+                ).json()
+                content = read["result"]["contents"][0]
+                self.assertIn("'ui/initialize'", content["text"])
+                self.assertIn("openPromptEditor", content["text"])
+                self.assertIn("dispatchPrompt", content["text"])
+
+    def test_resource_templates_are_an_empty_list_not_an_error(self) -> None:
+        """Declaring `resources` is a promise to answer how they are addressed.
+
+        Orbit's five are fixed `ui://` documents with nothing templated about
+        them, so the honest answer is an empty list. METHOD_NOT_FOUND is what
+        a host reads as a resource surface that does not work, and it takes
+        the panels down with it — observed against WorkBuddy 5.4.2, which asks
+        for this immediately after `resources/list`.
+        """
+
+        with AsgiHarness(self.app) as client:
+            body = rpc(client, "resources/templates/list", actor="reader").json()
+            self.assertNotIn("error", body)
+            self.assertEqual([], body["result"]["resourceTemplates"])
 
     def test_a_notification_gets_no_response_body(self) -> None:
         with AsgiHarness(self.app) as client:
@@ -90,15 +135,17 @@ class DiscoveryTests(ApiTestCase):
             self.assertEqual(
                 {
                     "get_capabilities", "list_runs", "inspect_run", "start_run", "resume_run",
-                    "open_orbit_dashboard",
+                    "open_orbit_dashboard", "open_orbit_goals",
                     "list_runtime_events", "get_run_steps", "get_run_graph",
                     "get_run_edges", "read_run_output",
                     "recover_run", "cancel_run", "replay_langgraph_run",
-                    "list_workflows", "get_workflow_definition", "list_agents",
+                    "list_workflows", "get_workflow_definition",
+                    "inspect_workflow_definition", "delete_workflow", "list_agents",
                     "list_artifacts", "read_artifact",
                     "read_artifact_content",
                     "get_artifact_lineage", "collect_artifacts",
                     "generate_workflow", "modify_workflow", "get_authoring_job",
+                    "list_authoring_jobs", "read_authoring_output",
                     "register_authoring_client",
                     "claim_authoring_request", "wait_authoring_request",
                     "submit_authoring_response",
@@ -115,9 +162,82 @@ class DiscoveryTests(ApiTestCase):
                 item for item in tools if item["name"] == "open_orbit_dashboard"
             )
             self.assertEqual(
-                "ui://orbit/workflows.html",
+                "ui://orbit/current-task-v30.html",
                 dashboard["_meta"]["ui"]["resourceUri"],
             )
+            self.assertEqual(
+                {
+                    "open_orbit_dashboard": "ui://orbit/current-task-v30.html",
+                    "open_orbit_goals": "ui://orbit/goals-v5.html",
+                },
+                {
+                    item["name"]: item["_meta"]["ui"]["resourceUri"]
+                    for item in tools if item["name"].startswith("open_orbit_")
+                },
+            )
+            card_bindings = {
+                item["name"]: item.get("_meta", {}).get("ui", {}).get("resourceUri")
+                for item in tools
+            }
+            self.assertEqual("ui://orbit/workflows-v10.html", card_bindings["list_workflows"])
+            self.assertEqual(
+                "ui://orbit/workflows-v10.html",
+                card_bindings["get_workflow_definition"],
+            )
+            self.assertIsNone(card_bindings["inspect_workflow_definition"])
+            self.assertEqual("ui://orbit/workflow-authoring-v5.html", card_bindings["generate_workflow"])
+            self.assertEqual("ui://orbit/goal-run-v11.html", card_bindings["start_run"])
+            self.assertEqual("ui://orbit/goals-v5.html", card_bindings["open_orbit_goals"])
+
+    def test_app_resources_request_borderless_host_chrome(self) -> None:
+        with AsgiHarness(self.app) as client:
+            listed = rpc(
+                client, "resources/list", actor="reader",
+            ).json()["result"]["resources"]
+            detail = next(
+                item for item in listed
+                if item["uri"] == "ui://orbit/workflows-v10.html"
+            )
+            self.assertFalse(detail["_meta"]["ui"]["prefersBorder"])
+            self.assertFalse(detail["_meta"]["openai/widgetPrefersBorder"])
+
+            read = rpc(
+                client, "resources/read",
+                {"uri": "ui://orbit/workflows-v10.html"}, actor="reader",
+            ).json()["result"]["contents"][0]
+            self.assertFalse(read["_meta"]["ui"]["prefersBorder"])
+            self.assertFalse(read["_meta"]["openai/widgetPrefersBorder"])
+
+    def test_workbuddy_prompt_modes_distinguish_editable_and_direct_actions(self) -> None:
+        with AsgiHarness(self.app) as client:
+            workflows = rpc(
+                client, "resources/read",
+                {"uri": "ui://orbit/workflows-v10.html"}, actor="reader",
+            ).json()["result"]["contents"][0]["text"]
+            dashboard = rpc(
+                client, "resources/read",
+                {"uri": "ui://orbit/current-task-v30.html"}, actor="reader",
+            ).json()["result"]["contents"][0]["text"]
+
+            self.assertIn("dispatchPromptValue(`使用工作流", workflows)
+            self.assertIn("hostProvidesPromptEditor()", workflows)
+            self.assertIn("mode==='direct'||hostProvidesPromptEditor()", workflows)
+            self.assertIn('data-prompt-mode="edit"', workflows)
+            self.assertIn('data-prompt-mode="direct"', dashboard)
+            self.assertIn("mode==='direct'||hostProvidesPromptEditor()", dashboard)
+            for editable in (
+                "action(t().createWorkflow,t().promptCreateWorkflow,'edit')",
+                "action(t().handle,t().promptHandle(run),'edit',true)",
+                'data-prompt="${esc(t().promptAddAgent)}" data-prompt-mode="edit"',
+            ):
+                self.assertIn(editable, dashboard)
+            for direct in (
+                "action(t().history,t().promptHistory,'direct')",
+                "action(t().open,t().promptOpen,'direct')",
+                "action(t().cancel,t().promptCancel(run.run_id),'direct')",
+                "action(t().explain,t().promptExplain(run.run_id),'direct',true)",
+            ):
+                self.assertIn(direct, dashboard)
 
     def test_harness_profile_carries_the_writer_surface_but_not_the_ops_one(self) -> None:
         """What a Harness needs to ask for a Workflow, and to write one.
@@ -154,8 +274,11 @@ class DiscoveryTests(ApiTestCase):
         self.assertEqual(
             {
                 "get_capabilities", "list_workflows", "get_workflow_definition",
+                "inspect_workflow_definition",
+                "delete_workflow",
                 "list_agents", "list_runs", "inspect_run",
                 "generate_workflow", "modify_workflow", "get_authoring_job",
+                "list_authoring_jobs", "read_authoring_output",
                 "list_runtime_events", "get_run_steps", "get_run_graph",
                 "get_run_edges", "read_run_output",
                 "replay_langgraph_run", "start_run", "resume_run",
@@ -247,13 +370,12 @@ class ToolCallTests(ApiTestCase):
             self.assertFalse(result["result"]["isError"])
             self.assertEqual([], payload_of(result)["runs"])
 
-    def test_dashboard_tool_returns_the_initial_workflow_projection(self) -> None:
+    def test_dashboard_tool_returns_the_initial_current_task_projection(self) -> None:
         with AsgiHarness(self.app) as client:
             result = tool(client, "open_orbit_dashboard", {}, actor="reader")
 
         payload = payload_of(result)
-        self.assertIn("workflows", payload)
-        self.assertTrue(payload["workflows"])
+        self.assertEqual([], payload["runs"])
 
     def test_write_tool_starts_a_run(self) -> None:
         with AsgiHarness(self.app) as client:
@@ -307,6 +429,22 @@ class ToolCallTests(ApiTestCase):
             )
             self.assertTrue(result["result"]["isError"])
             self.assertIn("wait must be", payload_of(result)["error"])
+
+    def test_deferred_start_rejects_bad_inputs_before_creating_a_run(self) -> None:
+        with AsgiHarness(self.app) as client:
+            result = tool(
+                client, "start_run",
+                {
+                    "workflow_id": "workflow:linear", "input": {"nope": 1},
+                    "wait": False, "idempotency_key": "bad-deferred-input",
+                },
+                actor="writer",
+            )
+            self.assertTrue(result["result"]["isError"])
+            self.assertIn("unknown workflow inputs", payload_of(result)["error"])
+            self.assertEqual(
+                [], payload_of(tool(client, "list_runs", {}, actor="writer"))["runs"],
+            )
 
     def test_repeating_the_key_replays_instead_of_duplicating(self) -> None:
         with AsgiHarness(self.app) as client:
@@ -514,6 +652,18 @@ class DiscoveryAndResultTests(ApiTestCase):
             [("first", "action"), ("second", "action"), ("done", "terminal")],
             [(node["node_id"], node["kind"]) for node in payload["nodes"]],
         )
+        self.assertEqual("workflow:reversed", payload["workflow_id"])
+        self.assertEqual("Written bottom-up", payload["name"])
+        self.assertEqual(1, payload["latest_version"])
+        self.assertEqual("structured", payload["input_mode"])
+        self.assertEqual(["value"], [item["id"] for item in payload["inputs"]])
+        self.assertIn("goal_readiness", payload)
+        self.assertIn("goal_binding", payload)
+        self.assertEqual(
+            [("first", "second"), ("second", "done")],
+            [(edge["from"], edge["to"]) for edge in payload["graph"]["edges"]],
+        )
+        self.assertEqual("outline", payload["graph"]["layout"]["mode"])
         self.assertEqual("transform", payload["nodes"][0]["handler"])
         # A step that runs nothing says so rather than naming a handler it
         # does not have.
@@ -526,6 +676,29 @@ class DiscoveryAndResultTests(ApiTestCase):
                 {"workflow_id": "workflow:not-here"}, actor="reader",
             )
         self.assertTrue(body["result"]["isError"])
+
+    def test_delete_requires_write_scope_version_and_is_idempotent(self) -> None:
+        self.publish_reversed_workflow()
+        arguments = {
+            "workflow_id": "workflow:reversed", "expected_version": 1,
+            "idempotency_key": "delete-reversed",
+        }
+        with AsgiHarness(self.app) as client:
+            refused = tool(client, "delete_workflow", arguments, actor="reader")
+            first = payload_of(tool(
+                client, "delete_workflow", arguments, actor="writer",
+            ))
+            repeated = payload_of(tool(
+                client, "delete_workflow", arguments, actor="writer",
+            ))
+            listed = payload_of(tool(client, "list_workflows", {}, actor="reader"))
+
+        self.assertEqual(-32001, refused["error"]["code"])
+        self.assertEqual(first, repeated)
+        self.assertTrue(first["deleted"])
+        self.assertNotIn(
+            "workflow:reversed", {item["workflow_id"] for item in listed["workflows"]},
+        )
 
     def test_ready_only_filters_to_what_a_goal_can_start(self) -> None:
         with AsgiHarness(self.app) as client:
@@ -648,6 +821,21 @@ class DiscoveryAndResultTests(ApiTestCase):
 
 class AuthoringToolTests(ApiTestCase):
     """This composition wires no authoring agent, so the tools say so."""
+
+    def test_an_unconfigured_runtime_lists_no_authoring_jobs(self) -> None:
+        with AsgiHarness(self.app) as client:
+            result = payload_of(tool(
+                client, "list_authoring_jobs", {"limit": 5}, actor="reader",
+            ))
+        self.assertEqual([], result["jobs"])
+
+    def test_authoring_console_requires_sensitive_read_scope(self) -> None:
+        with AsgiHarness(self.app) as client:
+            result = tool(
+                client, "read_authoring_output",
+                {"job_id": "authoring_job:none"}, actor="reader",
+            )
+        self.assertEqual(-32001, result["error"]["code"])
 
     def test_generation_reports_that_it_is_not_configured(self) -> None:
         with AsgiHarness(self.app) as client:
@@ -923,7 +1111,7 @@ class StdioTransportTests(ApiTestCase):
 
         self.assertEqual(2, len(responses))
         self.assertEqual("orbit", responses[0]["result"]["serverInfo"]["name"])
-        self.assertEqual(29, len(responses[1]["result"]["tools"]))
+        self.assertEqual(34, len(responses[1]["result"]["tools"]))
 
     def test_a_notification_produces_no_line_at_all(self) -> None:
         """There is no 202 on this transport; silence is the whole answer."""
@@ -941,7 +1129,7 @@ class StdioTransportTests(ApiTestCase):
             '"params":{"name":"list_workflows","arguments":{}}}'
         )
 
-        payload = json.loads(responses[0]["result"]["content"][0]["text"])
+        payload = responses[0]["result"]["structuredContent"]
         self.assertEqual(
             ["workflow:linear"],
             [item["workflow_id"] for item in payload["workflows"]],

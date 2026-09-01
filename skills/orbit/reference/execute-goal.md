@@ -20,7 +20,12 @@ resolved workflow identity are sent to `start_run`.
    with `ready_only=true`. Match the goal against names, descriptions,
    declared inputs, and goal readiness. Use `inspect_workflow_definition` when
    published steps are needed to distinguish plausible candidates, so selecting
-   a goal does not replace the list with a workflow-detail card.
+   a goal does not replace the list with a workflow-detail card. If the host
+   renders the workflow-list MCP App, consume its returned data internally and
+   do not duplicate its rows in a Markdown table or another list. State only
+   the selected workflow and the material reason for the selection before
+   starting it. Provide a textual candidate list only when the card was not
+   rendered or when the user must choose between materially different matches.
 3. If one workflow clearly fits, use it. If several materially different
    workflows fit, present their relevant differences and ask the user to
    choose. Do not silently select a workflow whose effects or outcome differ

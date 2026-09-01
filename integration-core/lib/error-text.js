@@ -122,6 +122,7 @@ const READINGS = [
     // A reader cannot act on any of these, but "this is a bug" is still a more
     // useful thing to be told than "something went wrong".
     [/invalid Orbit DTO|not canonical base64|arguments must be an object/i, 'errProtocol'],
+    [/Orbit workflow generation (?:failed|\$\{workflow\.status\})|completed workflow generation without/i, 'errProtocol'],
     [/Unknown Orbit client action|requires action and args|Workflow id is required/i, 'errProtocol'],
     [/invalid authoring output (cursor|address)|authoring output returned invalid JSON/i, 'errProtocol'],
     [/returned an invalid authoring output address/i, 'errProtocol'],

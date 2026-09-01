@@ -774,7 +774,7 @@ class WorkflowAuthoringService:
             "Every action node needs handler{name,version} chosen from `handlers`, and its inputs and outputs must be exactly that handler fact's `ports.inputs` and `ports.outputs`. Copy them; do not rewrite, reorder-with-changes, rename or retype them.",
             "Edges may contain only the fields listed in shape_contract.edge_fields; port schemas on both ends must match.",
             "There is no edge field named default. A default edge omits condition or uses condition:true, and sorts after conditional edges by using a greater priority.",
-            "In conditions and mappings, a source reference must start with source.<from.port>; for example an edge from port result references source.result.approved, never source.approved.",
+            "In conditions and mappings, a source reference must start with source.<from.port>; for example an approval edge from port result references source.result.decision, never source.decision or source.result.approved.",
             "Every node must be reachable from entry and have a path to a terminal; terminal nodes have no outgoing edges.",
             "Prefer a simple acyclic graph. Edges without back_edge:true must never form a cycle.",
             "This is a LangGraph workflow: use only action, decision, human, join, and terminal nodes. Never emit agentic, foreach, subflow, or extension nodes, top-level extensions, or a node extension field.",
@@ -914,8 +914,8 @@ class WorkflowAuthoringService:
             # approve. Unlike an action's open result, this shape is knowable.
             "human_submission": {
                 "shape": {
-                    "decision": "approve | reject | the task's own vocabulary",
-                    "value": "whatever the person supplied, may be absent",
+                    "decision": "approve | reject",
+                    "value": "whatever the person supplied; use null when absent",
                 },
                 "reading_it": {
                     "op": "eq",

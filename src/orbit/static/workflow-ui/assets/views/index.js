@@ -176,7 +176,12 @@ export function createViews(context) {
     if (summary && simplifiedComposerState.runId !== summary.run_id) {
       simplifiedComposerState.runId = summary.run_id;
       simplifiedComposerState.workflowId = summary.workflow_id;
-      simplifiedComposerState.goal = summary.goal || "";
+      // The running goal used to be copied back into the box, from where it
+      // was read while the run was drawn under this page. The run is a modal
+      // now and carries its own goal at the top, so the copy would only be a
+      // submitted goal sitting in a box for drafts — and it would put back on
+      // reload exactly what starting one just cleared.
+      simplifiedComposerState.goal = "";
     } else if (!summary && simplifiedComposerState.runId) {
       simplifiedComposerState.runId = null;
       simplifiedComposerState.workflowId = "";
@@ -251,12 +256,17 @@ export function createViews(context) {
     });
     const chosen = selectedEntry();
     const allowed = workflowRunnable(chosen) ? workflowStartCommand(chosen) : null;
-    const start = el("button", {
+    // Locked, this is the way in rather than a disabled statement. The run
+    // it names is the reason the composer cannot be used, and until now the
+    // only route to it was a background tick happening to navigate there.
+    const start = locked ? el("button", {
+      class: "button primary", type: "button", id: "newGoalStart",
+      text: i18n.t("simplified.run.watch"),
+      onclick: () => navigate({ view: "run", runId: summary.run_id }),
+    }) : el("button", {
       class: "button primary", type: "submit", id: "newGoalStart",
-      disabled: locked || !allowed ? "disabled" : null,
-      text: locked
-        ? i18n.t("simplified.run.inProgress")
-        : i18n.t("newRun.submit"),
+      disabled: allowed ? null : "disabled",
+      text: i18n.t("newRun.submit"),
     });
     const form = el("form", {
       class: "panel simplified-workspace-composer",
@@ -300,7 +310,11 @@ export function createViews(context) {
           }, `run.start:${crypto.randomUUID ? crypto.randomUUID() : Date.now()}`);
           const startedRun = started.data.run || started.data;
           simplifiedComposerState.runId = startedRun.run_id;
-          announce(command.label, "success");
+          // Sent, so it stops being a draft. Cleared here and not a line
+          // earlier: every refusal above and every error below leaves the
+          // text where it was typed, which is the whole reason it is held in
+          // state rather than read off the box.
+          simplifiedComposerState.goal = "";
           navigate({ view: "run", runId: startedRun.run_id });
         } catch (error) {
           if (error instanceof ApiError && error.code === "active_goal_exists") {
@@ -380,7 +394,15 @@ export function createViews(context) {
     }
   }
 
-  async function renderSimplifiedWorkspace(root, selectedRunId = null) {
+  /* The composer, and only the composer.
+   *
+   * A run used to be drawn under it whenever one was in flight, which meant
+   * the same run had two presentations — inline here, and a modal at its own
+   * address — and drawing it twice would be two live patches fighting over
+   * one set of step rows. It has one presentation now: the modal. What is
+   * left here is the lock, and the way in to what holds it.
+   */
+  async function renderSimplifiedWorkspace(root) {
     // The published catalog, in both products. Single-agent mode used to
     // choose from built-in templates instead, which meant the workflow its own
     // Agent had just generated was not among the things it could start.
@@ -390,19 +412,94 @@ export function createViews(context) {
     ]);
     const runs = runsResponse.data.runs || [];
     const active = runs.find((item) => ["running", "waiting", "interrupted"].includes(item.status));
-    const runId = selectedRunId || active?.run_id || null;
-    const summary = runId ? (await api.langGraphRun(runId)).data : null;
-    // A LangGraph run, so a LangGraph status. The composer is withheld once
-    // the selected run is over — it would otherwise render locked, because a
-    // summary is present, and read as a run still in flight.
-    const historicalDetail = Boolean(
-      selectedRunId && summary
-      && TERMINAL_LANGGRAPH_STATUSES.has(summary.status),
-    );
-    if (!historicalDetail) {
-      renderSimplifiedComposer(root, catalogResponse.data.workflows, summary);
-    }
-    if (runId && summary) await renderLangGraphRun(root, summary);
+    const summary = active ? (await api.langGraphRun(active.run_id)).data : null;
+    renderSimplifiedComposer(root, catalogResponse.data.workflows, summary);
+  }
+
+  /* A run in flight, over the page that started it.
+   *
+   * It was a page of its own, which made watching a goal mean leaving the
+   * composer behind and coming back by the browser's button. It is a modal
+   * now: the composer stays where it was, and closing puts you back on it.
+   *
+   * What it opens with is what was asked for. The hero below leads with the
+   * two ids, deliberately — a goal is frequently a paragraph and it pushed
+   * the state and the way to stop below the fold — so the goal is here
+   * instead, clamped to three lines, where it costs nothing it was costing.
+   */
+  async function openRunModal(runId) {
+    const { panel, dismiss } = openPageModal({
+      label: i18n.t("simplified.execution"),
+      back: {
+        matches: (route) => route?.view === "run" && route.runId === runId,
+        route: { view: "home", runId: null },
+      },
+    });
+    panel.classList.add("run-modal-panel");
+    await renderRunModal(panel, runId, dismiss);
+  }
+
+  async function renderRunModal(panel, runId, dismiss) {
+    const draw = async () => {
+      panel.replaceChildren(dataState(el, i18n, "loading"));
+      try {
+        const run = (await api.langGraphRun(runId)).data;
+        // The Workflow by the name it was given. The id is on the identity
+        // line below either way, so a catalog that cannot be read costs the
+        // name and nothing else.
+        let workflowName = "";
+        try {
+          workflowName = ((await api.workflowCatalog()).data.workflows.find(
+            (item) => item.workflow_id === run.workflow_id,
+          ) || {}).name || "";
+        } catch (error) {
+          workflowName = "";
+        }
+        const body = el("div", { class: "run-modal-body" });
+        const close = el("button", {
+          class: "goal-modal-close", type: "button",
+          "aria-label": i18n.t("action.close"),
+          title: i18n.t("action.close"),
+          onclick: () => dismiss(),
+        }, [
+          svgEl("svg", {
+            viewBox: "0 0 24 24", width: "16", height: "16",
+            "aria-hidden": "true", fill: "none", stroke: "currentColor",
+            "stroke-width": "1.8", "stroke-linecap": "round",
+          }, [
+            svgEl("path", { d: "M6 6l12 12" }),
+            svgEl("path", { d: "M18 6L6 18" }),
+          ]),
+        ]);
+        panel.replaceChildren(
+          el("header", { class: "run-modal-titlebar" }, [
+            el("h1", { class: "run-modal-title", text: i18n.t("simplified.execution") }),
+            close,
+          ]),
+          el("div", { class: "run-modal-scroll" }, [
+            el("div", { class: "run-modal-head" }, [
+              el("div", { class: "run-modal-headline" }, [
+                el("section", { class: "run-modal-goal-section" }, [
+                  el("h2", {
+                    class: "run-modal-goal-title",
+                    text: i18n.t("goal.heading.goal"),
+                  }),
+                el("div", { class: "run-modal-goal-card" }, [
+                  ...goalTextBlock(run, "p", "run-modal-goal"),
+                ]),
+              ]),
+              ].filter(Boolean)),
+            ]),
+            body,
+          ]),
+        );
+        await renderLangGraphRun(body, run, { workflowName });
+      } catch (error) {
+        panel.replaceChildren(dataState(el, i18n, "error", { onRetry: draw }));
+        reportError(error);
+      }
+    };
+    await draw();
   }
 
   /* The run's own commands, as buttons. The workspace hero and the History
@@ -462,44 +559,52 @@ export function createViews(context) {
     return actions;
   }
 
-  async function renderLangGraphRun(root, run, { branches = true } = {}) {
+  async function renderLangGraphRun(
+    root, run, { branches = true, workflowName = "" } = {},
+  ) {
     const actions = runActionButtons(run);
     root.append(el("section", { class: "panel simplified-run-hero" }, [
       // Identity and fate, not the goal. A goal is frequently a paragraph and
       // it pushed everything a watcher is here for — which run this is, how
       // it is going, how to stop it — below the fold. It is read in full on
       // the goal page, which is the page for reading it.
-      el("div", { class: "simplified-run-identity" }, [
-        el("div", { class: "simplified-run-ids" }, [
-          el("p", { class: "mono muted", text: run.workflow_id }),
-          el("p", { class: "mono muted", text: run.run_id }),
+      el("div", { class: "simplified-run-meta-card" }, [
+        el("div", { class: "simplified-run-identity" }, [
+          el("dl", { class: "simplified-run-ids" }, [
+            workflowName ? el("div", { class: "run-meta-item" }, [
+              el("dt", { text: i18n.t("run.info.workflowName") }),
+              el("dd", { text: workflowName }),
+            ]) : null,
+            el("div", { class: "run-meta-item" }, [
+              el("dt", { text: i18n.t("run.info.workflowId") }),
+              el("dd", { class: "mono", text: run.workflow_id }),
+            ]),
+            el("div", { class: "run-meta-item" }, [
+              el("dt", { text: i18n.t("run.info.runId") }),
+              el("dd", { class: "mono", text: run.run_id }),
+            ]),
           // Who actually did the work, when that was not who the definition
           // names. Recorded on the run rather than read from the current
           // binding: the answer for a run that happened last week is the
           // Agent that ran it, not the one that would run it now.
-          run.agent_binding ? el("p", {
-            class: "muted run-agent-binding",
-            text: i18n.t("run.agentBinding", {
-              agent: run.agent_binding.replace(/^agent\./, "").replace(/@.*$/, ""),
-            }),
-          }) : null,
-        ].filter(Boolean)),
-        // Beside the status rather than under the card: stopping a run is
-        // what a watcher comes here to do, and it was below everything the
-        // run had produced so far.
-        //
-        // The way out sits in the same place once there is nothing left to
-        // stop. A finished run is a page a reader is done with, and the only
-        // exits were the browser's back button and the nav — neither of which
-        // says that starting the next goal is what happens next.
-        el("div", { class: "simplified-run-state" }, [
-          pill(run.status),
-          ...actions,
-          TERMINAL_LANGGRAPH_STATUSES.has(run.status) ? el("button", {
-            class: "button", text: i18n.t("run.close"),
-            onclick: () => navigate({ view: "home", runId: null }),
-          }) : null,
-        ].filter(Boolean)),
+            run.agent_binding ? el("div", { class: "run-meta-item" }, [
+              el("dt", { text: i18n.t("run.info.agent") }),
+              el("dd", {
+                class: "run-agent-binding",
+                text: run.agent_binding.replace(/^agent\./, "").replace(/@.*$/, ""),
+              }),
+            ]) : null,
+          ].filter(Boolean)),
+        // Status and any live actions form the card's right-hand side. The
+        // modal already owns a Close control in its fixed title bar, so a
+        // second textual Close here would be two exits for the same surface.
+          el("div", { class: "simplified-run-state" }, [
+            el("div", { class: "run-meta-status" }, [
+              pill(run.status),
+            ]),
+            ...actions,
+          ].filter(Boolean)),
+        ]),
       ]),
       run.interrupts?.length ? el("pre", {
         class: "code-block", text: JSON.stringify(run.interrupts, null, 2),
@@ -599,12 +704,16 @@ export function createViews(context) {
    * underneath it and reload the graph frame beside it.
    */
   async function renderRunSteps(root, runId, { branches = true, live = false } = {}) {
-    const panel = el("section", { class: "panel simplified-steps" }, [
-      el("div", { class: "panel-head" }, [
-        el("div", { class: "panel-title", text: i18n.t("simplified.steps") }),
-      ]),
+    // The heading names the card, so it stands outside it — the way the goal
+    // detail draws its four sections. Inside a filled card it read as the
+    // list's own first row.
+    const heading = el("div", { class: "panel-head simplified-steps-head" }, [
+      el("div", { class: "panel-title", text: i18n.t("simplified.steps") }),
     ]);
-    root.append(panel);
+    const panel = el("section", { class: "panel simplified-steps" });
+    root.append(el("section", { class: "simplified-steps-section" }, [
+      heading, panel,
+    ]));
     let steps;
     try {
       steps = (await api.runSteps(runId)).data.steps || [];
@@ -719,6 +828,40 @@ export function createViews(context) {
    * page and most visits do not want it. While the run is live it keeps
    * asking; once it is over it reads to the end and stops.
    */
+  function expandableStepPrompt(prompt) {
+    const content = workflowViews().stepPrompt({ prompt }, "simplified-step-prompt");
+    if (!content) return null;
+    const label = el("span", { text: i18n.t("simplified.execution.promptExpand") });
+    const toggle = el("button", {
+      class: "step-prompt-toggle", type: "button", hidden: "hidden",
+      onclick: () => {
+        const expanded = content.classList.toggle("expanded");
+        toggle.classList.toggle("expanded", expanded);
+        toggle.setAttribute("aria-expanded", String(expanded));
+        label.textContent = i18n.t(expanded
+          ? "simplified.execution.promptCollapse"
+          : "simplified.execution.promptExpand");
+      },
+      "aria-expanded": "false",
+    }, [
+      label,
+      svgEl("svg", {
+        viewBox: "0 0 24 24", width: "16", height: "16", "aria-hidden": "true",
+        fill: "none", stroke: "currentColor", "stroke-width": "2",
+        "stroke-linecap": "round", "stroke-linejoin": "round",
+      }, [svgEl("path", { d: "M6 9l6 6 6-6" })]),
+    ]);
+    // The control is only useful when five rendered lines do not contain the
+    // prompt. Measure after attachment and on reflow, because changing the
+    // modal width can turn the same text from four lines into six.
+    const measure = new ResizeObserver(() => {
+      if (!content.isConnected || content.classList.contains("expanded")) return;
+      toggle.hidden = content.scrollHeight <= content.clientHeight + 1;
+    });
+    measure.observe(content);
+    return el("div", { class: "step-prompt-block" }, [content, toggle]);
+  }
+
   function runConsole(runId, {
     live, nodeId, prompt = null, hideWhenEmpty = false, showState = true,
   }) {
@@ -746,7 +889,7 @@ export function createViews(context) {
         // the instruction that produced it is half a transcript: the reader
         // opened this to find out what happened, and what was asked is the
         // other half of that.
-        workflowViews().stepPrompt({ prompt }, "simplified-step-prompt"),
+        expandableStepPrompt(prompt),
         state, log,
       ].filter(Boolean)),
     ]);
@@ -962,7 +1105,7 @@ export function createViews(context) {
     return el("button", {
       class: "history-goal-row",
       // The detail opens where the list is: a modal, no address change.
-      // `#/goals/{id}` still addresses a run for people who paste one.
+      // `#/history/{id}` still addresses a run for people who paste one.
       onclick: () => openGoalModal(run.run_id),
     }, [
       el("span", { class: "history-goal-copy" }, [
@@ -1400,22 +1543,21 @@ export function createViews(context) {
             el("div", { class: "panel-title", text: item.filename || item.port_id }),
           ]),
           el("div", { class: "actions" }, [
-            el("a", {
+            // A file is something to save; a port's value is something to
+            // read here and nothing else. `filename` is how the producer says
+            // which of the two this is — the title above leans on the same
+            // fact, and every artifact these workflows commit is the second
+            // kind, which is why the button was offered on all of them and
+            // meant something on none.
+            item.filename ? el("a", {
               class: "button", text: i18n.t("artifacts.download"),
               href: api.artifactDownloadUrl(item.artifact_id),
-            }),
-            el("button", {
-              class: "button", text: i18n.t("artifacts.copyId"),
-              onclick: async () => {
-                await navigator.clipboard.writeText(item.artifact_id);
-                announce(i18n.t("artifacts.idCopied"));
-              },
-            }),
+            }) : null,
             el("button", {
               class: "button", text: i18n.t("action.close"),
               onclick: () => panel.close(),
             }),
-          ]),
+          ].filter(Boolean)),
         ]),
         el("div", { class: "panel-body" }, [
           // The Artifact itself is what someone opened this for: the picture or
@@ -1806,7 +1948,6 @@ export function createViews(context) {
       page.append(el("header", { class: "view-intro simplified-workflow-list-heading" }, [
         el("div", {}, [
           el("h2", { text: i18n.t("workflows.generated.heading") }),
-          el("p", { class: "muted", text: i18n.t("workflows.generated.description") }),
         ]),
       ]));
     }
@@ -2412,7 +2553,7 @@ export function createViews(context) {
 
   /* A goal from History opens in a right-hand drawer: the list stays rendered
    * under the scrim, while the full-height detail has room to be read like a
-   * page. `#/goals/{id}` remains the shareable address. */
+   * page. `#/history/{id}` remains the shareable address. */
   async function openGoalModal(runId) {
     goalModalRunId = runId;
     const { panel, dismiss } = openPageModal({
@@ -2489,7 +2630,7 @@ export function createViews(context) {
    *
    * A goal is frequently a paragraph — the facts of an incident, the
    * constraints on an answer — and a heading renders it as one long line
-   * with its newlines collapsed. So it keeps its line breaks, folds at 120px
+   * with its newlines collapsed. So it keeps its line breaks, folds at five lines
    * and unfolds in place, and the block never grows taller than the reader
    * asked for.
    *
@@ -2497,18 +2638,25 @@ export function createViews(context) {
    * it is the same goal: the run page drew it as a heading, and the same
    * paste that read properly in history became a wall of text there.
    */
-  function goalTextBlock(run, tag = "h1") {
+  function goalTextBlock(run, tag = "h1", extraClass = "") {
     const clamp = el("div", { class: "goal-text-clamp" }, [
-      el(tag, { class: "goal-text", text: runName(run) }),
+      el(tag, {
+        class: `goal-text${extraClass ? ` ${extraClass}` : ""}`,
+        text: runName(run), title: runName(run),
+      }),
     ]);
-    const label = el("span", { text: i18n.t("goal.showAll") });
+    const label = el("span", { text: i18n.t("simplified.execution.promptExpand") });
     const toggle = el("button", {
       class: "goal-expand-toggle", type: "button",
       onclick: () => {
         const expanded = clamp.classList.toggle("expanded");
-        label.textContent = i18n.t(expanded ? "goal.collapse" : "goal.showAll");
+        label.textContent = i18n.t(expanded
+          ? "simplified.execution.promptCollapse"
+          : "simplified.execution.promptExpand");
         toggle.classList.toggle("expanded", expanded);
+        toggle.setAttribute("aria-expanded", String(expanded));
       },
+      "aria-expanded": "false",
     }, [
       label,
       svgEl("svg", {
@@ -2524,7 +2672,9 @@ export function createViews(context) {
     // observer answers on first layout and again whenever the answer could
     // have changed, which a narrowing window does by rewrapping the text.
     const measure = new ResizeObserver(() => {
-      if (!clamp.isConnected) return;
+      // Once open, equality means "all content is visible", not "there was
+      // never overflow". Keep the control available so it can be collapsed.
+      if (!clamp.isConnected || clamp.classList.contains("expanded")) return;
       toggle.hidden = clamp.scrollHeight <= clamp.clientHeight;
     });
     measure.observe(clamp);
@@ -3625,7 +3775,7 @@ export function createViews(context) {
     cleanup() { if (activeViewCleanup) activeViewCleanup(); activeViewCleanup = null; },
     stopPolling() { if (refreshTimer) clearTimeout(refreshTimer); },
     renderSimplifiedWorkspace, renderHistory, renderWorkflows, openWorkflowModal,
-    openGoalModal, reopenGoalModal,
+    openGoalModal, reopenGoalModal, openRunModal,
     renderWorkflowEdit, renderAgents, refreshRuntimeCard,
     scheduleLivePolling,
   };

@@ -1194,10 +1194,15 @@ class LangGraphWorkflowCompilerTests(unittest.TestCase):
         )
         # Answering on the port the question named is enough.
         completed = compiled.resume(
-            {port["id"]: {"decision": "approve"} for port in asked["output_ports"]},
+            {
+                port["id"]: {"decision": "approve", "value": None}
+                for port in asked["output_ports"]
+            },
             config=config,
         )
-        self.assertEqual({"decision": "approve"}, completed["result"])
+        self.assertEqual(
+            {"decision": "approve", "value": None}, completed["result"],
+        )
 
     def test_an_any_join_does_not_demand_the_branch_that_lost(self) -> None:
         """The join policy decides how many inputs must be there, not the port.
@@ -2421,6 +2426,83 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
         self.assertEqual(started.interrupts, unchanged.interrupts)
         self.assertEqual("completed", completed.status)
         self.assertEqual("approved", completed.result)
+
+    def test_approval_response_is_canonical_schema_validated_and_routed(self) -> None:
+        result = port("result")
+        review = IRNode(
+            "review", "human", (port("value"),), (result,), None,
+            {"task_kind": "approval", "participants": ["local"], "quorum": "any"},
+            (), None, None,
+        )
+        approved = node(
+            "approved", inputs=("result",), kind="terminal", handler=False,
+        )
+        rejected = node(
+            "rejected", inputs=("result",), kind="terminal", handler=False,
+        )
+        approval_condition = {
+            "op": "eq",
+            "left": {"op": "ref", "path": "source.result.decision"},
+            "right": {"op": "literal", "value": "approve"},
+        }
+        ir = workflow(
+            (review, approved, rejected),
+            (
+                edge(
+                    "approve", "review", "approved", source_port="result",
+                    target_port="result", condition=approval_condition,
+                ),
+                edge(
+                    "reject", "review", "rejected", source_port="result",
+                    target_port="result", priority=100,
+                ),
+            ),
+            entry=("review",), terminals=("approved", "rejected"),
+            result=("review", "result"),
+        )
+        schemas = InMemorySchemaCatalog({
+            SCHEMA: {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["decision", "value"],
+                "properties": {
+                    "decision": {"enum": ["approve", "reject"]},
+                    "value": {"type": ["integer", "null"]},
+                },
+            },
+        })
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            service = LangGraphWorkflowService(
+                self.publish(directory, ir), LangGraphHandlerRegistry([]),
+                run_db_path=Path(directory) / "runs.sqlite3",
+                checkpoint_db_path=Path(directory) / "checkpoints.sqlite3",
+                schema_catalog=schemas,
+            )
+            started = service.start(
+                ir.workflow_id, {"value": "in"}, idempotency_key="approval-start",
+            )
+            for invalid, message in (
+                ({"result": {"decision": "approved", "value": None}}, "approve.*reject"),
+                ({"result": {"decision": "approve"}}, "exactly.*decision.*value"),
+                ({"result": {"decision": "approve", "value": "wrong"}}, "violates schema"),
+            ):
+                with self.subTest(invalid=invalid):
+                    with self.assertRaisesRegex(ValueError, message):
+                        service.resume(
+                            started.run_id, invalid,
+                            expected_revision=started.revision,
+                            idempotency_key=f"invalid-{definition_hash(invalid).value}",
+                        )
+                    self.assertEqual("interrupted", service.get(started.run_id).status)
+            completed = service.resume(
+                started.run_id,
+                {"result": {"decision": "approve", "value": 42}},
+                expected_revision=started.revision,
+                idempotency_key="approval-valid",
+            )
+
+        self.assertEqual("completed", completed.status)
+        self.assertEqual({"decision": "approve", "value": 42}, completed.result)
 
     def test_old_interrupt_without_port_metadata_is_validated_before_resume(self) -> None:
         """The pinned IR protects old checkpoints before LangGraph consumes them."""

@@ -251,9 +251,11 @@ export interface OrbitPanelProps {
    *  which Workspace it is looking at — a `sessionId` prop would be undefined
    *  forever, and the panel would sit there permanently empty. */
   useSessions: <T>(selector: (state: { current?: string }) => T) => T
+  /** Writes the selected workflow invocation into the conversation composer. */
+  onSelectWorkflow: (workflow: WorkflowSummary, sessionId: string) => void
 }
 
-export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
+export function OrbitPanel({ t, useSessions, onSelectWorkflow }: OrbitPanelProps) {
   const sessionId = useSessions(state => state.current)
   const [layout, setLayout] = useState<PanelLayout>(() => {
     try { return readLayout(localStorage.getItem(PANEL_STORAGE_KEY)) } catch { return DEFAULT_PANEL_LAYOUT }
@@ -598,7 +600,9 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
               type="button"
               className={`${styles.flowRow} ${styles.flowButton}`}
               key={item.workflow_id}
-              onClick={() => setSelectedFlow(item.workflow_id)}
+              onClick={() => {
+                if (sessionId) onSelectWorkflow(item, sessionId)
+              }}
             >
               {/* Name and shape, as Orbit's own card reads: the id is how a
                   machine addresses this, and it is a line above the only thing

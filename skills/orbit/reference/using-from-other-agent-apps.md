@@ -22,8 +22,30 @@ the field names to the App's MCP configuration format:
 ```
 
 Use the Orbit source or installed plugin directory that actually contains the
-script. The workspace selects the project-specific Runtime and data directory.
+script. The workspace selects a workspace-scoped Hub URL; the Hub starts or
+discovers that project's dynamic-port Runtime and data directory.
 Restart or reconnect the App's MCP session after changing its configuration.
+When the App cannot supply a project path, omit the environment entry. Orbit
+then creates and uses `ORBIT_DEFAULT_WORKSPACE` when configured, otherwise
+`~/.orbit/workspaces/default`.
+
+An HTTP-only App should use `http://127.0.0.1:8848/mcp` for the default
+workspace. This is the stable MCP Gateway: it owns the external MCP handshake,
+resources, notifications, and JSON-RPC validation, then sends only Agent tool
+catalog/call requests to the selected workspace Runtime. The App never needs
+the Runtime's dynamic port. Workflow node execution is another internal hop:
+the workspace Control Runtime sends Handler invocation and cancellation to its
+own authenticated Execution Worker process. Neither internal address belongs
+in an Agent App configuration.
+
+The Gateway returns an `Mcp-Session-Id` during initialization. A compatible
+Streamable HTTP client retains it automatically. The Agent can then call
+`list_workspaces` and `select_workspace` with a readable name or absolute path;
+people never need to type a workspace hash. Without a selection the session
+uses the default workspace.
+For another registered workspace use
+`http://127.0.0.1:8848/workspaces/<workspace_id>/mcp`; obtain the stable id and
+URLs with `orbit hub register /absolute/project/path`.
 
 ## Act as a workflow-writing App
 

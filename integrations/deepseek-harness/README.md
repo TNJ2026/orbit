@@ -86,9 +86,11 @@ question, and the bundle carries a test that fails if one starts to appear. Colo
 `--dsw-alias-*` tokens, so the panel follows the Harness theme rather than
 holding an opinion about it.
 
-Opening a Workflow gives it the panel too: what it needs to start, why it
-cannot if it cannot, the Runs it has had, and a link out for the graph and
-definition, which Orbit draws in a frame built for them.
+Selecting a Workflow in the panel writes an invocation sentence such as
+`使用工作流「事故报告处理流程」执行：` into the active conversation draft.
+The person adds the goal and submits it there, so the Agent owns the Run and
+the panel can report its progress. The full definition and graph remain
+available from Orbit's own UI.
 
 Opening a Run gives it the whole panel — the way back is a control at the top —
 and opening a step shows that step's output. A Run's detail does not fit beside

@@ -404,6 +404,32 @@ def _normalize_outputs(node: IRNode, result: Mapping[str, Any]) -> Mapping[str, 
     return to_primitive(dict(result))
 
 
+def validate_human_response(node: IRNode, resumed: Any) -> Mapping[str, Any]:
+    """Normalize one Human answer and enforce the approval wire contract."""
+
+    if isinstance(resumed, Mapping):
+        human_output = resumed
+    elif len(node.outputs) == 1:
+        human_output = {node.outputs[0].id: resumed}
+    else:
+        raise ValueError(f"human node {node.id!r} requires an object response")
+    normalized = _normalize_outputs(node, human_output)
+    if node.config.get("task_kind") != "approval":
+        return normalized
+    if len(node.outputs) != 1:
+        raise ValueError("approval response requires exactly one output port")
+    submission = normalized[node.outputs[0].id]
+    if not isinstance(submission, Mapping):
+        raise ValueError("approval response must contain an object submission")
+    if set(submission) != {"decision", "value"}:
+        raise ValueError(
+            "approval submission must contain exactly 'decision' and 'value'"
+        )
+    if submission.get("decision") not in {"approve", "reject"}:
+        raise ValueError("approval decision must be 'approve' or 'reject'")
+    return normalized
+
+
 def _handlerless_outputs(
     node: IRNode, inputs: Mapping[str, Any]
 ) -> Mapping[str, Any]:
@@ -1184,15 +1210,7 @@ def compile_workflow(
                             for port in current.outputs
                         ],
                     })
-                    if isinstance(resumed, Mapping):
-                        human_output = resumed
-                    elif len(current.outputs) == 1:
-                        human_output = {current.outputs[0].id: resumed}
-                    else:
-                        raise ValueError(
-                            f"human node {current.id!r} requires an object response"
-                        )
-                    output = _normalize_outputs(current, human_output)
+                    output = validate_human_response(current, resumed)
                 else:
                     output = _handlerless_outputs(current, inputs)
             else:

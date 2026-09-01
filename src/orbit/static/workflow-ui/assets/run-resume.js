@@ -1,8 +1,11 @@
-function humanResponseTemplate(interrupt) {
+export function humanResponseValue(interrupt, decision = "approve") {
+  if (decision !== "approve" && decision !== "reject") {
+    throw new TypeError("human decision must be approve or reject");
+  }
   const ports = interrupt?.value?.output_ports;
   if (!Array.isArray(ports) || ports.length !== 1 || !ports[0]?.id) return {};
   return {
-    [ports[0].id]: { decision: "approve", value: null },
+    [ports[0].id]: { decision, value: null },
   };
 }
 
@@ -27,7 +30,7 @@ export function resumeActions(run, command, label = command.label) {
       nodeId: nodeId ?? null,
       payload: {
         interrupt_id: interrupt.id,
-        value: humanResponseTemplate(interrupt),
+        value: humanResponseValue(interrupt),
       },
     };
   });

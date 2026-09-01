@@ -65,7 +65,10 @@ class PublishedWorkflowStepTests(unittest.TestCase):
         ports = interrupt["value"]["output_ports"]
         return self.engine.resume(
             run.run_id,
-            value={port["id"]: {"decision": "approve"} for port in ports},
+            value={
+                port["id"]: {"decision": "approve", "value": None}
+                for port in ports
+            },
             expected_revision=run.revision, idempotency_key="answered",
             interrupt_id=interrupt["id"], actor="local",
         )

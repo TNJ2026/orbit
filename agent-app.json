@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "orbit",
-  "scope": "workspace",
+  "scope": "global",
   "service": {
     "command": [
       "uv",
@@ -9,15 +9,14 @@
       "--project",
       "{manifest_dir}",
       "orbit",
-      "serve",
-      "--project-root",
-      "{workspace}"
+      "hub",
+      "serve"
     ],
     "cwd": ".",
     "environment": ["HOME", "PATH"],
     "ready_url": "http://127.0.0.1:8848/health/ready",
     "timeout_seconds": 60,
-    "discovery": "orbit-runtime"
+    "discovery": null
   },
   "ui": {
     "url": "http://127.0.0.1:8848/ui/"

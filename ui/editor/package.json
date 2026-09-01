@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
+    "build:mcp": "vite build --config vite.mcp.config.js",
     "dev": "vite",
     "test": "node --test src/*.test.mjs"
   },

@@ -213,7 +213,6 @@ export function OrbitRunListRow(
 ) {
   return (
     <button type="button" className={styles.listRow} onClick={onOpen}>
-      <StateDot state={dotState(run.status)} size={9} className={styles.listDot} />
       <span className={styles.listMain}>
         <span className={styles.listGoal}>{run.goal}</span>
         {/* What was asked for, not which definition answered it. Two Runs of

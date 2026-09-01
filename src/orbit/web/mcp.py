@@ -33,12 +33,14 @@ from ..workflow.application.authoring_job_service import (
     AuthoringJobConflict, AuthoringJobService,
 )
 from ..workflow.catalogs import InMemorySchemaCatalog
+from ..workflow.api.routes import ApiCommandExecutor
 from .api_v1 import (
     OPS_READ_SCOPE, OPS_WRITE_SCOPE, READ_SCOPE, SENSITIVE_SCOPE, WRITE_SCOPE, Authorizer,
 )
 from .run_projection import langgraph_run_dto
 from .mcp_app import (
-    ORBIT_DASHBOARD_HTML, ORBIT_DASHBOARD_MIME_TYPE, ORBIT_DASHBOARD_URI,
+    ORBIT_AUTHORING_URI, ORBIT_DASHBOARD_MIME_TYPE, ORBIT_DASHBOARD_URI,
+    ORBIT_GOALS_URI, ORBIT_MCP_APP_RESOURCES, ORBIT_RUN_URI, ORBIT_WORKFLOWS_URI,
 )
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -54,10 +56,13 @@ NOT_AUTHORIZED = -32001
 MCP_SESSION_PRESENCE_SECONDS = 60.0
 MCP_TOOL_PROFILES = frozenset({"full", "harness"})
 HARNESS_TOOL_NAMES = frozenset({
-    "get_capabilities", "list_workflows", "get_workflow_definition", "list_agents",
+    "get_capabilities", "list_workflows", "get_workflow_definition",
+    "inspect_workflow_definition", "list_agents",
+    "delete_workflow",
     "list_runs", "inspect_run",
     "replay_langgraph_run",
     "generate_workflow", "modify_workflow", "get_authoring_job",
+    "list_authoring_jobs", "read_authoring_output",
     # The Host stands on the authoring queue with these, which is what makes it
     # a writer Orbit will pick over forking an Agent CLI. Without them the
     # preference has nothing to prefer: being connected does not put a client
@@ -167,7 +172,15 @@ def _failure(request_id: Any, code: int, message: str) -> dict[str, Any]:
 
 
 def _content(payload: Any, *, is_error: bool = False) -> dict[str, Any]:
-    """Return modern structured content and the legacy JSON text together."""
+    """Return modern structured content and the legacy JSON text together.
+
+    Both carry the whole payload, and a card-bound tool is no exception.
+    Summarising the text block there was tried and reverted: a host that
+    mounts the card prints the answer twice, which is what it was meant to
+    fix, but the model reads the same text block — and with the names gone
+    from a workflow listing it went and fetched each definition one at a
+    time, mounting a card for every one. Six cards is worse than one table.
+    """
 
     return {
         "content": [
@@ -234,6 +247,7 @@ def build_mcp_dispatcher(
         workflow_path, schema_catalog or InMemorySchemaCatalog({}),
         usage_source=getattr(langgraph_service, "workflow_usage", None),
     )
+    command_executor = ApiCommandExecutor(path)
     # Shared with `/api/v1` rather than built again. Two of these against one
     # database each recover every queued job on their own thread, so a single
     # authoring job would run the Agent CLI twice — and the one constructed
@@ -262,12 +276,23 @@ def build_mcp_dispatcher(
         {
             "name": "open_orbit_dashboard",
             "description": (
-                "Open Orbit's interactive workflow dashboard beside the "
-                "conversation. Use this when the user asks to open or show Orbit."
+                "Open Orbit's compact current-task card beside the conversation. "
+                "It shows live progress and attention state; use the full UI for "
+                "catalogs, history, logs, and workflow management."
             ),
             "scope": READ_SCOPE,
             "inputSchema": {"type": "object", "properties": {}},
             "_meta": {"ui": {"resourceUri": ORBIT_DASHBOARD_URI}},
+        },
+        {
+            "name": "open_orbit_goals",
+            "description": (
+                "Open Orbit's recent goals card beside the conversation. "
+                "It shows goal runs and their current status without opening the full UI."
+            ),
+            "scope": READ_SCOPE,
+            "inputSchema": {"type": "object", "properties": {}},
+            "_meta": {"ui": {"resourceUri": ORBIT_GOALS_URI}},
         },
         # -- discovery ----------------------------------------------------
         # `start_run` needs a workflow_id, and until now nothing over MCP could
@@ -291,6 +316,7 @@ def build_mcp_dispatcher(
                     },
                 },
             },
+            "_meta": {"ui": {"resourceUri": ORBIT_WORKFLOWS_URI}},
         },
         {
             "name": "get_workflow_definition",
@@ -304,6 +330,40 @@ def build_mcp_dispatcher(
                 "type": "object",
                 "properties": {"workflow_id": {"type": "string"}},
                 "required": ["workflow_id"],
+            },
+            # The definition is a view inside the workflow-list App. Binding
+            # the read to that same resource lets the mounted card call it;
+            # there is deliberately no separate workflow-detail resource.
+            "_meta": {"ui": {"resourceUri": ORBIT_WORKFLOWS_URI}},
+        },
+        {
+            "name": "inspect_workflow_definition",
+            "description": (
+                "Read one published workflow definition for goal resolution and "
+                "validation without opening the workflow-detail App card."
+            ),
+            "scope": READ_SCOPE,
+            "inputSchema": {
+                "type": "object",
+                "properties": {"workflow_id": {"type": "string"}},
+                "required": ["workflow_id"],
+            },
+        },
+        {
+            "name": "delete_workflow",
+            "description": (
+                "Delete one published workflow after explicit user confirmation. "
+                "Requires the currently observed latest version and an idempotency key."
+            ),
+            "scope": WRITE_SCOPE,
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workflow_id": {"type": "string"},
+                    "expected_version": {"type": "integer", "minimum": 1},
+                    "idempotency_key": {"type": "string"},
+                },
+                "required": ["workflow_id", "expected_version", "idempotency_key"],
             },
         },
         {
@@ -338,6 +398,7 @@ def build_mcp_dispatcher(
                 },
                 "required": ["prompt", "idempotency_key"],
             },
+            "_meta": {"ui": {"resourceUri": ORBIT_AUTHORING_URI}},
         },
         {
             "name": "modify_workflow",
@@ -369,6 +430,39 @@ def build_mcp_dispatcher(
             "inputSchema": {
                 "type": "object",
                 "properties": {"job_id": {"type": "string"}},
+                "required": ["job_id"],
+            },
+        },
+        {
+            "name": "list_authoring_jobs",
+            "description": (
+                "Recent workflow authoring jobs owned by this actor, including "
+                "generation, validation and publication status."
+            ),
+            "scope": READ_SCOPE,
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "active": {"type": "boolean"},
+                    "type": {"type": "string", "enum": ["generate", "modify"]},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                },
+            },
+        },
+        {
+            "name": "read_authoring_output",
+            "description": (
+                "Follow sensitive Agent console and progress output for one "
+                "actor-owned workflow authoring job."
+            ),
+            "scope": SENSITIVE_SCOPE,
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string"},
+                    "after": {"type": "integer", "minimum": 0},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+                },
                 "required": ["job_id"],
             },
         },
@@ -587,6 +681,7 @@ def build_mcp_dispatcher(
                     },
                     "required": ["workflow_id", "idempotency_key"],
                 },
+                "_meta": {"ui": {"resourceUri": ORBIT_RUN_URI}},
             },
             {
                 "name": "resume_run",
@@ -818,8 +913,10 @@ def build_mcp_dispatcher(
                 "event_schemas": ["langgraph_run/1", "langgraph_node/1"],
                 "tool_profile": tool_profile,
             }
-        if name == "open_orbit_dashboard":
-            name = "list_workflows"
+        name = {
+            "open_orbit_dashboard": "list_runs",
+            "open_orbit_goals": "list_runs",
+        }.get(name, name)
         if name == "list_runs":
             owner = reading_actor(actor)
             # Not a widening of scope: every actor reaching this transport is
@@ -1029,7 +1126,7 @@ def build_mcp_dispatcher(
                 limit=min(200, max(1, int(arguments.get("limit", 100))))
             )
             return {"collected_artifact_ids": list(collected)}
-        if name == "get_workflow_definition":
+        if name in {"get_workflow_definition", "inspect_workflow_definition"}:
             detail = workflow_reads.detail(workflow_id_argument(arguments))
             graph = detail.get("graph") or {}
             layout = {
@@ -1045,18 +1142,30 @@ def build_mcp_dispatcher(
             def place(node):
                 spot = layout.get(node["node_id"]) or {}
                 return (spot.get("depth", 0), spot.get("lane", 0), node["node_id"])
-            return {"nodes": [
-                {
-                    "node_id": node["node_id"],
-                    "label": node.get("label") or node["node_id"],
-                    "kind": node["kind"],
-                    "handler": node.get("handler_name"),
-                    "prompt": str(
-                        configs.get(node["node_id"], {}).get("prompt") or ""
-                    ),
-                }
-                for node in sorted(graph.get("nodes") or (), key=place)
-            ]}
+            return {
+                "workflow_id": detail["workflow_id"],
+                "name": detail["name"],
+                "description": detail["description"],
+                "latest_version": detail["latest_version"],
+                "goal_readiness": detail["goal_readiness"],
+                "readiness_reason": detail["readiness_reason"],
+                "input_mode": detail["input_mode"],
+                "inputs": detail["inputs"],
+                "goal_binding": detail["goal_binding"],
+                "graph": graph,
+                "nodes": [
+                    {
+                        "node_id": node["node_id"],
+                        "label": node.get("label") or node["node_id"],
+                        "kind": node["kind"],
+                        "handler": node.get("handler_name"),
+                        "prompt": str(
+                            configs.get(node["node_id"], {}).get("prompt") or ""
+                        ),
+                    }
+                    for node in sorted(graph.get("nodes") or (), key=place)
+                ],
+            }
         if name == "list_agents":
             # Identity only, like the HTTP catalog it mirrors: no config
             # schema, no secrets, nothing a caller could assemble into a
@@ -1121,6 +1230,27 @@ def build_mcp_dispatcher(
                     for item in items
                 ]
             }
+        if name == "delete_workflow":
+            if workflow_publisher is None:
+                raise ValueError("workflow deletion is not configured")
+            workflow_id = workflow_id_argument(arguments)
+            expected_version = int(arguments["expected_version"])
+
+            def delete(_body, _actor, _key):
+                workflow_publisher.delete_workflow(
+                    workflow_id, expected_latest_version=expected_version,
+                )
+                return {"workflow_id": workflow_id, "deleted": True}
+
+            _status, result = command_executor.execute(
+                actor=actor,
+                idempotency_key=str(arguments["idempotency_key"]),
+                method="DELETE",
+                request_path=f"/mcp/workflows/{workflow_id}",
+                body={"expected_version": expected_version},
+                handler=delete,
+            )
+            return result
         if name == "generate_workflow":
             if authoring_jobs is None:
                 raise ValueError("workflow authoring is not configured")
@@ -1145,6 +1275,34 @@ def build_mcp_dispatcher(
             if authoring_jobs is None:
                 raise ValueError("workflow authoring is not configured")
             return authoring_jobs.get(str(arguments["job_id"]), actor=actor)
+        if name == "list_authoring_jobs":
+            if authoring_jobs is None:
+                return {"jobs": []}
+            jobs = authoring_jobs.list(
+                actor=actor,
+                active_only=bool(arguments.get("active", False)),
+                job_type=arguments.get("type") or None,
+            )
+            limit = min(100, max(1, int(arguments.get("limit", 20))))
+            return {"jobs": jobs[:limit]}
+        if name == "read_authoring_output":
+            if authoring_jobs is None:
+                raise ValueError("workflow authoring is not configured")
+            job_id = str(arguments["job_id"])
+            # The ownership check deliberately comes before the console read:
+            # a job another actor owns looks exactly like one that is absent.
+            authoring_jobs.get(job_id, actor=actor)
+            after = int(arguments.get("after", 0))
+            chunks, next_after = authoring_jobs.output(
+                job_id,
+                after_chunk_id=after,
+                limit=min(500, max(1, int(arguments.get("limit", 200)))),
+            )
+            return {
+                "chunks": chunks,
+                "next_after": next_after,
+                "has_more": next_after is not None,
+            }
         if name == "register_authoring_client":
             if authoring_broker is None:
                 raise ValueError("client-side workflow generation is not configured")
@@ -1218,19 +1376,45 @@ def build_mcp_dispatcher(
                 ]
             })
         if method == "resources/list":
-            return _result(request_id, {"resources": [{
-                "uri": ORBIT_DASHBOARD_URI,
-                "name": "Orbit workflow dashboard",
-                "description": "Interactive list of published Orbit workflows.",
-                "mimeType": ORBIT_DASHBOARD_MIME_TYPE,
-            }]})
+            return _result(request_id, {"resources": [
+                {
+                    "uri": resource["uri"],
+                    "name": resource["name"],
+                    "description": resource["description"],
+                    "mimeType": ORBIT_DASHBOARD_MIME_TYPE,
+                    "_meta": {
+                        "ui": {"prefersBorder": resource["prefers_border"]},
+                        "openai/widgetPrefersBorder": resource["prefers_border"],
+                    },
+                }
+                for resource in ORBIT_MCP_APP_RESOURCES
+            ]})
+        # Declared `resources`, so a client is entitled to ask how they are
+        # addressed. Orbit's are five fixed `ui://` documents with nothing
+        # templated about them, and the answer to that is an empty list —
+        # not METHOD_NOT_FOUND, which reads to a host as a resource surface
+        # that does not work and takes the panels down with it. Observed:
+        # WorkBuddy 5.4.2 asks for this immediately after `resources/list`.
+        if method == "resources/templates/list":
+            return _result(request_id, {"resourceTemplates": []})
         if method == "resources/read":
-            if params.get("uri") != ORBIT_DASHBOARD_URI:
+            resource = next(
+                (
+                    item for item in ORBIT_MCP_APP_RESOURCES
+                    if item["uri"] == params.get("uri")
+                ),
+                None,
+            )
+            if resource is None:
                 return _failure(request_id, INVALID_PARAMS, "unknown resource")
             return _result(request_id, {"contents": [{
-                "uri": ORBIT_DASHBOARD_URI,
+                "uri": resource["uri"],
                 "mimeType": ORBIT_DASHBOARD_MIME_TYPE,
-                "text": ORBIT_DASHBOARD_HTML,
+                "text": resource["html"],
+                "_meta": {
+                    "ui": {"prefersBorder": resource["prefers_border"]},
+                    "openai/widgetPrefersBorder": resource["prefers_border"],
+                },
             }]})
         if method != "tools/call":
             return _failure(request_id, METHOD_NOT_FOUND, f"unknown method {method}")
@@ -1321,6 +1505,58 @@ def mcp_routes(
         return JSONResponse(response)
 
     return [Route("/mcp", endpoint, methods=["POST"])]
+
+
+def agent_tool_routes(
+    dispatch: Callable[[Mapping[str, Any], str | None], dict[str, Any] | None],
+    *,
+    authenticator: Callable[[Request], str | None] | None = None,
+    path: str = "/internal/v1/agent-tools",
+) -> list[Route]:
+    """Private HTTP adapter for the MCP Gateway's workspace tool backend.
+
+    This deliberately isn't an MCP endpoint: the fixed Hub owns JSON-RPC,
+    handshakes, resources, notifications, and client sessions.  A workspace
+    Runtime receives only a small domain envelope asking it to describe or
+    invoke its registered Agent tools.
+    """
+
+    async def endpoint(request: Request) -> JSONResponse:
+        actor = None if authenticator is None else authenticator(request)
+        if actor is not None and not actor.strip():
+            actor = None
+        try:
+            envelope = json.loads(await request.body() or b"")
+        except json.JSONDecodeError:
+            return JSONResponse({"error": "request body must be JSON"}, status_code=400)
+        if not isinstance(envelope, Mapping):
+            return JSONResponse({"error": "expected an object"}, status_code=400)
+
+        operation = envelope.get("operation")
+        if operation == "list":
+            message = {
+                "jsonrpc": "2.0", "id": "internal", "method": "tools/list",
+                "params": {},
+            }
+        elif operation == "call":
+            message = {
+                "jsonrpc": "2.0", "id": "internal", "method": "tools/call",
+                "params": {
+                    "name": envelope.get("name", ""),
+                    "arguments": envelope.get("arguments") or {},
+                },
+            }
+        else:
+            return JSONResponse({"error": "unknown operation"}, status_code=400)
+
+        response = await asyncio.to_thread(dispatch, message, actor)
+        if response is None:
+            return JSONResponse({"error": "tool backend returned no response"}, status_code=500)
+        if "error" in response:
+            return JSONResponse({"protocol_error": response["error"]})
+        return JSONResponse({"result": response.get("result", {})})
+
+    return [Route(path, endpoint, methods=["POST"])]
 
 
 def serve_stdio(

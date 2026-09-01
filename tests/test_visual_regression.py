@@ -448,7 +448,7 @@ class SimplifiedVisualRegressionTests(VisualCaptureCase):
             name = f"simplified-history-{theme}-1280x800"
             with self.subTest(name=name):
                 image = self.capture(
-                    f"{self.base}/ui/#/goals", theme=theme, viewport=viewport,
+                    f"{self.base}/ui/#/history", theme=theme, viewport=viewport,
                     ready_selector=".history-goal-row",
                 )
                 self.assert_matches_baseline(name, image, viewport)

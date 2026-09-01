@@ -94,7 +94,7 @@ export const en = {
   askWhatRuns: 'List the workflows that can run here',
   generateCommandDescription: 'Generate an Orbit workflow from a description',
   generateUsage: 'Usage: /orbit-generate <workflow description>',
-  runHead: 'Run with ',
+  runHead: 'Run workflow ',
   runTail: ': ',
 
 } as const
@@ -191,7 +191,7 @@ export const zh = {
   askWhatRuns: '列出这里可运行的工作流',
   generateCommandDescription: '根据描述生成 Orbit 工作流',
   generateUsage: '用法：/orbit-generate <工作流描述>',
-  runHead: '用',
+  runHead: '使用工作流',
   runTail: '执行：',
 
 } as const

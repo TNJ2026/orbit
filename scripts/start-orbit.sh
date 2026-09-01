@@ -9,10 +9,10 @@ if [ "$#" -gt 1 ]; then
 fi
 
 WORKSPACE_INPUT="${1:-${ORBIT_AGENT_APP_WORKSPACE:-}}"
+
 if [ -z "$WORKSPACE_INPUT" ]; then
-  echo "Orbit needs a project path. Open or select a project directory, then try again." >&2
-  echo "Pass it as start-orbit.sh /absolute/project/path or set ORBIT_AGENT_APP_WORKSPACE." >&2
-  exit 2
+  exec uv run --project "$ROOT_DIR" orbit agent-app ensure \
+    "$ROOT_DIR/agent-app.json"
 fi
 
 if [ ! -d "$WORKSPACE_INPUT" ]; then

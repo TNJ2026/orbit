@@ -1,2 +1,2 @@
-[mcp_servers.orbit]
-url = "http://127.0.0.1:51325/mcp"
+# Orbit MCP is provided by the installed Codex plugin. Its stdio proxy starts
+# or discovers the workspace Runtime before forwarding requests to it.

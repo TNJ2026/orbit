@@ -942,6 +942,19 @@ class RetryOnAHandlerlessNodeTests(unittest.TestCase):
         self.assertIn("cannot carry a retry policy", found[0].message)
         self.assertIn("reminder and escalation", found[0].hint or "")
 
+    def test_human_branch_reads_only_the_standard_decision_field(self) -> None:
+        document = self.document(retried="")
+        document["edges"][1]["condition"] = {
+            "op": "eq",
+            "left": {"op": "ref", "path": "source.result.approved"},
+            "right": {"op": "literal", "value": True},
+        }
+
+        with self.assertRaises(DiagnosticError) as caught:
+            self.compile(document)
+
+        self.assertIn("source.result.decision", str(caught.exception))
+
     def test_an_action_still_can(self) -> None:
         """The refusal is about having no work to re-run, not about retry."""
 

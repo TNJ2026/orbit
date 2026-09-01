@@ -22,7 +22,7 @@ from orbit.web.mcp_app import (
 
 class CurrentTaskCardTests(unittest.TestCase):
     def test_it_keeps_current_task_as_the_default_resource(self) -> None:
-        self.assertEqual("ui://orbit/current-task-v20.html", ORBIT_DASHBOARD_URI)
+        self.assertEqual("ui://orbit/current-task-v30.html", ORBIT_DASHBOARD_URI)
         self.assertEqual(ORBIT_DASHBOARD_URI, ORBIT_MCP_APP_RESOURCES[0]["uri"])
 
     def test_it_publishes_dedicated_cards(self) -> None:
@@ -34,6 +34,16 @@ class CurrentTaskCardTests(unittest.TestCase):
             },
             {item["uri"] for item in ORBIT_MCP_APP_RESOURCES},
         )
+
+    def test_every_card_uses_the_full_ui_logo_image(self) -> None:
+        for html in (
+            ORBIT_DASHBOARD_HTML, ORBIT_WORKFLOWS_HTML,
+            ORBIT_AUTHORING_HTML, ORBIT_RUN_HTML, ORBIT_GOALS_HTML,
+        ):
+            with self.subTest():
+                self.assertIn('<img class="mark"', html)
+                self.assertIn("data:image/svg+xml", html)
+                self.assertNotIn('<span class="mark">O</span>', html)
 
     def test_it_reads_current_task_and_embedded_workflow_views(self) -> None:
         calls = set(re.findall(r"callTool\('([a-z_]+)'", ORBIT_DASHBOARD_HTML))
@@ -63,13 +73,16 @@ class CurrentTaskCardTests(unittest.TestCase):
         ):
             self.assertIn(marker, ORBIT_DASHBOARD_HTML)
 
-    def test_add_agent_opens_a_prefilled_follow_up_prompt(self) -> None:
+    def test_add_agent_uses_the_host_aware_prompt_editor(self) -> None:
         for marker in (
             "addAgent: 'Add Agent'", "addAgent: '添加 Agent'",
             "promptAddAgent: '给Orbit添加Agent cli：'",
             "const head = viewHead(t().agents,'task').replace",
             'data-prompt="${esc(t().promptAddAgent)}"',
-            "button.addEventListener('click', () => send(button.dataset.prompt))",
+            "button.addEventListener('click', () => dispatchPrompt(button))",
+            "dispatchPromptValue(button.dataset.prompt",
+            "hostProvidesPromptEditor()",
+            "dialog.id='promptEditorDialog'",
         ):
             self.assertIn(marker, ORBIT_DASHBOARD_HTML)
         for absent in ("window.prompt", "data-add-agent-form", "data-add-agent-input"):
@@ -89,12 +102,15 @@ class CurrentTaskCardTests(unittest.TestCase):
         ):
             self.assertNotIn(absent, ORBIT_DASHBOARD_HTML)
 
-    def test_it_shows_progress_and_attention(self) -> None:
+    def test_it_shows_steps_and_attention_without_a_progress_bar(self) -> None:
         for marker in (
-            "DONE_STEPS", "waitingNotice", 'class="progress"',
-            'class="steps"', "step.status === 'waiting'",
+            "waitingNotice", 'class="steps"', "step.status === 'waiting'",
         ):
             self.assertIn(marker, ORBIT_DASHBOARD_HTML)
+        for absent in (
+            'class="progress"', "progressText", "Math.round", "DONE_STEPS",
+        ):
+            self.assertNotIn(absent, ORBIT_DASHBOARD_HTML)
 
     def test_recent_completed_run_is_a_compact_summary_with_idle_actions(self) -> None:
         for marker in (
@@ -105,7 +121,7 @@ class CurrentTaskCardTests(unittest.TestCase):
             'class="workflowName">${esc(workflowName || run.workflow_id)}',
             "if (TERMINAL.has(run.status))",
             "renderRecentRun(run,workflow?.name)",
-            "function idleActions()",
+            "function idleActions(includeCreate=true)",
         ):
             self.assertIn(marker, ORBIT_DASHBOARD_HTML)
 
@@ -119,7 +135,7 @@ class CurrentTaskCardTests(unittest.TestCase):
             self.assertNotIn(absent, recent)
 
         idle_actions = ORBIT_DASHBOARD_HTML.split(
-            "function idleActions() {", 1
+            "function idleActions(includeCreate=true) {", 1
         )[1].split("function renderIdle", 1)[0]
         for marker in (
             "data-view-workflows", "t().createWorkflow",
@@ -160,6 +176,25 @@ class CurrentTaskCardTests(unittest.TestCase):
             ORBIT_DASHBOARD_HTML,
         )
 
+    def test_authoring_actions_reuse_idle_navigation_and_gate_create(self) -> None:
+        authoring = ORBIT_DASHBOARD_HTML.split(
+            "function renderAuthoring(job) {", 1
+        )[1].split("function renderRun", 1)[0]
+        for marker in (
+            "job.status === 'done' || job.status === 'failed'",
+            "idleActions(includeCreate)",
+        ):
+            self.assertIn(marker, authoring)
+
+        idle_actions = ORBIT_DASHBOARD_HTML.split(
+            "function idleActions(includeCreate=true) {", 1
+        )[1].split("function renderIdle", 1)[0]
+        for marker in (
+            "includeCreate ? action(t().createWorkflow",
+            "data-view-workflows", "t().history", "data-view-agents",
+        ):
+            self.assertIn(marker, idle_actions)
+
     def test_suggested_actions_return_to_the_conversation(self) -> None:
         self.assertIn("'ui/message'", ORBIT_DASHBOARD_HTML)
         self.assertIn("sendFollowUpMessage", ORBIT_DASHBOARD_HTML)
@@ -169,28 +204,31 @@ class CurrentTaskCardTests(unittest.TestCase):
         ):
             self.assertIn(prompt, ORBIT_DASHBOARD_HTML)
 
-    def test_human_action_tells_chat_to_use_the_declared_output_port(self) -> None:
+    def test_approval_buttons_send_explicit_decisions_to_the_agent(self) -> None:
         for marker in (
-            "promptHandle: run =>",
-            "current interrupt_id, revision, and output_ports",
-            '"result":{"decision":"approve","value":null}',
-            "当前的 interrupt_id、revision 和 output_ports",
-            "不要自创顶层字段",
-            "t().promptHandle(run)",
+            "promptApproval: (run,decision)",
+            "t().promptApproval(run,'approve')",
+            "t().promptApproval(run,'reject')",
+            "current interrupt_id, revision, allowed_commands, and output_ports",
+            "decision=\"${decision}\" and value=null",
+            "当前的 interrupt_id、revision、allowed_commands 和 output_ports",
         ):
             self.assertIn(marker, ORBIT_DASHBOARD_HTML)
+        self.assertNotIn("callTool('resume_run'", ORBIT_DASHBOARD_HTML)
 
     def test_history_asks_the_host_to_open_the_full_ui_while_agents_stays_in_card(self) -> None:
         for marker in (
             'class="actions idleActions"',
-            "action(t().history,t().promptHistory)",
+            "action(t().history,t().promptHistory,'direct')",
             "data-view-agents",
-            "http://127.0.0.1:8848/ui/#/goals",
+            "http://127.0.0.1:8848/ui/#/history",
             "'ui/message'", "sendFollowUpMessage",
             ".idleActions { flex-wrap: nowrap; overflow-x: auto; }",
         ):
             self.assertIn(marker, ORBIT_DASHBOARD_HTML)
-        idle = ORBIT_DASHBOARD_HTML.split('function idleActions() {', 1)[1].split(
+        idle = ORBIT_DASHBOARD_HTML.split(
+            'function idleActions(includeCreate=true) {', 1
+        )[1].split(
             'function renderIdle', 1
         )[0]
         self.assertLess(idle.index('t().createWorkflow'), idle.index('t().history'))
@@ -203,7 +241,7 @@ class CurrentTaskCardTests(unittest.TestCase):
     def test_it_has_no_direct_mutation_path(self) -> None:
         self.assertNotIn("start_run", ORBIT_DASHBOARD_HTML)
         self.assertNotIn("cancel_run", ORBIT_DASHBOARD_HTML)
-        self.assertNotIn("idempotency-key", ORBIT_DASHBOARD_HTML)
+        self.assertNotIn("resume_run", ORBIT_DASHBOARD_HTML)
         self.assertNotIn("await fetch(", ORBIT_DASHBOARD_HTML)
 
     def test_it_supports_chinese_and_english(self) -> None:
@@ -316,6 +354,11 @@ class DedicatedCardTests(unittest.TestCase):
             "#card.workflowDetail .detailPanel { flex: 1 1 auto; height: auto; min-height: 0; }",
             ORBIT_WORKFLOWS_HTML,
         )
+
+    def test_dashboard_default_height_contains_the_prompt_editor(self) -> None:
+        self.assertIn("--dashboard-card-min-height: 420px;", ORBIT_DASHBOARD_HTML)
+        self.assertIn("#card { min-height: var(--dashboard-card-min-height);", ORBIT_DASHBOARD_HTML)
+        self.assertIn(".promptEditorInput { display: block; width: 100%; min-height: 132px;", ORBIT_DASHBOARD_HTML)
 
     def test_cards_receive_late_codex_tool_output(self) -> None:
         self.assertIn("openai:set_globals", ORBIT_WORKFLOWS_HTML)

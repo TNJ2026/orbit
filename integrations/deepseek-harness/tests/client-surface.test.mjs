@@ -119,12 +119,12 @@ test('the panel carries the Runtime\'s own four pages, in its order', () => {
   )
 })
 
-test('a listing navigates and never starts anything', () => {
-  // Opening a row is navigation; starting a Run from one would answer a
-  // different question wrongly, because the Agent would not know it exists.
+test('a listing writes the workflow request into the conversation draft', () => {
+  // Selecting a row prepares the Agent request in the conversation composer;
+  // the person supplies the goal and submits it there.
   const listing = code.slice(code.indexOf("tab === 'workflows'"), code.indexOf('styles.resize'))
-  assert.match(listing, /setSelectedFlow\(item\.workflow_id\)/, 'a Workflow row does not open')
-  assert.equal(/runCommand|start_run/.test(listing), false, 'a listing grew a launcher')
+  assert.match(listing, /onSelectWorkflow\(item, sessionId\)/, 'a Workflow row does not prepare the draft')
+  assert.equal(/runCommand|start_run/.test(listing), false, 'a listing grew a direct launcher')
 })
 
 
@@ -199,6 +199,17 @@ test('the sentence leaves a gap for the Workflow rather than naming it', async (
   assert.equal((copy.match(/runHead:/g) ?? []).length, 2, 'both dictionaries must carry it')
   assert.equal((copy.match(/runTail:/g) ?? []).length, 2)
   assert.equal(/runHead: '[^']*\{name\}/.test(copy), false, 'the head interpolates a name again')
+})
+
+test('workflow cards use the host conversation input bridge', async () => {
+  const client = await readFile(join(clientDir, 'index.tsx'), 'utf8')
+  const panel = await readFile(join(clientDir, 'OrbitPanel.tsx'), 'utf8')
+  assert.match(client, /function writeWorkflowDraft\(/)
+  assert.match(client, /conversation\.input\.for\(actx\)/)
+  assert.match(client, /input\.setDraft\(/)
+  assert.match(client, /onSelectWorkflow=\{\(workflow, sessionId\) => writeWorkflowDraft\(/)
+  assert.match(panel, /onSelectWorkflow: \(workflow: WorkflowSummary, sessionId: string\) => void/)
+  assert.match(client, /'conversation', 'sessions'/)
 })
 
 test('refresh asks again rather than redrawing what is already held', () => {
@@ -1051,9 +1062,9 @@ test('a picked Workflow is written into the draft as its whole name', async () =
  */
 test('the run sentence leans on the brackets, not on spaces', async () => {
   const locale = await readFile(join(clientDir, 'locales.ts'), 'utf8')
-  assert.match(locale, /runHead: '用'/)
+  assert.match(locale, /runHead: '使用工作流'/)
   assert.match(locale, /runTail: '执行：'/)
-  assert.doesNotMatch(locale, /runHead: '用 '/)
+  assert.doesNotMatch(locale, /runHead: '使用工作流 '/)
   assert.doesNotMatch(locale, /runTail: ' 执行：'/)
 })
 

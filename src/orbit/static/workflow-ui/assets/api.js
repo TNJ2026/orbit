@@ -186,6 +186,7 @@ export class Api {
     return `${this.artifactContentUrl(artifactId)}?download=true`;
   }
 
+
   /* Plan reads are three calls on purpose. The server keeps definition,
      overlay and diff apart, and merging them here would put the distinction
      back at the mercy of the client. */

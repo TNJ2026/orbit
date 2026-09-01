@@ -1,4 +1,4 @@
-"""Proposing a new trusted Agent CLI without ever registering one.
+"""Proposing and applying a constrained trusted Agent CLI change.
 
 The property these guard: a suggestion may come from anywhere — a person, a
 model reading their prompt — and still cannot become an executable. What it
@@ -17,7 +17,8 @@ import unittest
 from orbit.workflow.catalogs.agent_discovery import (
     TRUSTED_AGENT_CLIS, AgentCliSpec, AgentInvocation, probe_executable,
 )
-from orbit.workflow.catalogs.agent_proposal import propose, render_patch
+from orbit.workflow.catalogs.agent_proposal import apply_patch, propose, render_patch
+from orbit.web.api_v1.agent_proposals import _explicit_cli_names, _mentioned_names
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -67,6 +68,29 @@ class ProbeTests(unittest.TestCase):
 
 
 class ProposalTests(unittest.TestCase):
+    def test_cli_name_is_extracted_from_chinese_prompt_without_model_authority(self) -> None:
+        self.assertEqual(["kimi"], _explicit_cli_names("请给 Orbit 添加 Kimi CLI"))
+
+    def test_only_names_adjacent_to_cli_are_extracted(self) -> None:
+        self.assertEqual(
+            ["kimi"],
+            _explicit_cli_names("用 claude 帮我添加 kimi CLI，不要添加 pi"),
+        )
+
+    def test_only_cli_names_explicitly_present_in_the_prompt_survive(self) -> None:
+        self.assertEqual(
+            ["kimi"],
+            _mentioned_names("请给 Orbit 添加 Kimi CLI", ["kimi", "pi", "claude"]),
+        )
+
+    def test_hyphenated_name_uses_whole_name_boundaries(self) -> None:
+        self.assertEqual(
+            ["hermes-manager"],
+            _mentioned_names(
+                "添加 hermes-manager CLI", ["hermes", "hermes-manager"],
+            ),
+        )
+
     def test_an_installed_pinned_candidate_is_proposable(self) -> None:
         proposal, = propose(["aider"], specs=(), which=which_for({"aider"}),
                             runner=version_runner("aider 0.86.1"))
@@ -169,6 +193,10 @@ class PatchTests(unittest.TestCase):
         # *adds* is the claim under test.
         self.assertEqual([], [line for line in added if "AgentInvocation" in line])
         self.assertFalse(AgentCliSpec("aider", "aider").runtime_compatible)
+
+    def test_apply_patch_accepts_only_the_two_reviewed_files(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unexpected files"):
+            apply_patch("--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-a\n+b\n")
 
     def test_a_moved_anchor_refuses_rather_than_patching_the_wrong_place(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

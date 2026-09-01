@@ -22,7 +22,7 @@ const { I18n, preferredLocale, LOCALES } = await import(`${assets}/i18n.js`);
 const { readRoute, routeHash } = await import(`${assets}/router.js`);
 const { dataState } = await import(`${assets}/components/data-state.js`);
 const { semanticWorkflowDiff } = await import(`${assets}/workflow-diff.js`);
-const { resumeActions } = await import(`${assets}/run-resume.js`);
+const { humanResponseValue, resumeActions } = await import(`${assets}/run-resume.js`);
 
 function catalog(locale) {
   return JSON.parse(readFileSync(`${assets}/i18n.${locale}.json`, "utf8"));
@@ -125,6 +125,17 @@ test("human resume defaults to the declared result port", () => {
     interrupt_id: "interrupt:review",
     value: { result: { decision: "approve", value: null } },
   });
+});
+
+test("human decisions share one canonical approve and reject encoder", () => {
+  const interrupt = { value: { output_ports: [{ id: "result" }] } };
+  assert.deepEqual(humanResponseValue(interrupt, "approve"), {
+    result: { decision: "approve", value: null },
+  });
+  assert.deepEqual(humanResponseValue(interrupt, "reject"), {
+    result: { decision: "reject", value: null },
+  });
+  assert.throws(() => humanResponseValue(interrupt, "approved"), /approve or reject/);
 });
 
 /* -- error mapping -------------------------------------------------------- */
@@ -270,7 +281,10 @@ test("live reads use their versioned API view", async () => {
 
 test("router parses deep links and serialises navigation", () => {
   assert.deepEqual(readRoute("#/runs/run%3A7"), { view: "run", runId: "run:7" });
+  assert.deepEqual(readRoute("#/history/run%3A7"), { view: "goal", runId: "run:7" });
   assert.deepEqual(readRoute("#/goals/run%3A7"), { view: "goal", runId: "run:7" });
+  assert.deepEqual(readRoute("#/history"), { view: "goals", runId: null });
+  assert.deepEqual(readRoute("#/goals"), { view: "goals", runId: null });
   assert.deepEqual(readRoute("#/workflows"), { view: "workflows", runId: null });
   assert.deepEqual(
     readRoute("#/workflows/workflow%3Ashared/edit"),
@@ -289,7 +303,8 @@ test("router parses deep links and serialises navigation", () => {
   assert.deepEqual(readRoute("#/artifacts"), { view: "artifacts", runId: null });
   assert.deepEqual(readRoute("#/not-a-view"), { view: "home", runId: null });
   assert.equal(routeHash({ view: "run", runId: "run:7" }), "#/runs/run%3A7");
-  assert.equal(routeHash({ view: "goal", runId: "run:7" }), "#/goals/run%3A7");
+  assert.equal(routeHash({ view: "goal", runId: "run:7" }), "#/history/run%3A7");
+  assert.equal(routeHash({ view: "goals", runId: null }), "#/history");
   assert.equal(
     routeHash({ view: "workflowEdit", workflowId: "workflow:shared" }),
     "#/workflows/workflow%3Ashared/edit",

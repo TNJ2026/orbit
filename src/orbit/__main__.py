@@ -491,6 +491,8 @@ def _serve(args) -> None:
             agent_workspace_root=args.agent_workspace,
             structured_agents=structured_agents,
             mcp_tool_profile=args.mcp_tool_profile,
+            execution_workers=args.execution_workers,
+            serve_mcp=False,
         )
     except MixedSchemaError as exc:
         ownership.release()
@@ -673,25 +675,41 @@ def _mcp(args) -> None:
 def _agent_app(args) -> None:
     """Run the generic local Agent App host without coupling it to Orbit Runtime."""
 
-    from .agent_apps.host import AgentAppHost, AgentAppHostError
+    from dataclasses import replace
+
+    from .agent_apps.host import AgentAppHost, AgentAppHostError, default_workspace
+    from .agent_apps.manifest import EventSpec, McpSpec
     from .agent_apps.mcp_proxy import serve_proxy
+    from .hub import WorkspaceRegistry, workspace_urls
 
     host = AgentAppHost(state_root=args.state_dir)
-    workspace = args.workspace
-    if args.agent_app_action == "mcp-proxy" and workspace is None:
-        try:
-            workspace = host.active_workspace(args.manifest)
-        except (AgentAppHostError, ValueError) as exc:
-            raise SystemExit(f"orbit agent-app: {exc}") from None
+    workspace = (
+        Path(args.workspace).expanduser().resolve()
+        if args.workspace is not None else default_workspace()
+    )
+    identifier, _ = WorkspaceRegistry().register(workspace)
     try:
-        ensured = host.ensure(args.manifest, workspace=workspace)
+        ensured = host.ensure(args.manifest)
     except (AgentAppHostError, ValueError) as exc:
         raise SystemExit(f"orbit agent-app: {exc}") from None
     if args.agent_app_action == "ensure":
-        print(ensured.manifest.ui_url)
+        print(workspace_urls(identifier)["ui_url"])
         return
+    urls = workspace_urls(identifier)
+    selected = replace(
+        ensured.manifest,
+        ui_url=urls["ui_url"],
+        mcp=McpSpec(url=urls["mcp_url"]),
+        events=EventSpec(url=urls["events_url"]),
+    )
     try:
-        serve_proxy(ensured.manifest, state_dir=ensured.state_dir)
+        # The Hub process is global, but each proxy session still needs an
+        # isolated event inbox so one workspace cannot consume another's
+        # Runtime events.
+        serve_proxy(
+            selected,
+            state_dir=ensured.state_dir / "workspaces" / identifier,
+        )
     except RuntimeError as exc:
         raise SystemExit(f"orbit agent-app mcp-proxy: {exc}") from None
 
@@ -791,6 +809,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="MCP tool surface to advertise (default: full)",
     )
     serve_cmd.add_argument(
+        "--execution-workers", type=int, default=1, metavar="N",
+        help="Independent Handler worker processes per workspace (default: 1, max: 16)",
+    )
+    serve_cmd.add_argument(
         ACKNOWLEDGE_FLAG,
         action="store_true",
         help=(
@@ -848,6 +870,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory to search (default: ~/.orbit)",
     )
 
+    hub_cmd = sub.add_parser("hub", help="Run or configure the multi-workspace Hub")
+    hub_sub = hub_cmd.add_subparsers(dest="hub_action", required=True)
+    hub_serve = hub_sub.add_parser("serve", help="Serve the stable workspace router")
+    hub_serve.add_argument("--host", default="127.0.0.1")
+    hub_serve.add_argument("--port", type=int, default=8848)
+    hub_register = hub_sub.add_parser("register", help="Register a workspace and print its URLs")
+    hub_register.add_argument("workspace")
+
     agent_app_cmd = sub.add_parser(
         "agent-app", help="Host a manifest-declared local Agent App",
     )
@@ -862,7 +892,10 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("manifest", help="Path to agent-app.json")
         command.add_argument(
             "--workspace", default=None,
-            help="Workspace identity and working directory for workspace-scoped Apps",
+            help=(
+                "Workspace identity and working directory for workspace-scoped Apps "
+                "(default: ORBIT_DEFAULT_WORKSPACE or ~/.orbit/workspaces/default)"
+            ),
         )
         command.add_argument(
             "--state-dir", default=None,
@@ -989,6 +1022,16 @@ def main() -> None:
 
     if args.command == "runtimes":
         _runtimes(args)
+        return
+
+    if args.command == "hub":
+        from .hub import WorkspaceRegistry, create_hub_app, workspace_urls
+
+        if args.hub_action == "register":
+            identifier, _ = WorkspaceRegistry().register(args.workspace)
+            print(json.dumps(workspace_urls(identifier), sort_keys=True))
+            return
+        uvicorn.run(create_hub_app(), host=args.host, port=args.port, log_level="info")
         return
 
 

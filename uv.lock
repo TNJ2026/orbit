@@ -587,7 +587,9 @@ wheels = [
 name = "orbit"
 source = { editable = "." }
 dependencies = [
+    { name = "anyio" },
     { name = "jsonschema" },
+    { name = "langchain-core" },
     { name = "langgraph" },
     { name = "langgraph-checkpoint-sqlite" },
     { name = "pydantic" },
@@ -608,7 +610,9 @@ structured-authoring = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = ">=3.6.2,<5" },
     { name = "jsonschema", specifier = ">=4.23" },
+    { name = "langchain-core", specifier = ">=1.0,<2" },
     { name = "langgraph", specifier = ">=1.0,<2" },
     { name = "langgraph-checkpoint-sqlite", specifier = ">=3.0,<4" },
     { name = "pillow", marker = "extra == 'dev'", specifier = ">=10" },

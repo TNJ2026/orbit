@@ -16,6 +16,7 @@ from typing import Any, Callable, Mapping, Sequence
 import uuid
 
 from langgraph.checkpoint.sqlite import SqliteSaver
+from jsonschema import Draft202012Validator
 
 from ..api.graph_layout import graph_layout
 from ..api.workflow_catalog import drawable_graph
@@ -26,7 +27,7 @@ from .compiler import (
     LangGraphCompileError, LangGraphCompletionUnsatisfied,
     LangGraphHandlerRegistry, LangGraphJoinDeadlineExceeded,
     LangGraphRetryRequested, LangGraphUnknownExternalResult, compile_workflow,
-    edge_is_selected, outgoing_edges,
+    edge_is_selected, outgoing_edges, validate_human_response,
 )
 
 
@@ -188,7 +189,7 @@ def _bind_goal_input(ir, inputs: Mapping[str, Any], goal: str) -> dict[str, Any]
 
 
 def _validate_interrupt_response(
-    interrupt: Mapping[str, Any], value: Any, *, ir=None,
+    interrupt: Mapping[str, Any], value: Any, *, ir=None, schema_catalog=None,
 ) -> None:
     """Reject a human answer before consuming its durable interrupt.
 
@@ -202,13 +203,19 @@ def _validate_interrupt_response(
     detail = interrupt.get("value")
     if not isinstance(detail, Mapping):
         return
+    node_id = detail.get("node_id")
+    node = None if ir is None else next(
+        (item for item in ir.nodes if item.id == node_id), None
+    )
     ports = detail.get("output_ports")
     if (not isinstance(ports, list) or not ports) and ir is not None:
-        node_id = detail.get("node_id")
-        node = next((item for item in ir.nodes if item.id == node_id), None)
         if node is not None and node.kind == "human":
             ports = [
-                {"id": port.id, "required": port.required}
+                {
+                    "id": port.id,
+                    "schema_id": port.schema_id,
+                    "required": port.required,
+                }
                 for port in node.outputs
             ]
     if not isinstance(ports, list) or not ports:
@@ -237,6 +244,30 @@ def _validate_interrupt_response(
     missing = required - set(value)
     if missing:
         raise ValueError(f"human response omitted required outputs: {sorted(missing)}")
+    if node is not None and node.kind == "human":
+        validate_human_response(node, value)
+    if schema_catalog is not None:
+        by_id = {
+            str(port["id"]): port
+            for port in ports
+            if isinstance(port, Mapping) and port.get("id")
+        }
+        for port_id, port_value in value.items():
+            schema_id = by_id[port_id].get("schema_id")
+            schema = schema_catalog.get(schema_id) if schema_id else None
+            if schema is None:
+                continue
+            error = next(
+                Draft202012Validator(to_primitive(schema)).iter_errors(port_value),
+                None,
+            )
+            if error is not None:
+                location = ".".join(str(item) for item in error.path)
+                suffix = f" at {location}" if location else ""
+                raise ValueError(
+                    f"human response for output {port_id!r} violates schema "
+                    f"{schema_id!r}{suffix}: {error.message}"
+                )
 
 
 def append_event(
@@ -302,6 +333,7 @@ class LangGraphWorkflowService:
         checkpoint_db_path: Path | str,
         artifact_store=None,
         console=None,
+        schema_catalog=None,
         single_goal: bool = False,
         rebind: Callable[[Any], Any] | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -319,6 +351,7 @@ class LangGraphWorkflowService:
         # Read-side only: the Handler adapters write it, and they were handed
         # their own binding when they were built.
         self.console = console
+        self.schema_catalog = schema_catalog
         # A product shape rather than an engine invariant: one goal at a time
         # is what the Goal UI is built around. Off by default, so an
         # embedder running many workflows is not quietly serialised.
@@ -934,7 +967,10 @@ class LangGraphWorkflowService:
             item for item in current.interrupts if item["id"] == interrupt_id
         )
         ir = self._run_ir(current)
-        _validate_interrupt_response(answered_interrupt, value, ir=ir)
+        _validate_interrupt_response(
+            answered_interrupt, value, ir=ir,
+            schema_catalog=self.schema_catalog,
+        )
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             receipt = connection.execute(

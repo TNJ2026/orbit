@@ -58,9 +58,9 @@ class SpecValidationTests(unittest.TestCase):
             self.assertEqual(spec.executable, spec.executable.strip())
 
     def test_the_allowlist_is_exactly_the_reviewed_set(self) -> None:
-        # main's detection scope plus kimi, each probed against the installed
-        # CLI. Adding to this set is a code change and a code review — there is
-        # no config or API that extends it.
+        # Every entry is probed against the installed CLI. Adding to this set
+        # is a code change and a code review — there is no config or API that
+        # extends it.
         self.assertEqual(
             {
                 ("claude", "claude"),
@@ -68,9 +68,9 @@ class SpecValidationTests(unittest.TestCase):
                 ("gemini", "gemini"),
                 ("antigravity", "agy"),
                 ("hermes", "hermes"),
-                ("kimi", "kimi"),
                 ("pi", "pi"),
                 ("opencode", "opencode"),
+                ("kimi", "kimi"),
             },
             {(spec.name, spec.executable) for spec in TRUSTED_AGENT_CLIS},
         )
@@ -105,13 +105,16 @@ class SpecValidationTests(unittest.TestCase):
                 "codex": ("--sandbox", "workspace-write"),
                 # Probed writing a file with no prompt of their own, so there
                 # is nothing here to waive.
-                "hermes": (), "kimi": (), "pi": (), "opencode": (),
+                "hermes": (), "pi": (), "opencode": (),
                 # Not probed: no Gemini CLI was installed where this was
                 # settled. Its `--skip-trust` waives directory trust and not
                 # the tool prompt, so it may well need a setting — but this
                 # file's rule is that an invocation is what a CLI was seen to
                 # accept, never what its help text claims.
                 "gemini": (),
+                # Not probed: no invocation is proposed either, so
+                # there is no prompt to waive yet.
+                "kimi": (),
             },
             settings,
         )

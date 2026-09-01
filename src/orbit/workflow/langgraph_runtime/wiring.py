@@ -20,6 +20,7 @@ from ..data.secrets import assert_no_secret_values
 from ..handlers import AgentHandler, ToolHandler, TransformHandler
 from ..handlers.agent import AgentRequest
 from ..handlers.context import ScopedSecretResolver
+from ..catalogs import InMemorySchemaCatalog
 from .harness_subagent import HarnessSubagentHandler
 from ..persistence.workflow_versions import SQLiteWorkflowVersionStore
 from .artifacts import LangGraphArtifactStore
@@ -781,8 +782,10 @@ def build_service(
     *,
     state_directory: Path | str,
     secret_values: Mapping[str, str] | None = None,
+    schemas: Mapping[str, Mapping[str, Any]] | None = None,
     single_goal: bool = False,
     rebind: Any = None,
+    execution_workers: int = 0,
 ) -> LangGraphWorkflowService:
     """Build the isolated service and its two adapter-owned databases."""
 
@@ -790,18 +793,33 @@ def build_service(
     artifact_store = LangGraphArtifactStore(
         state / "langgraph-runs.sqlite3", state / "artifacts",
     )
-    return LangGraphWorkflowService(
-        SQLiteWorkflowVersionStore(workflow_db_path),
-        trusted_handlers(
+    worker = None
+    if execution_workers:
+        from .execution_worker import start_execution_worker_pool
+
+        handlers, worker = start_execution_worker_pool(
+            registrations,
+            state_directory=state,
+            secret_values=secret_values,
+            worker_count=execution_workers,
+        )
+    else:
+        handlers = trusted_handlers(
             registrations,
             attempt_db_path=state / "langgraph-runs.sqlite3",
             artifact_store=artifact_store,
             secret_values=secret_values,
-        ),
+        )
+    service = LangGraphWorkflowService(
+        SQLiteWorkflowVersionStore(workflow_db_path),
+        handlers,
         run_db_path=state / "langgraph-runs.sqlite3",
         checkpoint_db_path=state / "langgraph-checkpoints.sqlite3",
         artifact_store=artifact_store,
         console=AttemptConsole(state / "langgraph-runs.sqlite3"),
+        schema_catalog=InMemorySchemaCatalog(schemas or {}),
         single_goal=single_goal,
         rebind=rebind,
     )
+    service.execution_worker = worker
+    return service

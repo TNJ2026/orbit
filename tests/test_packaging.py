@@ -39,10 +39,28 @@ class PackageContentTests(unittest.TestCase):
             with self.subTest(asset=asset):
                 self.assertTrue(root.joinpath("assets", asset).is_file())
 
+    def test_the_mcp_xyflow_bundle_ships_offline(self) -> None:
+        root = ORBIT.joinpath("static/mcp-app")
+        script = root.joinpath("workflow-detail.js").read_text(encoding="utf-8")
+        style = root.joinpath("workflow-detail.css").read_text(encoding="utf-8")
+        self.assertIn("OrbitWorkflowGraph", script)
+        self.assertIn("react-flow__controls", style)
+        self.assertFalse(root.joinpath("workflow-detail.js.map").is_file())
+        self.assertNotIn("process.env.NODE_ENV", script)
+
+    def test_the_mcp_graph_keeps_nodes_readable(self) -> None:
+        source = Path(__file__).resolve().parents[1].joinpath(
+            "ui/editor/src/mcp-workflow-graph.jsx"
+        ).read_text(encoding="utf-8")
+        self.assertIn("const MIN_ZOOM = 0.5", source)
+        self.assertIn("minZoom: MIN_ZOOM", source)
+        self.assertIn("minZoom={MIN_ZOOM}", source)
+
     def test_the_runtime_packages_are_importable(self) -> None:
         for module in (
             "orbit.web.app", "orbit.web.api_v1", "orbit.web.mcp",
             "orbit.platform.cutover", "orbit.workflow.langgraph_runtime",
+            "orbit.hub", "orbit.workflow.langgraph_runtime.execution_worker",
         ):
             with self.subTest(module=module):
                 __import__(module)

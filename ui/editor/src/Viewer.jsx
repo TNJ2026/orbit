@@ -11,12 +11,10 @@ import WorkflowNode from "./WorkflowNode.jsx";
 
 const nodeTypes = { workflow: WorkflowNode };
 const edgeTypes = { workflow: WorkflowEdge };
-const FIT_VIEW = { padding: 0.2, maxZoom: 1 };
-/* React Flow's default floor is 0.5, which a six-deep graph reaches before it
-   is anywhere near inside a narrow frame — so "fit view" stopped half way and
-   showed the middle, on the button as well as on load. The floor has to be
-   below whatever the widest graph needs, or fitting is not fitting. */
-const MIN_ZOOM = 0.05;
+// Keep node labels readable on every embedded surface. Fit View obeys the
+// same floor as wheel/pinch/control zoom, so no path can shrink below 50%.
+const MIN_ZOOM = 0.5;
+const FIT_VIEW = { padding: 0.2, minZoom: MIN_ZOOM, maxZoom: 1 };
 
 /**
  * One Workflow graph, drawn and nothing else.

@@ -23,7 +23,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route, WebSocketRoute
 
 from ..workflow.application.handler_runtime_service import HandlerRuntimeBuilder
@@ -262,6 +262,9 @@ class RuntimeComposition:
         settle = getattr(self.langgraph_service, "wait_for_background", None)
         if settle is not None:
             stragglers.extend(settle(timeout))
+        worker = getattr(self.langgraph_service, "execution_worker", None)
+        if worker is not None and not worker.stop(timeout):
+            stragglers.append("execution-worker")
         self._started = False
         return stragglers
 
@@ -295,6 +298,14 @@ class RuntimeComposition:
             "sealed": self.handler_registry.sealed,
             "count": len(self.handler_summary.handlers),
         }
+        worker = getattr(self.langgraph_service, "execution_worker", None)
+        if worker is not None:
+            checks["execution_worker"] = {
+                "ok": worker.alive,
+                "pid": worker.pid,
+                "pids": list(getattr(worker, "pids", (worker.pid,))),
+                "mode": "process_pool",
+            }
 
         components = [loop.status() for loop in self.loops]
         # Every loop that exists is alive — not "at least one exists". A
@@ -411,6 +422,8 @@ def create_app(
     run_retention_days: int | None = None,
     agent_workspace_root: Path | str | None = None,
     delegation_queue: Any = None,
+    execution_workers: int = 0,
+    serve_mcp: bool = True,
 ) -> Starlette:
     """Build the Runtime application.
 
@@ -576,10 +589,12 @@ def create_app(
             registrations,
             state_directory=langgraph_state_directory,
             secret_values=secret_values,
+            schemas=schemas,
             # The capability report has always said this; now the engine
             # keeps it, so the report is a promise rather than a label.
             single_goal=single_goal_mode,
             rebind=agent_rebind,
+            execution_workers=execution_workers,
         )
 
     composition = RuntimeComposition(
@@ -697,7 +712,7 @@ def create_app(
 
     from ..workflow.application.authoring_job_service import AuthoringJobService
     from .api_v1 import authoring_timeout_seconds, build_api_v1
-    from .mcp import build_mcp_dispatcher, mcp_routes
+    from .mcp import agent_tool_routes, build_mcp_dispatcher, mcp_routes
 
     from importlib import resources as _resources
 
@@ -909,6 +924,7 @@ def create_app(
         authorizer=authorizer,
         schema_catalog=composition.schema_catalog,
         artifact_backend=artifact_backend,
+        workflow_publisher=workflow_publisher,
         authoring_jobs=authoring_jobs,
         authoring_broker=authoring_broker,
         langgraph_service=langgraph_service,
@@ -946,7 +962,10 @@ def create_app(
         ),
         # The MCP surface is a second protocol over the same application
         # services and the same identity, not a second implementation.
-        *mcp_routes(mcp_dispatch, authenticator=authenticator),
+        *(mcp_routes(mcp_dispatch, authenticator=authenticator) if serve_mcp else ()),
+        # The fixed Hub owns the public MCP protocol. This private, loopback
+        # backend exposes only the workspace's Agent tool catalog and calls.
+        *agent_tool_routes(mcp_dispatch, authenticator=authenticator),
     ]
 
     # Durable notifications for Agent Apps. Frames are hints only: consumers
@@ -994,20 +1013,6 @@ def create_app(
                 response = super().file_response(*args, **kwargs)
                 response.headers["cache-control"] = "no-cache"
                 return response
-
-        # The same page the MCP App resource serves, over HTTP, for a host
-        # that does not mount MCP Apps. It is deliberately not part of the /ui
-        # bundle: what makes it a panel is that it offers no way to start a
-        # run or write a workflow, and a route inside the full UI would invite
-        # someone to add one.
-        from .mcp_app import ORBIT_DASHBOARD_HTML, ORBIT_PANEL_PATH
-
-        async def orbit_panel(_request: Request) -> HTMLResponse:
-            return HTMLResponse(
-                ORBIT_DASHBOARD_HTML, headers={"cache-control": "no-cache"},
-            )
-
-        routes.append(Route(ORBIT_PANEL_PATH, orbit_panel, name="orbit-panel"))
 
         ui_root = resources.files("orbit").joinpath("static/workflow-ui")
         routes.append(

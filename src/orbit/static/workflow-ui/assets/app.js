@@ -278,7 +278,12 @@ async function render() {
     else if (route.view === "workflowEdit") {
       await views.renderWorkflowEdit(fresh, route.workflowId);
     }
-    else if (route.view === "run") await views.renderSimplifiedWorkspace(fresh, route.runId);
+    else if (route.view === "run") {
+      // The composer stays rendered (dimmed) behind the run it started, so
+      // closing the run is a dismissal rather than a navigation.
+      await views.renderSimplifiedWorkspace(fresh);
+      await views.openRunModal(route.runId);
+    }
     else if (route.view === "agents") await views.renderAgents(fresh);
     // The workspace is the one place runs are browsed.
     else await views.renderSimplifiedWorkspace(fresh);

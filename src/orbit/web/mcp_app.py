@@ -1,10 +1,12 @@
 """Compact Orbit MCP App for current-task feedback.
 
-The card is intentionally not an administration surface. Intent, approvals,
-interrupt answers, and result interpretation belong in the host conversation;
-the full browser UI owns catalogs, history, graphs, logs, and workflow
-management. This View shows only the task that currently matters and sends a
-small set of suggested actions back to the conversation.
+The card is intentionally not an administration surface. Approval interrupts
+are offered as explicit approve/reject actions, then sent to the host
+conversation so its Agent can validate and submit the declared output object.
+Other intent, interrupt answers, and result interpretation belong in the host conversation. The full browser UI
+owns catalogs, history, graphs, logs, and workflow management. This View shows
+only the task that currently matters and sends a small set of suggested actions
+back to the conversation.
 """
 
 from pathlib import Path
@@ -12,14 +14,58 @@ from pathlib import Path
 # The host caches MCP App resources by URI. This URI intentionally changed
 # after the dashboard was split from the workflow catalog so an older card
 # cannot be reused for the current-task surface.
-ORBIT_DASHBOARD_URI = "ui://orbit/current-task-v20.html"
+ORBIT_DASHBOARD_URI = "ui://orbit/current-task-v30.html"
 ORBIT_DASHBOARD_MIME_TYPE = "text/html;profile=mcp-app"
 # Bump the URI whenever the list card markup changes: Codex caches MCP App
 # resources by URI and otherwise keeps rendering the previous document.
-ORBIT_WORKFLOWS_URI = "ui://orbit/workflows-v6.html"
-ORBIT_AUTHORING_URI = "ui://orbit/workflow-authoring.html"
-ORBIT_RUN_URI = "ui://orbit/goal-run-v7.html"
-ORBIT_GOALS_URI = "ui://orbit/goals-v1.html"
+ORBIT_WORKFLOWS_URI = "ui://orbit/workflows-v10.html"
+ORBIT_AUTHORING_URI = "ui://orbit/workflow-authoring-v5.html"
+ORBIT_RUN_URI = "ui://orbit/goal-run-v11.html"
+ORBIT_GOALS_URI = "ui://orbit/goals-v5.html"
+
+# The same framed ring-and-satellite mark used by the full Orbit UI favicon.
+# Keep it embedded: MCP App documents must not depend on a separate HTTP asset.
+ORBIT_LOGO_DATA_URI = (
+    "data:image/svg+xml,"
+    "%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E"
+    "%3Crect width='64' height='64' rx='14' fill='%2310131a'/%3E"
+    "%3Ccircle cx='32' cy='32' r='18' fill='none' stroke='%23adc6ff' stroke-width='6'/%3E"
+    "%3Ccircle cx='48' cy='22' r='6' fill='%23ffb786'/%3E%3C/svg%3E"
+)
+
+_PROMPT_EDITOR_STYLE = r"""
+    .promptEditorDialog { width: min(560px, calc(100% - 32px)); max-height: calc(100% - 32px);
+      padding: 0; border: 1px solid var(--line); border-radius: 12px; color: var(--text);
+      background: var(--soft); box-shadow: 0 18px 48px rgba(0,0,0,.32); }
+    .promptEditorDialog::backdrop { background: rgba(0,0,0,.58); }
+    .promptEditorBody { padding: 16px; }
+    .promptEditorTitle { margin: 0 0 10px; font-size: 14px; }
+    .promptEditorInput { display: block; width: 100%; min-height: 132px; max-height: 50vh;
+      resize: vertical; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px;
+      color: var(--text); background: var(--bg); font: inherit; line-height: 1.5; }
+    .promptEditorInput:focus { border-color: var(--accent); outline: 2px solid
+      color-mix(in srgb, var(--accent) 24%, transparent); }
+    .promptEditorActions { display: flex; justify-content: flex-end; gap: 8px;
+      padding: 12px 16px; border-top: 1px solid var(--line); }
+"""
+
+_PROMPT_EDITOR_SCRIPT = r"""
+function promptEditorLabels(){const language=String(document.documentElement.lang||navigator.language||'').toLowerCase();
+ return language.startsWith('zh')?{title:'编辑提示词',cancel:'取消',send:'发送'}:{title:'Edit prompt',cancel:'Cancel',send:'Send'}}
+function ensurePromptEditor(){let dialog=document.getElementById('promptEditorDialog');if(dialog)return dialog;const labels=promptEditorLabels();
+ dialog=document.createElement('dialog');dialog.id='promptEditorDialog';dialog.className='promptEditorDialog';dialog.setAttribute('aria-labelledby','promptEditorTitle');
+ dialog.innerHTML=`<div class="promptEditorBody"><h2 id="promptEditorTitle" class="promptEditorTitle">${esc(labels.title)}</h2><textarea id="promptEditorInput" class="promptEditorInput"></textarea></div><div class="promptEditorActions"><button id="cancelPromptEditor" class="action" type="button">${esc(labels.cancel)}</button><button id="sendPromptEditor" class="action primary" type="button">${esc(labels.send)}</button></div>`;
+ document.body.appendChild(dialog);const input=dialog.querySelector('#promptEditorInput'),cancel=dialog.querySelector('#cancelPromptEditor'),submit=dialog.querySelector('#sendPromptEditor');
+ const update=()=>{submit.disabled=!input.value.trim()};input.addEventListener('input',update);cancel.onclick=()=>dialog.close();
+ dialog.onclick=event=>{if(event.target===dialog)dialog.close()};const commit=async()=>{const prompt=input.value.trim();if(!prompt)return;submit.disabled=true;try{await send(prompt);dialog.close()}finally{submit.disabled=false}};
+ submit.onclick=commit;input.addEventListener('keydown',event=>{if(event.key==='Enter'&&(event.metaKey||event.ctrlKey)){event.preventDefault();commit()}});update();return dialog}
+function openPromptEditor(prompt){const dialog=ensurePromptEditor(),input=dialog.querySelector('#promptEditorInput');input.value=String(prompt||'');
+ dialog.querySelector('#sendPromptEditor').disabled=!input.value.trim();if(typeof dialog.showModal==='function')dialog.showModal();else dialog.setAttribute('open','');
+ requestAnimationFrame(()=>{input.focus();input.setSelectionRange(input.value.length,input.value.length)})}
+function hostProvidesPromptEditor(){return typeof window.openai?.sendFollowUpMessage==='function'}
+function dispatchPromptValue(prompt,mode='edit'){if(mode==='direct'||hostProvidesPromptEditor())send(prompt);else openPromptEditor(prompt)}
+function dispatchPrompt(button){dispatchPromptValue(button.dataset.prompt,button.dataset.promptMode||'edit')}
+"""
 
 ORBIT_DASHBOARD_HTML = r"""<!doctype html>
 <html>
@@ -32,6 +78,7 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
       color-scheme: light dark;
       font: 14px/1.45 Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont,
         "Segoe UI", sans-serif;
+      --dashboard-card-min-height: 420px;
       --bg: light-dark(#fff, #151517); --soft: light-dark(#f5f5f7, #1d1d20);
       --hover: light-dark(#ededf0, #252529); --line: light-dark(#dedee3, #303035);
       --text: light-dark(#202024, #e8e8eb); --muted: light-dark(#686871, #a0a0a9);
@@ -42,15 +89,15 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
     body { margin: 0; color: var(--text); background: var(--bg); }
     main { min-width: 0; padding: 16px; }
     header { display: flex; align-items: center; gap: 10px; }
-    .mark { display: grid; width: 28px; height: 28px; place-items: center;
-      border-radius: 8px; color: #fff; background: var(--accent); font-weight: 800; }
+    .mark { display: block; width: 28px; height: 28px; flex: none; border-radius: 7px; }
     .heading { min-width: 0; flex: 1; }
     h1 { margin: 0; font-size: 14px; font-weight: 650; }
     #updated { margin-top: 1px; color: var(--faint); font-size: 11px; }
     #refresh { width: 32px; height: 32px; border: 1px solid var(--line);
       border-radius: 8px; color: var(--muted); background: var(--soft); cursor: pointer; }
     #refresh:disabled { opacity: .55; cursor: default; }
-    #card { margin-top: 14px; overflow: hidden; border: 1px solid var(--line);
+    #card { min-height: var(--dashboard-card-min-height); margin-top: 14px;
+      overflow: hidden; border: 1px solid var(--line);
       border-radius: 12px; background: var(--soft); }
     .summary { padding: 16px; }
     .statusLine { display: flex; align-items: center; gap: 8px; }
@@ -63,10 +110,6 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
       overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3;
       -webkit-box-orient: vertical; overflow: hidden; }
     .meta { margin-top: 6px; color: var(--faint); font-size: 11px; overflow-wrap: anywhere; }
-    .progress { height: 3px; margin-top: 14px; overflow: hidden; border-radius: 3px;
-      background: var(--line); }
-    .progress span { display: block; height: 100%; background: var(--accent); }
-    .progressText { margin-top: 6px; color: var(--muted); font-size: 11px; }
     .notice { margin: 0 16px 14px; padding: 10px 12px; border: 1px solid
       color-mix(in srgb, var(--warn) 42%, var(--line)); border-radius: 8px;
       color: var(--warn); background: color-mix(in srgb, var(--warn) 8%, transparent);
@@ -89,6 +132,7 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
       font: inherit; font-size: 12px; }
     .action:hover { background: var(--hover); }
     .action.primary { border-color: transparent; color: #fff; background: var(--accent); }
+    .action.danger { border-color: transparent; color: #fff; background: var(--bad); }
     .viewHead { display: flex; align-items: center; gap: 8px; padding: 10px 12px;
       border-bottom: 1px solid var(--line); background: var(--bg); }
     .back { width: 30px; height: 30px; border: 1px solid var(--line); border-radius: 8px;
@@ -110,6 +154,7 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
     .definitionRow:last-child { border-bottom: 0; }
     .definitionName { font-size: 12px; font-weight: 620; }
     .definitionMeta { margin-top: 3px; color: var(--faint); font-size: 10px; }
+    __PROMPT_EDITOR_STYLE__
     .agentRow { display: grid; grid-template-columns: minmax(0,1fr) auto auto;
       align-items: center; gap: 12px; min-height: 56px; padding: 10px 14px;
       border-bottom: 1px solid var(--line); }
@@ -130,14 +175,13 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
 </head>
 <body>
 <main>
-  <header><span class="mark">O</span><div class="heading"><h1>Orbit</h1>
+  <header><img class="mark" src="__ORBIT_LOGO__" alt="" aria-hidden="true"><div class="heading"><h1>Orbit</h1>
     <div id="updated"></div></div><button id="refresh" type="button" aria-label="Refresh">↻</button></header>
   <section id="card" aria-live="polite"><div class="empty">Connecting…</div></section>
 </main>
 <script>
   const PROTOCOL = '2026-01-26';
   const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'unknown']);
-  const DONE_STEPS = new Set(['succeeded', 'answered']);
   const ACTIVE_JOBS = new Set(['queued', 'running']);
   const RECENT_TASK_MS = 5 * 60 * 60 * 1000;
   const card = document.getElementById('card');
@@ -153,8 +197,8 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
       running: 'Running', waiting: 'Needs your input', completed: 'Completed', failed: 'Failed',
       cancelled: 'Cancelled', unknown: 'Needs review', queued: 'Workflow generation queued',
       authoring: 'Generating workflow', authoringDone: 'Workflow generated', authoringFailed: 'Workflow generation failed',
-      progress: (done,total) => `${done} of ${total} steps completed`, waitingNotice: 'A workflow step is waiting for your response.',
-      handle: 'Handle in chat', cancel: 'Request cancellation', explain: 'Explain result', selectWorkflow: 'Choose workflow', createWorkflow: 'Create workflow',
+      waitingNotice: 'A workflow step is waiting for your response.',
+      handle: 'Handle in chat', approve: 'Approve', reject: 'Reject', cancel: 'Request cancellation', explain: 'Explain result', selectWorkflow: 'Choose workflow', createWorkflow: 'Create workflow',
       workflows: 'Workflows', workflow: 'Workflow', back: 'Back', noWorkflows: 'No published workflows', noSteps: 'No steps', noAgents: 'No registered Agents', newGoal: 'New goal', modify: 'Modify', addAgent: 'Add Agent',
       history: 'History', agents: 'Agents',
       recentRun: 'Most recent run',
@@ -164,16 +208,19 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
       promptHandle: run => `Handle the pending human input for Orbit run ${run.run_id}. `
         + `Before resuming, inspect the run and use its current interrupt_id, revision, and output_ports. `
         + `For approval, submit the declared output port object (for example {"result":{"decision":"approve","value":null}}); do not invent top-level fields.`,
+      promptApproval: (run,decision) => `${decision === 'approve' ? 'Approve' : 'Reject'} the pending approval for Orbit run ${run.run_id}. `
+        + `Before resuming, inspect the run again and use its current interrupt_id, revision, allowed_commands, and output_ports. `
+        + `Submit the declared output port object with decision="${decision}" and value=null; do not invent top-level fields.`,
       promptCancel: id => `Cancel Orbit run ${id}.`, promptExplain: id => `Explain the result of Orbit run ${id}.`,
-      promptSelectWorkflow: 'View the Orbit workflow list so I can choose a workflow for a new goal.', promptCreateWorkflow: 'Create an Orbit workflow from the following requirements:', promptAddAgent: '给Orbit添加Agent cli：', promptHistory: 'Open this address in the browser on the right side of the Codex app: http://127.0.0.1:8848/ui/#/goals', promptOpen: 'Open the full Orbit UI.',
+      promptSelectWorkflow: 'View the Orbit workflow list so I can choose a workflow for a new goal.', promptCreateWorkflow: 'Create an Orbit workflow from the following requirements:', promptAddAgent: '给Orbit添加Agent cli：', promptHistory: 'Open the Orbit history page: http://127.0.0.1:8848/ui/#/history', promptOpen: 'Open the full Orbit UI.',
     },
     'zh-CN': {
       idle: '准备开始', idleHint: '使用已有工作流执行目标，或创建新的工作流。',
       running: '运行中', waiting: '需要你的处理', completed: '已完成', failed: '失败',
       cancelled: '已取消', unknown: '需要检查', queued: '工作流生成已排队',
       authoring: '正在生成工作流', authoringDone: '工作流已生成', authoringFailed: '工作流生成失败',
-      progress: (done,total) => `已完成 ${done}/${total} 个步骤`, waitingNotice: '有一个工作流步骤正在等待你的回复。',
-      handle: '在聊天中处理', cancel: '请求取消', explain: '解释结果', selectWorkflow: '选择工作流', createWorkflow: '创建工作流',
+      waitingNotice: '有一个工作流步骤正在等待你的回复。',
+      handle: '在聊天中处理', approve: '批准', reject: '拒绝', cancel: '请求取消', explain: '解释结果', selectWorkflow: '选择工作流', createWorkflow: '创建工作流',
       workflows: '工作流', workflow: '工作流详情', back: '返回', noWorkflows: '暂无已发布工作流', noSteps: '暂无步骤', noAgents: '暂无已注册 Agent', newGoal: '新目标', modify: '修改', addAgent: '添加 Agent',
       history: '历史记录', agents: 'Agents',
       recentRun: '最近一次执行',
@@ -183,8 +230,11 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
       promptHandle: run => `处理 Orbit 运行 ${run.run_id} 中等待人工输入的步骤。`
         + `恢复前请重新检查运行，并使用当前的 interrupt_id、revision 和 output_ports。`
         + `批准时提交已声明的输出端口对象（例如 {"result":{"decision":"approve","value":null}}），不要自创顶层字段。`,
+      promptApproval: (run,decision) => `${decision === 'approve' ? '批准' : '拒绝'} Orbit 运行 ${run.run_id} 中待处理的人工审批。`
+        + `恢复前请重新检查运行，并使用当前的 interrupt_id、revision、allowed_commands 和 output_ports。`
+        + `按已声明的输出端口提交 decision="${decision}"、value=null 的对象，不要自创顶层字段。`,
       promptCancel: id => `取消 Orbit 运行 ${id}。`, promptExplain: id => `解释 Orbit 运行 ${id} 的结果。`,
-      promptSelectWorkflow: '查看 Orbit 工作流列表，以便选择一个工作流开始新目标。', promptCreateWorkflow: '按照下面的要求创建 Orbit 工作流：', promptAddAgent: '给Orbit添加Agent cli：', promptHistory: '在 Codex App 右侧用浏览器打开地址：http://127.0.0.1:8848/ui/#/goals', promptOpen: '打开 Orbit 完整 UI。',
+      promptSelectWorkflow: '查看 Orbit 工作流列表，以便选择一个工作流开始新目标。', promptCreateWorkflow: '按照下面的要求创建 Orbit 工作流：', promptAddAgent: '给Orbit添加Agent cli：', promptHistory: '打开 Orbit 历史记录页面：http://127.0.0.1:8848/ui/#/history', promptOpen: '打开 Orbit 完整 UI。',
     },
   };
   const t = () => S[locale] || S['en-US'];
@@ -254,13 +304,27 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
     if (window.openai?.sendFollowUpMessage) await window.openai.sendFollowUpMessage({prompt,scrollToBottom:true});
   }
 
-  function action(label,prompt,primary=false) {
-    return `<button class="action${primary?' primary':''}" type="button" data-prompt="${esc(prompt)}">${esc(label)}</button>`;
+  __PROMPT_EDITOR_SCRIPT__
+
+  function action(label,prompt,mode,primary=false) {
+    return `<button class="action${primary?' primary':''}" type="button" data-prompt="${esc(prompt)}" data-prompt-mode="${mode}">${esc(label)}</button>`;
   }
 
-  function idleActions() {
-    return `<div class="actions idleActions"><button class="action primary" type="button" data-view-workflows>${esc(t().selectWorkflow)}</button>${action(t().createWorkflow,t().promptCreateWorkflow)}
-      ${action(t().history,t().promptHistory)}
+  const approvalInterrupts = run => (run?.interrupts || []).filter(item =>
+    item?.value?.config?.task_kind === 'approval' &&
+    Array.isArray(item?.value?.output_ports) && item.value.output_ports.length > 0);
+
+  function approvalActions(run) {
+    return approvalInterrupts(run).map(interrupt => {
+      return `<button class="action primary" type="button" data-prompt="${esc(t().promptApproval(run,'approve'))}" data-prompt-mode="direct">${esc(t().approve)}</button>
+        <button class="action danger" type="button" data-prompt="${esc(t().promptApproval(run,'reject'))}" data-prompt-mode="direct">${esc(t().reject)}</button>`;
+    }).join('');
+  }
+
+  function idleActions(includeCreate=true) {
+    const create = includeCreate ? action(t().createWorkflow,t().promptCreateWorkflow,'edit') : '';
+    return `<div class="actions idleActions"><button class="action primary" type="button" data-view-workflows>${esc(t().selectWorkflow)}</button>${create}
+      ${action(t().history,t().promptHistory,'direct')}
       <button class="action" type="button" data-view-agents>${esc(t().agents)}</button></div>`;
   }
 
@@ -277,7 +341,7 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
     const rows = workflows.map(workflow => { const name = workflow.name || workflow.workflow_id; return `<div class="workflowChoice"><button class="workflowRow" type="button" data-workflow-id="${esc(workflow.workflow_id)}">
       <div class="workflowName">${esc(name)}</div>
       <div class="workflowDesc">${esc(workflow.description || `${workflow.node_count || 0} steps · v${workflow.latest_version || ''}`)}</div></button>
-      ${action(t().newGoal,`使用工作流「${name}」（${workflow.workflow_id}）执行：`,true).replace('class="action primary"','class="action primary workflowGoal"')}</div>`; }).join('');
+      ${action(t().newGoal,`使用工作流「${name}」（${workflow.workflow_id}）执行：`,'edit',true).replace('class="action primary"','class="action primary workflowGoal"')}</div>`; }).join('');
     card.innerHTML = `${viewHead(t().workflows,'task')}${rows || `<div class="empty">${esc(t().noWorkflows)}</div>`}`;
   }
 
@@ -289,7 +353,7 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
     card.innerHTML = `${viewHead(t().workflow,'workflows')}<div class="summary"><div class="workflowName">${esc(name)}</div>
       <div class="workflowDesc">${esc(workflow.description || '')}</div><div class="meta">${esc(workflow.workflow_id)} · v${esc(workflow.latest_version || '')}</div></div>
       <div class="definition">${rows || `<div class="empty">${esc(t().noSteps)}</div>`}</div>
-      <div class="actions">${action(t().newGoal,`使用工作流「${name}」（${workflow.workflow_id}）执行：`,true)}${action(t().modify,`按照下面的要求修改工作流「${name}」（${workflow.workflow_id}）：`)}</div>`;
+      <div class="actions">${action(t().newGoal,`使用工作流「${name}」（${workflow.workflow_id}）执行：`,'edit',true)}${action(t().modify,`按照下面的要求修改工作流「${name}」（${workflow.workflow_id}）：`,'edit')}</div>`;
   }
 
   function renderAgents(agents) {
@@ -297,7 +361,7 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
       <div class="agentIdentity"><div class="agentName" title="${esc(agent.name)}">${esc(name || agent.name)}</div><div class="agentVersion">${esc(agent.version || '')}</div></div>
       <div class="agentStat"><strong>${esc(agent.attempt_count ?? 0)}</strong>${esc(t().runs)}</div>
       <div class="agentStat${agent.failed_count > 0 ? ' bad' : ''}"><strong>${esc(agent.failed_count ?? 0)}</strong>${esc(t().errors)}</div></div>`; }).join('');
-    const head = viewHead(t().agents,'task').replace('</div>', `</div><button class="action primary" type="button" data-prompt="${esc(t().promptAddAgent)}">${esc(t().addAgent)}</button>`);
+    const head = viewHead(t().agents,'task').replace('</div>', `</div><button class="action primary" type="button" data-prompt="${esc(t().promptAddAgent)}" data-prompt-mode="edit">${esc(t().addAgent)}</button>`);
     card.innerHTML = `${head}${rows || `<div class="empty">${esc(t().noAgents)}</div>`}`;
   }
 
@@ -305,27 +369,27 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
     const status = job.status === 'queued' ? t().queued : job.status === 'done' ? t().authoringDone
       : job.status === 'failed' ? t().authoringFailed : t().authoring;
     const prompt = job.prompt || job.requirements || '';
+    const includeCreate = job.status === 'done' || job.status === 'failed';
     card.innerHTML = `<div class="summary"><div class="statusLine"><span class="dot ${cssFor(job.status)}"></span>
       <span class="status">${esc(status)}</span></div><div class="goal">${esc(prompt || status)}</div>
-      <div class="meta">${esc(job.job_id || '')}</div></div><div class="actions">${action(t().open,t().promptOpen)}</div>`;
+      <div class="meta">${esc(job.job_id || '')}</div></div>${idleActions(includeCreate)}`;
   }
 
   function renderRun(run,steps) {
     const waiting = steps.some(step => step.status === 'waiting');
     const live = !TERMINAL.has(run.status); const statusKey = waiting ? 'waiting' : run.status;
-    const done = steps.filter(step => DONE_STEPS.has(step.status)).length;
-    const percent = steps.length ? Math.round(done * 100 / steps.length) : 0;
     const stepRows = steps.map(step => `<div class="step"><span class="dot ${cssFor(step.status)}"></span>
       <span class="stepName">${esc(step.label || step.node_id)}</span><span class="stepState">${esc(t().status[step.status] || step.status)}</span></div>`).join('');
-    let actions = action(t().open,t().promptOpen);
-    if (waiting) actions = action(t().handle,t().promptHandle(run),true) + actions;
-    else if (live) actions = action(t().cancel,t().promptCancel(run.run_id)) + actions;
-    else actions = action(t().explain,t().promptExplain(run.run_id),true) + actions;
+    let actions = action(t().open,t().promptOpen,'direct');
+    const approvals = approvalActions(run);
+    if (waiting && approvals) actions = approvals + actions;
+    else if (waiting) actions = action(t().handle,t().promptHandle(run),'edit',true) + actions;
+    else if (live) actions = action(t().cancel,t().promptCancel(run.run_id),'direct') + actions;
+    else actions = action(t().explain,t().promptExplain(run.run_id),'direct',true) + actions;
     card.innerHTML = `<div class="summary"><div class="statusLine"><span class="dot ${cssFor(statusKey)}"></span>
       <span class="status">${esc(t()[statusKey] || statusKey)}</span></div>
       <div class="goal">${esc(run.goal || run.workflow_id || run.run_id)}</div>
-      <div class="meta">${esc(run.workflow_id || '')} · ${esc(run.run_id)}</div>
-      ${steps.length ? `<div class="progress"><span style="width:${percent}%"></span></div><div class="progressText">${esc(t().progress(done,steps.length))}</div>` : ''}</div>
+      <div class="meta">${esc(run.workflow_id || '')} · ${esc(run.run_id)}</div></div>
       ${waiting ? `<div class="notice">${esc(t().waitingNotice)}</div>` : ''}
       ${stepRows ? `<div class="steps">${stepRows}</div>` : ''}<div class="actions">${actions}</div>`;
   }
@@ -339,7 +403,7 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
   }
 
   function bindActions() {
-    card.querySelectorAll('[data-prompt]').forEach(button => button.addEventListener('click', () => send(button.dataset.prompt)));
+    card.querySelectorAll('[data-prompt]').forEach(button => button.addEventListener('click', () => dispatchPrompt(button)));
     card.querySelectorAll('[data-view-workflows]').forEach(button => button.addEventListener('click',showWorkflows));
     card.querySelectorAll('[data-view-agents]').forEach(button => button.addEventListener('click',showAgents));
     card.querySelectorAll('[data-workflow-id]').forEach(button => button.addEventListener('click',() => showWorkflowDetail(button.dataset.workflowId)));
@@ -402,7 +466,7 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
       bindActions(); updated.textContent = t().refreshed;
       poller = setTimeout(() => { if (currentView === 'task' && document.visibilityState === 'visible') refresh(); }, activeRun || activeJob ? 2000 : 15000);
     } catch (_) {
-      card.innerHTML = `<div class="error">${esc(t().error)}</div><div class="actions">${action(t().open,t().promptOpen)}</div>`;
+      card.innerHTML = `<div class="error">${esc(t().error)}</div><div class="actions">${action(t().open,t().promptOpen,'direct')}</div>`;
       bindActions(); poller = setTimeout(refresh,15000);
     } finally { refreshing = false; refreshButton.disabled = false; }
   }
@@ -413,7 +477,9 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
   refresh();
 </script>
 </body>
-</html>"""
+</html>""".replace("__ORBIT_LOGO__", ORBIT_LOGO_DATA_URI).replace(
+    "__PROMPT_EDITOR_STYLE__", _PROMPT_EDITOR_STYLE,
+).replace("__PROMPT_EDITOR_SCRIPT__", _PROMPT_EDITOR_SCRIPT)
 
 _CARD_STYLE = r"""
   :root { color-scheme:light dark; font:14px/1.45 Inter,ui-sans-serif,-apple-system,
@@ -424,8 +490,7 @@ _CARD_STYLE = r"""
     --warn:#d99a35; --bad:#df6767; }
   *{box-sizing:border-box} body{margin:0;color:var(--text);background:var(--bg)}
   main{padding:16px} header{display:flex;align-items:center;gap:10px;margin-bottom:14px}
-  .mark{display:grid;width:28px;height:28px;place-items:center;border-radius:8px;color:#fff;
-    background:var(--accent);font-weight:800} h1{margin:0;flex:1;font-size:14px}
+  .mark{display:block;width:28px;height:28px;flex:none;border-radius:7px} h1{margin:0;flex:1;font-size:14px}
   button{font:inherit}.icon{width:32px;height:32px;border:1px solid var(--line);border-radius:8px;
     color:var(--muted);background:var(--soft);cursor:pointer}.card{overflow:hidden;border:1px solid var(--line);
     border-radius:12px;background:var(--soft)} .empty,.error{padding:26px 16px;text-align:center;color:var(--muted)}
@@ -453,7 +518,7 @@ _CARD_STYLE = r"""
   .action{padding:7px 11px;border:1px solid var(--line);border-radius:8px;color:var(--text);background:var(--soft);cursor:pointer}
   .action.primary{border-color:transparent;color:#fff;background:var(--accent)}.action.danger{color:var(--bad)}
   @keyframes pulse{50%{opacity:.35}} @media(prefers-reduced-motion:reduce){.dot.live{animation:none}}
-"""
+""" + _PROMPT_EDITOR_STYLE
 
 _CARD_BRIDGE = r"""
 const PROTOCOL='2026-01-26'; let bridge=null,ready=null,lastToolResult=null,hostTheme=null;const toolResultListeners=[],hostContextListeners=[];
@@ -476,9 +541,10 @@ async function ensureReady(){if(!bridge)throw new Error('No MCP App host');if(!r
 async function callTool(name,args={}){if(window.openai?.callTool)return payload(await window.openai.callTool(name,args));await ensureReady();return payload(await bridge.request('tools/call',{name,arguments:args}))}
 async function send(prompt){if(bridge){try{await ensureReady();await bridge.request('ui/message',{role:'user',content:[{type:'text',text:prompt}]},10000);return}catch(_){}}
  if(window.openai?.sendFollowUpMessage)await window.openai.sendFollowUpMessage({prompt,scrollToBottom:true})}
+""" + _PROMPT_EDITOR_SCRIPT + r"""
 function initial(){return payload(window.openai?.toolOutput||window.openai?.toolResponse||lastToolResult||{})}
 function onToolResult(fn){toolResultListeners.push(fn);const value=initial();if(Object.keys(value).length)fn(value)}
-function bind(){document.querySelectorAll('[data-prompt]').forEach(b=>b.onclick=()=>send(b.dataset.prompt))}
+function bind(){document.querySelectorAll('[data-prompt]').forEach(b=>b.onclick=()=>dispatchPrompt(b))}
 window.addEventListener('openai:set_globals',event=>{const globals=event.detail?.globals||{};
  if(Object.prototype.hasOwnProperty.call(globals,'toolOutput'))publishToolResult(globals.toolOutput);
  else if(Object.prototype.hasOwnProperty.call(globals,'toolResponse'))publishToolResult(globals.toolResponse);
@@ -540,7 +606,7 @@ def _card(
 ) -> str:
     return f"""<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">
 <meta name=\"orbit-surface\" content=\"mcp-app\"><style>{_CARD_STYLE}{extra_style}</style></head><body><main>
-<header><span class=\"mark\">O</span><h1>{title}</h1><button id=\"refresh\" class=\"icon\" type=\"button\">↻</button></header>
+<header><img class=\"mark\" src=\"{ORBIT_LOGO_DATA_URI}\" alt=\"\" aria-hidden=\"true\"><h1>{title}</h1><button id=\"refresh\" class=\"icon\" type=\"button\">↻</button></header>
 <section id=\"card\" class=\"card\"><div class=\"empty\">Connecting…</div></section></main><script>{_CARD_BRIDGE}{extra_script}{body}</script></body></html>"""
 
 
@@ -582,7 +648,7 @@ function drawList(rows){current=null;
  card.innerHTML=rows.length?rows.map(w=>`<div class="workflowRow"><button class="row" type="button" data-open-id="${esc(w.workflow_id)}"><div class="name">${esc(w.name)}</div>
  <div class="desc">${esc(w.description||`${w.node_count||0} steps · v${w.latest_version||''}`)}</div></button><button class="listGoal" type="button" data-goal-id="${esc(w.workflow_id)}" data-goal-name="${esc(w.name||w.workflow_id)}">新目标</button></div>`).join(''):'<div class="empty">No workflows</div>';
  card.querySelectorAll('[data-open-id]').forEach(b=>b.onclick=()=>openDetail(b.dataset.openId));
- card.querySelectorAll('[data-goal-id]').forEach(b=>b.onclick=event=>{event.stopPropagation();send(`使用工作流「${b.dataset.goalName}」（${b.dataset.goalId}）执行：`) });
+ card.querySelectorAll('[data-goal-id]').forEach(b=>b.onclick=event=>{event.stopPropagation();dispatchPromptValue(`使用工作流「${b.dataset.goalName}」（${b.dataset.goalId}）执行：`) });
 }
 function drawDetail(w){
  card.className='card workflowDetail';
@@ -592,8 +658,8 @@ function drawDetail(w){
  <div class="tabs" role="tablist" aria-label="工作流详情视图"><button id="workflowGraphTab" class="tab" type="button" role="tab" aria-selected="true" aria-controls="workflowGraphPanel">流程图</button><button id="workflowDefinitionTab" class="tab" type="button" role="tab" aria-selected="false" aria-controls="workflowDefinitionPanel" tabindex="-1">定义列表</button></div>
  <div id="workflowGraphPanel" class="detailPanel" role="tabpanel" aria-labelledby="workflowGraphTab">${graphMarkup(w.graph)}</div>
  <div id="workflowDefinitionPanel" class="detailPanel definition" role="tabpanel" aria-labelledby="workflowDefinitionTab" hidden>${rows?`<div class="steps">${rows}</div>`:'<div class="empty">No definitions</div>'}</div>
- <div class="actions"><button class="action primary" data-prompt="使用工作流「${esc(w.name||w.workflow_id)}」（${esc(w.workflow_id)}）执行：">新目标</button>
- <button class="action" data-prompt="按照下面的要求修改工作流「${esc(w.name||w.workflow_id)}」（${esc(w.workflow_id)}）：">修改</button>
+ <div class="actions"><button class="action primary" data-prompt="使用工作流「${esc(w.name||w.workflow_id)}」（${esc(w.workflow_id)}）执行：" data-prompt-mode="edit">新目标</button>
+ <button class="action" data-prompt="按照下面的要求修改工作流「${esc(w.name||w.workflow_id)}」（${esc(w.workflow_id)}）：" data-prompt-mode="edit">修改</button>
  <button id="openDeleteWorkflowDialog" class="action danger" type="button">删除</button></div>
  <dialog id="deleteWorkflowDialog" class="confirmDialog" aria-labelledby="deleteWorkflowTitle"><div class="confirmBody"><h2 id="deleteWorkflowTitle" class="confirmTitle">确认删除工作流？</h2><p class="confirmText">${esc(w.name||w.workflow_id)}<br>${esc(w.workflow_id)}</p></div><div class="confirmActions"><button id="cancelDeleteWorkflow" class="action" type="button">取消</button><button id="confirmDeleteWorkflow" class="action danger" type="button">确认删除</button></div></dialog>`;document.getElementById('workflowBack').onclick=showList;bind();bindTabs();bindDefinitionItems();bindDeleteConfirmation(w);mountGraph(w.graph)}
 async function showList(){try{const data=await callTool('list_workflows',{});drawList(Array.isArray(data.workflows)?data.workflows:[])}catch(e){card.innerHTML=`<div class="error">${esc(e.message)}</div>`}}
@@ -668,7 +734,7 @@ document.getElementById('refresh').onclick=refresh;document.addEventListener('vi
 """, extra_style=_GOALS_STYLE)
 
 ORBIT_MCP_APP_RESOURCES = (
-    {"uri": ORBIT_DASHBOARD_URI, "name": "Orbit dashboard", "description": "Current Orbit task, step progress, and attention state.", "html": ORBIT_DASHBOARD_HTML, "prefers_border": False},
+    {"uri": ORBIT_DASHBOARD_URI, "name": "Orbit dashboard", "description": "Current Orbit task, steps, and attention state.", "html": ORBIT_DASHBOARD_HTML, "prefers_border": False},
     {"uri": ORBIT_WORKFLOWS_URI, "name": "Orbit workflows", "description": "Published workflow list.", "html": ORBIT_WORKFLOWS_HTML, "prefers_border": False},
     {"uri": ORBIT_AUTHORING_URI, "name": "Orbit workflow generation", "description": "Workflow generation progress and result.", "html": ORBIT_AUTHORING_HTML, "prefers_border": False},
     {"uri": ORBIT_RUN_URI, "name": "Orbit goal execution", "description": "Goal execution progress and result.", "html": ORBIT_RUN_HTML, "prefers_border": False},

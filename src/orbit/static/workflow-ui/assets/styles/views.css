@@ -267,7 +267,7 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 
 .simplified-workflow-generator-form > .authoring-job-state,
 .simplified-workflow-generation-problem { grid-column: 1 / -1; }
-.simplified-workflow-list-heading { margin-top: 44px; margin-bottom: 20px; }
+.simplified-workflow-list-heading { margin-top: 44px; margin-bottom: 14px; }
 .simplified-workflow-list-heading h2 { font-size: 20px; font-weight: 600; letter-spacing: -.01em; }
 .simplified-workflow-list-heading p { font-size: 12px; }
 .simplified-execution-head { align-items: center; }
@@ -318,13 +318,26 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 .simplified-step-output-body { display: grid; gap: 4px; padding-top: 6px; }
 /* The run log expands to its full height; the page scrolls, not the box. */
 .simplified-step-output-log { min-height: 0; max-height: none; overflow: visible; margin-top: 2px; }
-/* `.step-prompt` folds to three lines where it sits in a dense row. Here the
-   reader opened the drawer to read, so it is shown whole. */
+/* Five lines keep a long instruction from swallowing the executing step. The
+   adjacent control restores the complete prompt when the reader asks for it. */
 .simplified-step-prompt {
-  display: block; -webkit-line-clamp: none; margin-top: 0;
+  margin-top: 0; -webkit-line-clamp: 5;
+  width: 100%; padding: 0; border: 0; background: transparent;
+}
+.simplified-step-prompt.expanded { display: block; -webkit-line-clamp: unset; }
+.step-prompt-block {
+  display: grid; justify-items: start; width: 100%; box-sizing: border-box;
   padding: 8px 10px; border-radius: var(--radius);
   background: var(--chrome, var(--panel)); border: 1px solid var(--line-soft);
 }
+.step-prompt-toggle {
+  display: inline-flex; align-items: center; gap: 3px; margin-top: 5px;
+  padding: 0; border: 0; background: none; color: var(--blue);
+  font: inherit; font-size: 12px; cursor: pointer;
+}
+.step-prompt-toggle:hover { opacity: .8; }
+.step-prompt-toggle svg { transition: transform .2s ease; }
+.step-prompt-toggle.expanded svg { transform: rotate(180deg); }
 .simplified-attention { border-color: color-mix(in srgb, var(--amber) 28%, var(--line)); }
 .simplified-result .panel-body { font-size: 14px; line-height: 1.65; }
 .simplified-result .pill { background: transparent; }
@@ -490,15 +503,64 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 /* The detail is a modal over the catalog: the head stays put, the facts and
    the preview scroll under it. Wider than a confirm dialog because it carries
    an image and a lineage list, not one field. */
+/* A dialog is not a page. `.panel-head` and `.panel-body` carry vertical
+   rhythm only — on a page the content column supplies the margins either
+   side — and nothing supplies them here, so the eyebrow sat against the left
+   edge and Close was cut off by the right one. The inset is the dialog's,
+   and the two blocks inside it keep only the gap between them. */
 .artifact-dialog {
   width: min(720px, 94vw); flex-direction: column; overflow: hidden;
+  padding: 22px 26px;
 }
-.artifact-dialog .panel-head { flex: none; }
-.artifact-dialog .panel-body { min-height: 0; overflow-y: auto; }
-.artifact-dialog > .data-state { margin: 18px; }
+.artifact-dialog .panel-head { flex: none; padding: 0 0 16px; }
+.artifact-dialog .panel-body { min-height: 0; overflow-y: auto; padding: 0; }
+.artifact-dialog > .data-state { margin: 0; }
 /* One scrollbar, and it belongs to the dialog. A box that scrolls inside a
    box that scrolls hides how much document is left and traps the wheel. */
 .artifact-dialog .artifact-preview { max-height: none; overflow: visible; }
+/* A run in flight, over the composer that started it. Wide enough for the
+   step list to read as rows rather than as wrapped text, and no taller than
+   the viewport — the body scrolls, the head with the goal in it does not. */
+.run-modal-panel {
+  display: flex; flex-direction: column; width: min(860px, 96vw);
+  padding: 0; overflow: hidden;
+}
+.run-modal-titlebar {
+  display: flex; align-items: center; justify-content: space-between;
+  flex: none; padding: 8px 20px;
+}
+.run-modal-title { margin: 0; font-size: 16px; font-weight: 650; }
+.run-modal-scroll {
+  --run-title-card-gap: 8px;
+  min-height: 0; overflow-y: auto; padding: 20px 28px 24px;
+}
+.run-modal-panel > .data-state { margin: 24px 28px; }
+/* `.page-modal-panel` already insets and already scrolls; a second inset
+   here would double it and a second scroller would trap the wheel. */
+.run-modal-head {
+  display: block; padding: 0 0 16px;
+}
+.run-modal-headline { display: grid; gap: 6px; width: 100%; min-width: 0; }
+.run-modal-headline .goal-text-clamp { --goal-line-box: 22.5px; }
+.run-modal-goal-section {
+  display: grid; gap: var(--run-title-card-gap, 8px); min-width: 0;
+}
+.run-modal-goal-title { margin: 0; font-size: 13px; font-weight: 650; }
+.run-modal-goal-card {
+  display: grid; justify-items: start; width: 100%; min-width: 0;
+  box-sizing: border-box; padding: 10px 12px;
+  border: 0; border-radius: var(--radius); background: var(--panel-3);
+}
+/* The shared goal block owns the five-line clamp and its explicit way to
+   expand. This selector only gives the modal copy its stronger typography. */
+.run-modal-goal {
+  margin: 0; font-size: 15px; font-weight: 600; line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.run-modal-body { display: flex; flex-direction: column; gap: 20px; }
+/* Inside the modal the hero has the panel's own inset around it already. */
+.run-modal-body .simplified-run-hero { padding: 0; }
+
 /* The workflow detail is a drawer over the catalog: full-height, sliding in
    from the right, so a tall graph gets vertical room a centered dialog never
    has. The catalog stays rendered (and visible) under the scrim. The inner
@@ -582,12 +644,16 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 .goal-card.goal-result-card {
   background: var(--panel-3); padding: 16px 18px;
 }
-/* The Goal folds at 120px and unfolds in place; the toggle beneath it is a
+/* The Goal folds at five lines and unfolds in place; the toggle beneath it is a
    link with a caret, exactly as the prototype draws it. */
-.goal-text-clamp { max-height: 120px; overflow: hidden; }
+.goal-text-clamp {
+  --goal-line-box: 21.45px;
+  max-height: calc(var(--goal-line-box) * 5); overflow: hidden;
+  font-size: 13px; line-height: 1.65;
+}
 .goal-text-clamp.expanded { max-height: none; }
 .goal-text {
-  margin: 0; font-size: 13px; font-weight: 400; line-height: 1.65;
+  margin: 0; font-size: inherit; font-weight: 400; line-height: inherit;
   overflow-wrap: anywhere; white-space: pre-wrap;
 }
 .goal-expand-toggle {
@@ -852,10 +918,13 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
   .workflow-edit-page, .workflow-detail { animation: none; }
 }
 .artifact-content { min-width: 0; }
+/* The same filled block every other read-only output on these pages is —
+   the Agent console, the finder's output — rather than the one frame the
+   borderless pass left behind. */
 .artifact-preview {
   margin: 0; max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
-  padding: 12px; border: 1px solid var(--line); border-radius: var(--radius);
-  background: var(--panel-2);
+  padding: 14px 16px; border: 0; border-radius: var(--radius);
+  background: var(--panel-3);
 }
 
 
@@ -1460,18 +1529,27 @@ html[data-theme="light"] .history-goal-meta { color: var(--muted); }
 .simplified-run-hero {
   display: flex; flex-direction: column; gap: 16px; padding: 24px;
 }
+.simplified-run-meta-card {
+  padding: 14px 16px; border-radius: var(--radius); background: var(--panel-3);
+}
 /* Identity on one side, fate and the way to stop it on the other. Wrapping
    rather than shrinking: on a phone the run id alone fills the width, and a
    Cancel button squeezed to three characters is worse than one on its own
    line. `.split`, which this replaces, was a class name with no rule behind
    it — the two halves had never been side by side. */
 .simplified-run-identity {
-  display: flex; flex-wrap: wrap; align-items: flex-start;
+  display: flex; flex-wrap: wrap; align-items: center;
   justify-content: space-between; gap: 12px 16px;
 }
-.simplified-run-ids { display: grid; gap: 4px; min-width: 0; }
-.simplified-run-ids p { margin: 0; overflow-wrap: anywhere; }
-.simplified-run-state { display: flex; align-items: center; gap: 8px; }
+.simplified-run-ids { display: grid; gap: 9px; min-width: 0; margin: 0; }
+.run-meta-item { display: grid; gap: 2px; }
+.run-meta-item dt { color: var(--muted-2); font-size: 11px; }
+.run-meta-item dd { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.simplified-run-state {
+  display: flex; flex-wrap: wrap; align-items: center; align-self: center;
+  gap: 8px; margin-left: auto;
+}
+.run-meta-status { display: flex; align-items: center; }
 .simplified-goal-summary {
   position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: start; gap: 16px; padding: 24px; overflow: hidden;
@@ -1614,12 +1692,25 @@ html[data-theme="light"] .history-goal-meta { color: var(--muted); }
 /* Where a run got to. The mark carries the state at a glance and the pill
    spells it out, so meaning never rides on colour alone — the same rule the
    run status pills follow. */
+/* Filled, like the Result card and the Agent console: what a run got to is
+   a thing it produced, not a grouping of other things. The rules between the
+   rows drop to the faint one every other list on these pages separates with,
+   now that they are inside a card rather than loose on the page. */
+.simplified-steps {
+  background: var(--panel-3); border-radius: var(--radius); padding: 6px 16px 12px;
+}
+/* Keep the heading and its card in one section. Otherwise the run body's 20px
+   section gap stacks on top of this local 8px title gap. */
+.simplified-steps-section {
+  display: grid; gap: var(--run-title-card-gap, 8px);
+}
+.simplified-steps-head { padding: 0; }
 .simplified-steps .step-list {
   list-style: none; margin: 0; padding: 0; display: grid; gap: 2px;
 }
 .step-row {
   display: grid; grid-template-columns: 24px 1fr auto; align-items: center;
-  gap: 10px; padding: 8px 4px; border-top: 1px solid var(--line);
+  gap: 10px; padding: 8px 4px; border-top: 1px solid var(--line-row);
 }
 .step-row:first-child { border-top: none; }
 .step-mark {
@@ -1645,7 +1736,8 @@ html[data-theme="light"] .history-goal-meta { color: var(--muted); }
    open from the first paint: the frame fetches itself while the rest of the
    page settles, so nothing waits on it and nothing hides behind a fold. */
 .run-canvas { overflow: hidden; }
-.run-canvas-body { padding: 12px 14px; }
+.run-canvas > .panel-head { padding-bottom: var(--run-title-card-gap, 8px); }
+.run-canvas-body { padding: 0; border-radius: var(--radius); overflow: hidden; }
 .run-canvas-body:empty { padding: 0; }
 
 /* Which way the run went at each fork. Only forks appear, so this stays a
