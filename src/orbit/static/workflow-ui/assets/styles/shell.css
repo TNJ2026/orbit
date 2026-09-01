@@ -18,21 +18,9 @@
 }
 
 .brand { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
-/* The mark without its frame: the ring and the dot keep the relationship they
-   had inside the 30px box, at the size of the wordmark beside them. */
-.brand-mark {
-  width: 16px; height: 16px; border: 0; background: none;
-  display: grid; place-items: center;
-  position: relative; flex: 0 0 auto;
-}
-.brand-mark::before {
-  content: ""; width: 12px; height: 12px; box-sizing: border-box;
-  border: 2px solid var(--blue); border-radius: 50%;
-}
-.brand-mark::after {
-  content: ""; position: absolute; width: 4px; height: 4px;
-  background: var(--amber); border-radius: 50%; right: 0; top: 0;
-}
+/* The mark is an inline SVG (see index.html), sized beside the wordmark and
+   drawn with the theme's own accent tokens. */
+.brand-mark { flex: 0 0 auto; }
 .brand-copy { font-family: var(--font-display); font-weight: 700; font-size: 15px; letter-spacing: .02em; line-height: 1.25; color: var(--text); }
 
 /* Navigation: one segmented control, sized to its labels.
