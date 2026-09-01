@@ -701,7 +701,10 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
   padding: 16px; border-bottom: 1px solid var(--line-soft);
 }
 .goal-step-row:last-child { border-bottom: 0; }
-.goal-step-row:not(.not_reached):hover { background: rgba(255, 255, 255, .02); }
+/* The hover every other row on these pages uses. A 2% white wash is a fill
+   on the dark canvas and nothing at all on the light one, where the card
+   underneath it is already white. */
+.goal-step-row:not(.not_reached):hover { background: var(--hover); }
 .goal-step-row.not_reached { opacity: .6; }
 .goal-step-row.not_reached:hover { opacity: 1; }
 .goal-step-glyph { display: inline-flex; flex: none; margin-top: 2px; color: var(--muted-2); }
@@ -1102,6 +1105,11 @@ html[data-theme="light"] .history-goal-meta { color: var(--muted); }
   .simplified-workflow-generator-form { grid-template-columns: 1fr; }
   .simplified-workflow-generator-actions { justify-content: stretch; }
   .simplified-workflow-generator-actions > * { flex: 1 1 auto; }
+  /* Both are pinned to the same line inside the box, and at this width the
+     button reaches back over the hint and cuts it off mid-word. The hint is
+     the secondary of the two and the textarea's own maxlength keeps the limit
+     whether it is written down or not. */
+  .simplified-workflow-generator-limit { display: none; }
   .workflow-generation-request { grid-template-columns: 1fr; }
   .simplified-execution-head { align-items: flex-start; flex-direction: column; }
   .simplified-execution-head > .actions { justify-content: flex-start; }
@@ -1512,9 +1520,12 @@ html[data-theme="light"] .history-goal-meta { color: var(--muted); }
   width: 8px; height: 8px; border-radius: 50%; background: var(--green);
   animation: agents-pulse 2.4s ease-out infinite;
 }
+/* The halo is the dot's own colour, faded. Written out it stayed mint while
+   --green went to a dark ink on the light theme, so the ring and the dot it
+   came out of were two different greens. */
 @keyframes agents-pulse {
-  0% { box-shadow: 0 0 0 0 rgba(86, 214, 160, .45); }
-  70%, 100% { box-shadow: 0 0 0 7px rgba(86, 214, 160, 0); }
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--green) 45%, transparent); }
+  70%, 100% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--green) 0%, transparent); }
 }
 @media (prefers-reduced-motion: reduce) {
   .agents-online-dot { animation: none; }

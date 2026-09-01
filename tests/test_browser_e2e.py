@@ -1895,8 +1895,14 @@ class GoalHomeTests(BrowserE2ETestCase):
         self.assertEqual(
             1, page.locator(".run-modal-goal-card .goal-text-clamp").count(),
         )
-        goal_width = page.locator(".run-modal-goal-card").bounding_box()["width"]
-        steps_width = page.locator(".simplified-steps").bounding_box()["width"]
+        # Both widths in one frame. Read one after the other they straddled the
+        # moment a scrollbar appeared — the modal is still settling — and the
+        # two answers came from layouts 1.5px apart. Measured together they
+        # come from the same layout, whichever one it is.
+        goal_width, steps_width = page.evaluate('''() => [
+          document.querySelector(".run-modal-goal-card").getBoundingClientRect().width,
+          document.querySelector(".simplified-steps").getBoundingClientRect().width,
+        ]''')
         self.assertAlmostEqual(goal_width, steps_width, delta=1)
         modal_toggle = page.locator(".run-modal-head .goal-expand-toggle")
         modal_toggle.wait_for()
