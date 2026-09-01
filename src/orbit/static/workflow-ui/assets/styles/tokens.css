@@ -95,9 +95,15 @@ html[data-theme="light"] {
   --bg: #ffffff;
   --panel: #ffffff;
   --panel-2: #f1f3f8;
-  --control-bg: #2a2a2a;
-  --control-fg: #ffffff;
-  --control-raised: #333333;
+  /* The same three steps as the dark theme, walked the other way. There the
+     page is near-black and a control sits a shade lighter; here the page is
+     white and a control sits a shade darker, so "recessed" reads the same in
+     both without either one borrowing the other's ink. These carried the dark
+     values for a while and every field, list and button on the light theme
+     came out near-black on white. */
+  --control-bg: #f1f3f8;
+  --control-fg: #171a21;
+  --control-raised: #e4e8f0;
   --panel-3: #f7f8fb;
   --line: #cdd4e0;
   --line-soft: #e4e8f0;
