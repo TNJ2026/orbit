@@ -504,6 +504,11 @@ class CompiledLangGraphWorkflow:
             graph_input, config=self._config(config), stream_mode=stream_mode
         )
 
+    def validate_inputs(self, inputs: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Validate and default a Run input without starting graph execution."""
+
+        return self._accept(inputs)
+
     def _accept(self, inputs: Mapping[str, Any]) -> dict[str, Any]:
         """A run's input, checked against the interface and defaulted.
 
@@ -1171,7 +1176,11 @@ def compile_workflow(
                         # refused as a "handler" that returned undeclared
                         # outputs — for a node that has no handler.
                         "output_ports": [
-                            {"id": port.id, "schema_id": port.schema_id}
+                            {
+                                "id": port.id,
+                                "schema_id": port.schema_id,
+                                "required": port.required,
+                            }
                             for port in current.outputs
                         ],
                     })

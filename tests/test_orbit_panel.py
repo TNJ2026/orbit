@@ -1,354 +1,394 @@
-"""The read-only panel shown beside a conversation.
-
-The panel exists to be *less* than the UI. Starting a goal and writing a
-workflow are asked of the Agent holding the Orbit skill, so the page beside the
-conversation deliberately carries no way to do either. That is a property
-somebody can erase in one well-meaning commit — a goal box "just here for
-convenience" — and no other test would notice, because the page would still
-render. These tests are the guard.
-"""
+"""Contract tests for the compact Orbit current-task MCP App."""
 
 from __future__ import annotations
 
-from pathlib import Path
 import re
-import tempfile
 import unittest
 
-from starlette.testclient import TestClient
-
-from orbit.web.app import create_app
 from orbit.web.mcp_app import (
-    ORBIT_DASHBOARD_HTML, ORBIT_DASHBOARD_URI, ORBIT_PANEL_PATH,
+    ORBIT_AUTHORING_HTML,
+    ORBIT_AUTHORING_URI,
+    ORBIT_DASHBOARD_HTML,
+    ORBIT_DASHBOARD_URI,
+    ORBIT_GOALS_HTML,
+    ORBIT_GOALS_URI,
+    ORBIT_MCP_APP_RESOURCES,
+    ORBIT_RUN_HTML,
+    ORBIT_RUN_URI,
+    ORBIT_WORKFLOWS_HTML,
+    ORBIT_WORKFLOWS_URI,
 )
 
 
-class PanelRouteTests(unittest.TestCase):
-    def client(self) -> TestClient:
-        temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        self.addCleanup(temp.cleanup)
-        app = create_app(Path(temp.name) / "runtime.db", serve_ui=True)
-        client = TestClient(app)
-        self.addCleanup(client.close)
-        return client
+class CurrentTaskCardTests(unittest.TestCase):
+    def test_it_keeps_current_task_as_the_default_resource(self) -> None:
+        self.assertEqual("ui://orbit/current-task-v20.html", ORBIT_DASHBOARD_URI)
+        self.assertEqual(ORBIT_DASHBOARD_URI, ORBIT_MCP_APP_RESOURCES[0]["uri"])
 
-    def test_the_panel_is_served_over_http(self) -> None:
-        """A host that does not mount MCP Apps still has somewhere to send."""
-
-        response = self.client().get(ORBIT_PANEL_PATH)
-        self.assertEqual(200, response.status_code)
-        self.assertIn("text/html", response.headers["content-type"])
-
-    def test_the_panel_and_the_mcp_resource_are_one_page(self) -> None:
-        """Two surfaces, one document.
-
-        The panel is not a second implementation that may drift from the card:
-        a host mounting `ui://orbit/workflows.html` and a host opening `/panel`
-        must show the user the same thing.
-        """
-
+    def test_it_publishes_dedicated_cards(self) -> None:
         self.assertEqual(
-            ORBIT_DASHBOARD_HTML, self.client().get(ORBIT_PANEL_PATH).text,
+            {
+                ORBIT_DASHBOARD_URI, ORBIT_WORKFLOWS_URI,
+                ORBIT_AUTHORING_URI, ORBIT_RUN_URI,
+                ORBIT_GOALS_URI,
+            },
+            {item["uri"] for item in ORBIT_MCP_APP_RESOURCES},
         )
-        self.assertEqual("ui://orbit/workflows.html", ORBIT_DASHBOARD_URI)
 
-    def test_the_page_still_serves_when_the_ui_is_not(self) -> None:
-        """`/ui` is a separate surface, and one does not imply the other."""
+    def test_it_reads_current_task_and_embedded_workflow_views(self) -> None:
+        calls = set(re.findall(r"callTool\('([a-z_]+)'", ORBIT_DASHBOARD_HTML))
+        self.assertEqual(
+            {
+                "list_runs", "list_authoring_jobs", "get_run_steps",
+                "list_workflows", "get_workflow_definition", "list_agents",
+            },
+            calls,
+        )
+        for absent in ("read_run_output", "read_authoring_output"):
+            self.assertNotIn(absent, ORBIT_DASHBOARD_HTML)
 
-        self.assertEqual(200, self.client().get("/ui/").status_code)
+    def test_workflow_selection_switches_views_inside_the_card(self) -> None:
+        for marker in (
+            "data-view-workflows", "showWorkflows", "showWorkflowDetail",
+            "callTool('list_workflows'", "callTool('get_workflow_definition'",
+            "data-back-view", "renderWorkflowList", "renderWorkflowDetail",
+        ):
+            self.assertIn(marker, ORBIT_DASHBOARD_HTML)
 
+    def test_agents_switches_to_a_list_inside_the_dashboard_card(self) -> None:
+        for marker in (
+            "data-view-agents", "showAgents", "renderAgents",
+            "callTool('list_agents'", 'class="agentRow"',
+            "currentView === 'agents'", "data-back-view",
+        ):
+            self.assertIn(marker, ORBIT_DASHBOARD_HTML)
 
-class NoWayToMutateTests(unittest.TestCase):
-    """What the panel must never grow.
+    def test_add_agent_opens_a_prefilled_follow_up_prompt(self) -> None:
+        for marker in (
+            "addAgent: 'Add Agent'", "addAgent: '添加 Agent'",
+            "promptAddAgent: '给Orbit添加Agent cli：'",
+            "const head = viewHead(t().agents,'task').replace",
+            'data-prompt="${esc(t().promptAddAgent)}"',
+            "button.addEventListener('click', () => send(button.dataset.prompt))",
+        ):
+            self.assertIn(marker, ORBIT_DASHBOARD_HTML)
+        for absent in ("window.prompt", "data-add-agent-form", "data-add-agent-input"):
+            self.assertNotIn(absent, ORBIT_DASHBOARD_HTML)
 
-    Each assertion names one route around the Agent. A control that appears
-    here is a user starting runs from the conversation sidebar, which is the
-    arrangement the panel was built to prevent.
-    """
+    def test_embedded_workflow_list_offers_new_goal_directly(self) -> None:
+        for marker in (
+            'class="workflowChoice"', "workflowGoal", "t().newGoal",
+            "使用工作流「${name}」（${workflow.workflow_id}）执行：",
+        ):
+            self.assertIn(marker, ORBIT_DASHBOARD_HTML)
 
-    def test_it_takes_no_input(self) -> None:
-        for tag in ("<form", "<input", "<textarea", "<select"):
-            with self.subTest(tag=tag):
-                self.assertNotIn(tag, ORBIT_DASHBOARD_HTML)
+    def test_it_contains_no_administration_surface(self) -> None:
+        for absent in (
+            "workflowDelete", "deleteWorkflow", "tabWorkflows", "tabHistory",
+            "tabAgents", "workflowGenerator", "authoringConsole", "stepOutput",
+        ):
+            self.assertNotIn(absent, ORBIT_DASHBOARD_HTML)
 
-    def test_its_only_control_is_refresh(self) -> None:
-        buttons = re.findall(r"<button([^>]*)>", ORBIT_DASHBOARD_HTML)
-        self.assertEqual(1, len(buttons))
-        self.assertIn('id="refresh"', buttons[0])
+    def test_it_shows_progress_and_attention(self) -> None:
+        for marker in (
+            "DONE_STEPS", "waitingNotice", 'class="progress"',
+            'class="steps"', "step.status === 'waiting'",
+        ):
+            self.assertIn(marker, ORBIT_DASHBOARD_HTML)
 
-    def test_it_names_read_only_tools_only(self) -> None:
-        """Reading what Orbit holds and is doing; changing neither.
+    def test_recent_completed_run_is_a_compact_summary_with_idle_actions(self) -> None:
+        for marker in (
+            "function renderRecentRun(run,workflowName)",
+            "recentRun: 'Most recent run'",
+            "recentRun: '最近一次执行'",
+            'class="recentTitle">${esc(t().recentRun)}',
+            'class="workflowName">${esc(workflowName || run.workflow_id)}',
+            "if (TERMINAL.has(run.status))",
+            "renderRecentRun(run,workflow?.name)",
+            "function idleActions()",
+        ):
+            self.assertIn(marker, ORBIT_DASHBOARD_HTML)
 
-        The panel names its tools in one place, so the whole of its authority
-        is this list. `start_run`, `resume_run`, `cancel_run` and
-        `generate_workflow` are the ones that must never join it.
-        """
+        recent = ORBIT_DASHBOARD_HTML.split(
+            "function renderRecentRun(run,workflowName) {", 1
+        )[1].split("function bindActions", 1)[0]
+        for absent in (
+            "run.goal", "run.run_id", 'class="progress"',
+            'class="steps"', "promptExplain", "promptOpen",
+        ):
+            self.assertNotIn(absent, recent)
 
-        named = set(re.findall(r"load\(\s*'([a-z_]+)'", ORBIT_DASHBOARD_HTML))
-        self.assertEqual({"list_workflows", "list_runs", "get_run_steps"}, named)
+        idle_actions = ORBIT_DASHBOARD_HTML.split(
+            "function idleActions() {", 1
+        )[1].split("function renderIdle", 1)[0]
+        for marker in (
+            "data-view-workflows", "t().createWorkflow",
+            "t().history", "data-view-agents",
+        ):
+            self.assertIn(marker, idle_actions)
 
-    def test_it_reaches_no_mutating_endpoint(self) -> None:
-        self.assertNotIn("method: 'POST'", ORBIT_DASHBOARD_HTML)
-        self.assertNotIn('method: "POST"', ORBIT_DASHBOARD_HTML)
-        self.assertNotIn("idempotency-key", ORBIT_DASHBOARD_HTML.lower())
-        # The single fetch is a GET, and every path it is given is a read.
-        self.assertEqual(1, ORBIT_DASHBOARD_HTML.count("await fetch("))
+    def test_goal_run_card_paints_an_initial_failure_as_running(self) -> None:
+        """A synchronous failed start must not make the card open as failed."""
 
-    def test_it_says_where_those_actions_went(self) -> None:
-        """A panel missing its controls without explanation reads as broken."""
+        for marker in (
+            "firstPaint&&run?.run_id&&run.status==='failed'",
+            "draw({...run,status:'running'},[])",
+            "timer=setTimeout(refresh,2000)",
+        ):
+            self.assertIn(marker, ORBIT_RUN_HTML)
 
-        self.assertIn("read-only", ORBIT_DASHBOARD_HTML)
-        self.assertIn("只读", ORBIT_DASHBOARD_HTML)
+    def test_goal_run_card_keeps_a_rejected_start_as_its_own_error(self) -> None:
+        for marker in (
+            "function failureMessage(value)",
+            "if(failure){clearTimeout(timer)",
+            "value?.run_id||failureMessage(value)",
+        ):
+            self.assertIn(marker, ORBIT_RUN_HTML)
 
+    def test_idle_state_does_not_promote_stale_tasks(self) -> None:
+        for marker in (
+            "RECENT_TASK_MS = 5 * 60 * 60 * 1000", "isRecent", "recentRun",
+            "recentJob", "准备开始", "选择工作流", "创建工作流",
+            "promptSelectWorkflow", "promptCreateWorkflow",
+        ):
+            self.assertIn(marker, ORBIT_DASHBOARD_HTML)
 
-class SpeaksBothLanguagesTests(unittest.TestCase):
-    """The rule the full UI is held to, applied to the page that escaped it.
+    def test_idle_goal_flow_selects_a_workflow_first(self) -> None:
+        self.assertNotIn("promptStart", ORBIT_DASHBOARD_HTML)
+        self.assertIn(
+            "查看 Orbit 工作流列表，以便选择一个工作流开始新目标。",
+            ORBIT_DASHBOARD_HTML,
+        )
 
-    `tests/test_ui_assets.py` refuses hardcoded user-visible Chinese and holds
-    the catalogs to matching keys, but it reads `static/workflow-ui`. This page
-    is a string in Python, so none of that saw it, and it shipped monolingual
-    with an English enum showing through. Being out of a guard's reach is not
-    an exemption from the rule it enforces.
-    """
+    def test_suggested_actions_return_to_the_conversation(self) -> None:
+        self.assertIn("'ui/message'", ORBIT_DASHBOARD_HTML)
+        self.assertIn("sendFollowUpMessage", ORBIT_DASHBOARD_HTML)
+        for prompt in (
+            "promptHandle", "promptCancel", "promptExplain",
+            "promptSelectWorkflow", "promptCreateWorkflow", "promptOpen",
+        ):
+            self.assertIn(prompt, ORBIT_DASHBOARD_HTML)
 
-    @staticmethod
-    def _markup() -> str:
-        """Everything before the script: what the document itself spells."""
+    def test_human_action_tells_chat_to_use_the_declared_output_port(self) -> None:
+        for marker in (
+            "promptHandle: run =>",
+            "current interrupt_id, revision, and output_ports",
+            '"result":{"decision":"approve","value":null}',
+            "当前的 interrupt_id、revision 和 output_ports",
+            "不要自创顶层字段",
+            "t().promptHandle(run)",
+        ):
+            self.assertIn(marker, ORBIT_DASHBOARD_HTML)
 
-        return ORBIT_DASHBOARD_HTML.split("<script>")[0]
+    def test_history_asks_the_host_to_open_the_full_ui_while_agents_stays_in_card(self) -> None:
+        for marker in (
+            'class="actions idleActions"',
+            "action(t().history,t().promptHistory)",
+            "data-view-agents",
+            "http://127.0.0.1:8848/ui/#/goals",
+            "'ui/message'", "sendFollowUpMessage",
+            ".idleActions { flex-wrap: nowrap; overflow-x: auto; }",
+        ):
+            self.assertIn(marker, ORBIT_DASHBOARD_HTML)
+        idle = ORBIT_DASHBOARD_HTML.split('function idleActions() {', 1)[1].split(
+            'function renderIdle', 1
+        )[0]
+        self.assertLess(idle.index('t().createWorkflow'), idle.index('t().history'))
+        self.assertLess(idle.index('t().history'), idle.index('data-view-agents'))
 
-    def test_the_markup_carries_no_user_visible_text(self) -> None:
-        """Every string is chosen at runtime, so none is baked into the page."""
+    def test_it_does_not_request_a_large_display_surface(self) -> None:
+        self.assertNotIn("request-display-mode", ORBIT_DASHBOARD_HTML)
+        self.assertNotIn("fullscreen", ORBIT_DASHBOARD_HTML)
 
-        self.assertEqual([], re.findall(r"[一-鿿]", self._markup()))
-        self.assertNotIn("<html lang=", self._markup())
+    def test_it_has_no_direct_mutation_path(self) -> None:
+        self.assertNotIn("start_run", ORBIT_DASHBOARD_HTML)
+        self.assertNotIn("cancel_run", ORBIT_DASHBOARD_HTML)
+        self.assertNotIn("idempotency-key", ORBIT_DASHBOARD_HTML)
+        self.assertNotIn("await fetch(", ORBIT_DASHBOARD_HTML)
 
-    def test_it_ships_both_catalogs(self) -> None:
+    def test_it_supports_chinese_and_english(self) -> None:
         self.assertIn("'en-US'", ORBIT_DASHBOARD_HTML)
         self.assertIn("'zh-CN'", ORBIT_DASHBOARD_HTML)
 
-    @staticmethod
-    def _catalog_keys() -> dict[str, set[str]]:
-        """The keys each locale defines, nested ones included.
 
-        Parsed out of the source the way test_ui_assets.py reads the UI. If
-        the table is ever reformatted this stops finding keys, which is why
-        the test below refuses an implausibly small answer rather than
-        passing on one.
-        """
+class DedicatedCardTests(unittest.TestCase):
+    def test_goals_card_lists_runs_without_embedding_the_browser_ui(self) -> None:
+        self.assertIn("callTool('list_runs',{limit:100})", ORBIT_GOALS_HTML)
+        self.assertIn("data-run-id", ORBIT_GOALS_HTML)
+        self.assertIn("目标执行卡片", ORBIT_GOALS_HTML)
+        self.assertNotIn("<iframe", ORBIT_GOALS_HTML)
+        self.assertNotIn("127.0.0.1:8848/ui", ORBIT_GOALS_HTML)
 
-        table = ORBIT_DASHBOARD_HTML.split("const STRINGS = {")[1]
-        table = table.split("\n  };")[0]
-        parts = re.split(r"\n    '(en-US|zh-CN)': \{", table)
-        catalogs: dict[str, set[str]] = {}
-        for index in range(1, len(parts), 2):
-            body = parts[index + 1]
-            keys = set(re.findall(r"^\s{6}(\w+):", body, re.M))
-            for name, nested in re.findall(
-                r"^\s{6}(\w+): \{(.*?)^\s{6}\},", body, re.M | re.S
-            ):
-                keys |= {f"{name}.{key}" for key in re.findall(r"(\w+):", nested)}
-            catalogs[parts[index]] = keys
-        return catalogs
+    def test_workflow_list_contains_only_catalog_calls(self) -> None:
+        self.assertIn("callTool('list_workflows'", ORBIT_WORKFLOWS_HTML)
+        self.assertNotIn("list_runs", ORBIT_WORKFLOWS_HTML)
+        self.assertNotIn("list_authoring_jobs", ORBIT_WORKFLOWS_HTML)
 
-    def test_the_catalogs_define_the_same_keys(self) -> None:
-        """The guard the full UI has, which this page needs more.
+    def test_workflow_list_items_offer_the_same_new_goal_prompt(self) -> None:
+        for marker in (
+            'class="listGoal"', 'data-goal-id="${esc(w.workflow_id)}"',
+            'data-goal-name="${esc(w.name||w.workflow_id)}"',
+            "event.stopPropagation()",
+            "使用工作流「${b.dataset.goalName}」（${b.dataset.goalId}）执行：",
+            "background: light-dark(#e5e5e8, #303034) !important",
+            "background: light-dark(#d9d9dd, #3a3a40) !important",
+        ):
+            self.assertIn(marker, ORBIT_WORKFLOWS_HTML)
 
-        A key present in one catalog and missing from the other renders as
-        `undefined` for whoever gets the other language — and nothing else
-        here would notice, because the page still loads and the list still
-        draws.
-        """
+    def test_workflow_item_switches_to_detail_inside_the_list_card(self) -> None:
+        for marker in (
+            "b.onclick=()=>openDetail(b.dataset.openId)",
+            "callTool('get_workflow_definition',{workflow_id:workflowId})",
+            "function drawDetail(w)", 'id="workflowBack"',
+            "document.getElementById('workflowBack').onclick=showList",
+            "else if(value?.workflow_id){current=value;drawDetail(current)}",
+        ):
+            self.assertIn(marker, ORBIT_WORKFLOWS_HTML)
+        self.assertNotIn("使用工作流详情卡片展示", ORBIT_WORKFLOWS_HTML)
 
-        catalogs = self._catalog_keys()
-        self.assertEqual({"en-US", "zh-CN"}, set(catalogs))
-        english, chinese = catalogs["en-US"], catalogs["zh-CN"]
-        self.assertGreater(len(english), 15, "the key parser stopped working")
-        self.assertEqual(english, chinese)
-
-    def test_no_translation_is_left_empty(self) -> None:
-        """An empty string is a missing translation wearing a key."""
-
-        self.assertNotIn(": ''", ORBIT_DASHBOARD_HTML.split("const STRINGS = {")[1]
-                         .split("\n  };")[0])
-
-    def test_it_translates_the_readiness_states_the_api_produces(self) -> None:
-        """`ready`, and the two the workflows projection substitutes.
-
-        An untranslated token reaching the card is how "15 个步骤 · ready"
-        happened. The fallback keeps a state nobody translated readable as
-        exactly that, rather than dressed as an ordinary one.
-        """
-
-        for state in ("ready", "needs_upgrade", "needs_migration"):
-            with self.subTest(state=state):
-                self.assertIn(state, ORBIT_DASHBOARD_HTML)
-        self.assertIn("t().readiness[state] || state", ORBIT_DASHBOARD_HTML)
-
-
-class ActivityTests(unittest.TestCase):
-    """What Orbit is doing, which is the question a panel is there to answer.
-
-    The catalogue says what Orbit *can* run. Beside a conversation the live
-    goal matters more, and it is the one thing a static list cannot show: a
-    user who asks the Agent to start something and then watches the sidebar
-    should see it move.
-    """
-
-    def test_a_live_goal_is_the_one_it_shows(self) -> None:
-        for state in ("running", "waiting", "interrupted"):
-            with self.subTest(state=state):
-                self.assertIn(f"'{state}'", ORBIT_DASHBOARD_HTML)
-        self.assertIn("runs.find(item => ACTIVE.has(item.status))", ORBIT_DASHBOARD_HTML)
-
-    def test_it_falls_back_to_the_newest_run(self) -> None:
-        """So "did that finish?" is answerable after the run has ended."""
-
-        self.assertIn("|| runs[0] || null", ORBIT_DASHBOARD_HTML)
-
-    def test_every_run_status_has_words(self) -> None:
-        """An untranslated status is the bug this page already shipped once."""
-
-        for state in ("running", "waiting", "interrupted", "completed",
-                      "failed", "cancelled", "unknown"):
-            with self.subTest(state=state):
-                self.assertIn(f"{state}:", ORBIT_DASHBOARD_HTML)
-        self.assertIn("t().runStatus[status_] || status_", ORBIT_DASHBOARD_HTML)
-
-    def test_steps_are_read_only_for_a_run_still_going(self) -> None:
-        """A finished goal has nothing left to watch; do not pay for it."""
-
-        self.assertIn("if (live === null) return;", ORBIT_DASHBOARD_HTML)
-
-    def test_an_idle_panel_still_watches_for_a_goal_starting(self) -> None:
-        """The case the card is for, and the one it first got wrong.
-
-        A user asks the Agent to start a goal while looking at the panel. A
-        poll that runs only while something is already live never notices, and
-        the card sits on the last finished goal for good. Idle looks too, just
-        rarely.
-        """
-
-        self.assertIn("POLL_LIVE_MS = 5000", ORBIT_DASHBOARD_HTML)
-        self.assertIn("POLL_IDLE_MS = 20000", ORBIT_DASHBOARD_HTML)
-        self.assertIn("live ? POLL_LIVE_MS : POLL_IDLE_MS", ORBIT_DASHBOARD_HTML)
-
-    def test_nothing_polls_while_nobody_is_looking(self) -> None:
-        """Each poll is a tool call the host may show its user."""
-
-        self.assertIn("document.visibilityState === 'hidden'", ORBIT_DASHBOARD_HTML)
-        self.assertIn("visibilitychange", ORBIT_DASHBOARD_HTML)
-
-    def test_a_failed_read_leaves_the_last_answer_standing(self) -> None:
-        """Activity is supplementary; a blip must not blank the catalogue."""
-
-        self.assertIn("schedulePoll(false);", ORBIT_DASHBOARD_HTML)
-
-
-class HostContextTests(unittest.TestCase):
-    """Theme and language belong to the host, not to the operating system.
-
-    The panel is drawn inside somebody else's conversation. Reading the OS for
-    a theme the host has overridden puts a light card in a dark thread — and
-    the disagreement appears exactly when a user has set the theme by hand.
-    """
-
-    def test_it_takes_the_context_offered_at_the_handshake(self) -> None:
-        self.assertIn("applyHostContext(result?.hostContext)", ORBIT_DASHBOARD_HTML)
-
-    def test_it_follows_the_host_when_the_context_changes(self) -> None:
+    def test_workflow_detail_returns_mutations_to_chat(self) -> None:
+        self.assertIn("get_workflow_definition", ORBIT_WORKFLOWS_HTML)
+        for label in ("新目标", "修改", "删除"):
+            self.assertIn(label, ORBIT_WORKFLOWS_HTML)
         self.assertIn(
-            "'ui/notifications/host-context-changed'", ORBIT_DASHBOARD_HTML,
+            'data-prompt="使用工作流「${esc(w.name||w.workflow_id)}」（${esc(w.workflow_id)}）执行："',
+            ORBIT_WORKFLOWS_HTML,
+        )
+        self.assertIn(
+            'data-prompt="按照下面的要求修改工作流「${esc(w.name||w.workflow_id)}」（${esc(w.workflow_id)}）："',
+            ORBIT_WORKFLOWS_HTML,
+        )
+        self.assertNotIn("callTool('start_run'", ORBIT_WORKFLOWS_HTML)
+        self.assertNotIn("callTool('delete", ORBIT_WORKFLOWS_HTML)
+
+    def test_workflow_delete_requires_card_confirmation_then_returns_to_chat(self) -> None:
+        for marker in (
+            'id="deleteWorkflowDialog"', "showModal()", "确认删除工作流？",
+            'id="cancelDeleteWorkflow"', 'id="confirmDeleteWorkflow"',
+            "我确认删除工作流", "重新读取其最新版本", "新的幂等键",
+            "bindDeleteConfirmation(w)",
+        ):
+            self.assertIn(marker, ORBIT_WORKFLOWS_HTML)
+        self.assertNotIn("callTool('delete_workflow'", ORBIT_WORKFLOWS_HTML)
+
+    def test_workflow_detail_uses_the_bundled_xyflow_viewer(self) -> None:
+        for marker in (
+            "OrbitWorkflowGraph", "OrbitWorkflowGraph.mount",
+            'data-workflow-graph aria-label="Workflow graph"',
+            "react-flow__controls", "react-flow__background",
+        ):
+            self.assertIn(marker, ORBIT_WORKFLOWS_HTML)
+        for absent in ('class="graphEdge', "function bindGraph()", "forceSimulation"):
+            self.assertNotIn(absent, ORBIT_WORKFLOWS_HTML)
+
+    def test_workflow_detail_embeds_assets_without_remote_runtime_dependencies(self) -> None:
+        self.assertNotRegex(ORBIT_WORKFLOWS_HTML, r'<script[^>]+src=')
+        self.assertNotRegex(ORBIT_WORKFLOWS_HTML, r'<link[^>]+href=')
+        self.assertRegex(ORBIT_WORKFLOWS_HTML, r"(?:const|var) OrbitWorkflowGraph=")
+
+    def test_workflow_detail_defaults_to_graph_and_tabs_to_definitions(self) -> None:
+        for marker in (
+            'role="tablist"', 'id="workflowGraphTab"',
+            'aria-selected="true" aria-controls="workflowGraphPanel"',
+            'id="workflowDefinitionTab"', 'aria-controls="workflowDefinitionPanel"',
+            'id="workflowDefinitionPanel" class="detailPanel definition" role="tabpanel"',
+            "function bindTabs()", "ArrowLeft", "ArrowRight", "Home", "End",
+        ):
+            self.assertIn(marker, ORBIT_WORKFLOWS_HTML)
+        self.assertIn(
+            'id="workflowDefinitionPanel" class="detailPanel definition" role="tabpanel" '
+            'aria-labelledby="workflowDefinitionTab" hidden',
+            ORBIT_WORKFLOWS_HTML,
+        )
+        self.assertIn('.tab[aria-selected="true"]::after{background:var(--accent)}', ORBIT_WORKFLOWS_HTML)
+        self.assertNotIn('.tab[aria-selected="true"]{color:var(--text);background:', ORBIT_WORKFLOWS_HTML)
+
+    def test_workflow_list_and_detail_share_a_stable_card_height(self) -> None:
+        self.assertIn(":root { --workflow-card-height: 600px; }", ORBIT_WORKFLOWS_HTML)
+        self.assertIn(
+            "#card.workflowList, #card.workflowDetail { height: var(--workflow-card-height); }",
+            ORBIT_WORKFLOWS_HTML,
+        )
+        self.assertIn("#card.workflowList { overflow-y: auto; }", ORBIT_WORKFLOWS_HTML)
+        self.assertIn("card.className='card workflowList'", ORBIT_WORKFLOWS_HTML)
+        self.assertIn("card.className='card workflowDetail'", ORBIT_WORKFLOWS_HTML)
+        self.assertIn(
+            "#card.workflowDetail .detailPanel { flex: 1 1 auto; height: auto; min-height: 0; }",
+            ORBIT_WORKFLOWS_HTML,
         )
 
-    def test_the_theme_reaches_the_whole_page(self) -> None:
-        """One property, because the page is drawn in system colours."""
+    def test_cards_receive_late_codex_tool_output(self) -> None:
+        self.assertIn("openai:set_globals", ORBIT_WORKFLOWS_HTML)
+        self.assertIn("globals.toolOutput", ORBIT_WORKFLOWS_HTML)
+        self.assertIn("publishToolResult", ORBIT_WORKFLOWS_HTML)
+        self.assertIn(".detailPanel{height:420px;overflow:hidden}", ORBIT_WORKFLOWS_HTML)
+        self.assertIn(".detailPanel.definition{overflow-y:auto}", ORBIT_WORKFLOWS_HTML)
 
-        self.assertIn("style.colorScheme = context.theme", ORBIT_DASHBOARD_HTML)
-        self.assertIn("color-scheme: light dark", ORBIT_DASHBOARD_HTML)
+    def test_workflow_graph_supports_zoom_and_horizontal_pan(self) -> None:
+        for marker in (
+            "react-flow__controls-button", "react-flow__controls-zoomin",
+            "react-flow__controls-zoomout", "react-flow__controls-fitview",
+            "panOnScroll", "Horizontal", "maxZoom", "minZoom",
+        ):
+            self.assertIn(marker, ORBIT_WORKFLOWS_HTML)
 
+    def test_workflow_graph_tracks_the_codex_host_theme(self) -> None:
+        for marker in (
+            "host-context-changed", "applyHostContext", "currentTheme()",
+            "document.documentElement.style.colorScheme=theme",
+        ):
+            self.assertIn(marker, ORBIT_WORKFLOWS_HTML)
 
-class McpAppsBridgeTests(unittest.TestCase):
-    """The handshake this page performs when a host speaks MCP Apps.
+    def test_workflow_detail_uses_the_host_background(self) -> None:
+        self.assertIn("--host-canvas: light-dark(#ffffff, #151515)", ORBIT_WORKFLOWS_HTML)
+        self.assertIn("html, body, main", ORBIT_WORKFLOWS_HTML)
+        self.assertIn("background: var(--host-canvas) !important", ORBIT_WORKFLOWS_HTML)
+        self.assertIn(
+            ".card, .tabs, .actions, .workflowGraphMount, .mcp-xyflow-viewer",
+            ORBIT_WORKFLOWS_HTML,
+        )
+        self.assertIn("background: transparent !important", ORBIT_WORKFLOWS_HTML)
 
-    The ext-apps SDK would supply this, and cannot: the page ships as one
-    self-contained document with no build step. So the wire protocol is
-    written out, which means the spec is only honoured for as long as these
-    strings survive — nothing here fails loudly if the sequence is broken, the
-    panel just sits empty on a host nobody tests against.
+    def test_definition_items_expand_to_show_node_details(self) -> None:
+        for marker in (
+            "definitionItemToggle", 'aria-expanded="false"',
+            "bindDefinitionItems()", "n.handler", "n.prompt",
+        ):
+            self.assertIn(marker, ORBIT_WORKFLOWS_HTML)
 
-    Behaviour was verified in a browser against a simulated host: the page
-    completes the handshake, renders from `ui/notifications/tool-result`,
-    refreshes over `tools/call`, and falls back to HTTP against a parent that
-    answers nothing. These assertions pin what that verification exercised.
-    """
+    def test_authoring_card_is_scoped_to_authoring(self) -> None:
+        for marker in ("get_authoring_job", "list_authoring_jobs", "Publish workflow"):
+            self.assertIn(marker, ORBIT_AUTHORING_HTML)
+        self.assertNotIn("list_runs", ORBIT_AUTHORING_HTML)
 
-    def test_it_announces_the_protocol_revision_it_speaks(self) -> None:
-        self.assertIn("'2026-01-26'", ORBIT_DASHBOARD_HTML)
+    def test_run_card_is_scoped_to_one_run_and_its_result(self) -> None:
+        for marker in ("inspect_run", "get_run_steps", "read_artifact_content"):
+            self.assertIn(marker, ORBIT_RUN_HTML)
+        self.assertNotIn("list_authoring_jobs", ORBIT_RUN_HTML)
 
-    def test_it_performs_the_initialization_sequence(self) -> None:
-        """`ui/initialize`, then the notification that unblocks the host.
+    def test_run_card_labels_its_result(self) -> None:
+        self.assertIn('<h2 class="resultTitle">执行结果</h2>', ORBIT_RUN_HTML)
+        self.assertIn(".resultTitle{margin:0 0 6px", ORBIT_RUN_HTML)
 
-        A host MUST NOT send tool input or results before the initialized
-        notification, so dropping it leaves the panel waiting on data that is
-        never coming.
-        """
+    def test_run_card_clamps_the_goal_and_has_no_progress_bar(self) -> None:
+        for marker in (
+            "-webkit-line-clamp: 3", "-webkit-box-orient: vertical",
+            'class="goal"', 'class="steps"',
+        ):
+            self.assertIn(marker, ORBIT_RUN_HTML)
+        for absent in ('class="progress"', "Math.round", "steps.length} steps"):
+            self.assertNotIn(absent, ORBIT_RUN_HTML)
 
-        self.assertIn("'ui/initialize'", ORBIT_DASHBOARD_HTML)
-        self.assertIn("'ui/notifications/initialized'", ORBIT_DASHBOARD_HTML)
-
-    def test_it_takes_the_opening_list_from_the_tool_result(self) -> None:
-        self.assertIn("'ui/notifications/tool-result'", ORBIT_DASHBOARD_HTML)
-
-    def test_it_refreshes_with_a_standard_tool_call(self) -> None:
-        self.assertIn("'tools/call'", ORBIT_DASHBOARD_HTML)
-
-    def test_it_speaks_to_the_parent_frame(self) -> None:
-        self.assertIn("window.parent.postMessage", ORBIT_DASHBOARD_HTML)
-        self.assertIn("window.parent === window", ORBIT_DASHBOARD_HTML)
-
-    def test_every_host_request_is_deadlined(self) -> None:
-        """Being framed says nothing about who is out there.
-
-        A plain embed answers no request at all. Without a deadline the first
-        one never settles, and the HTTP path that would have worked is never
-        reached — the panel says "refreshing" forever.
-        """
-
-        self.assertIn("setTimeout", ORBIT_DASHBOARD_HTML)
-        self.assertIn("宿主未响应", ORBIT_DASHBOARD_HTML)
-
-    def test_a_host_that_does_not_answer_is_dropped(self) -> None:
-        """And dropped for good, or every refresh spends another deadline."""
-
-        self.assertIn("hostBridge = null", ORBIT_DASHBOARD_HTML)
-
-
-class BothDataPathsTests(unittest.TestCase):
-    """The page is fed by a host bridge or by HTTP, and shapes differ.
-
-    The tool lifts `node_count` out of `summary`; the HTTP projection leaves it
-    there. A page that read only one of them would render every workflow as
-    zero steps on the other surface — true-looking, and wrong.
-    """
-
-    def test_it_reads_the_list_from_either_shape(self) -> None:
-        for path in ("payload?.[key]", "payload?.data?.[key]",
-                     "payload?.structuredContent?.[key]"):
-            with self.subTest(path=path):
-                self.assertIn(path, ORBIT_DASHBOARD_HTML)
-
-    def test_it_finds_the_step_count_in_either_shape(self) -> None:
-        self.assertIn("workflow.node_count", ORBIT_DASHBOARD_HTML)
-        self.assertIn("workflow.summary?.node_count", ORBIT_DASHBOARD_HTML)
-
-    def test_it_falls_back_to_http_when_there_is_no_bridge(self) -> None:
-        self.assertIn("window.openai?.callTool", ORBIT_DASHBOARD_HTML)
-        self.assertIn("await fetch(httpPath", ORBIT_DASHBOARD_HTML)
-        for path in ("'/api/v1/workflows'", "'/api/v1/langgraph-runs?limit=5'",
-                     "/steps`"):
-            with self.subTest(path=path):
-                self.assertIn(path, ORBIT_DASHBOARD_HTML)
+    def test_run_card_uses_content_height_up_to_a_600px_maximum(self) -> None:
+        for marker in (
+            ":root { --goal-run-card-max-height: 600px; }",
+            "#card.goalRun { height: auto; max-height: var(--goal-run-card-max-height);",
+            "card.className='card goalRun'",
+            "overflow-y: auto;",
+            "overscroll-behavior: contain;",
+        ):
+            self.assertIn(marker, ORBIT_RUN_HTML)
+        self.assertNotIn("--goal-run-card-height", ORBIT_RUN_HTML)
 
 
 if __name__ == "__main__":

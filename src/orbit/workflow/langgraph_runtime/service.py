@@ -162,6 +162,83 @@ def _goal(value: str) -> str:
     return goal
 
 
+def _bind_goal_input(ir, inputs: Mapping[str, Any], goal: str) -> dict[str, Any]:
+    """Materialize the catalog's conventional ``run.goal`` binding.
+
+    Goal-ready Agent workflows expose one inline object input named ``prompt``.
+    Callers should not have to duplicate the same text in both ``goal`` and
+    ``input.prompt.goal`` merely to satisfy input validation.  Explicit prompt
+    input remains authoritative.
+    """
+
+    bound = dict(inputs)
+    if not goal or "prompt" in bound or len(ir.entry) != 1:
+        return bound
+    entry = next((node for node in ir.nodes if node.id == ir.entry[0]), None)
+    prompt = next((port for port in ir.inputs if port.id == "prompt"), None)
+    if (
+        entry is not None
+        and entry.handler is not None
+        and entry.handler.name.startswith("agent.")
+        and prompt is not None
+        and prompt.data_policy.transport.value == "inline"
+    ):
+        bound["prompt"] = {"goal": goal}
+    return bound
+
+
+def _validate_interrupt_response(
+    interrupt: Mapping[str, Any], value: Any, *, ir=None,
+) -> None:
+    """Reject a human answer before consuming its durable interrupt.
+
+    New checkpoints describe the human node's output ports on the interrupt;
+    for older checkpoints the same ports are recovered from the Run's pinned
+    Workflow IR. A scalar remains valid for a single output because the
+    compiler wraps it onto that port; an object is already the handler-shaped
+    output map.
+    """
+
+    detail = interrupt.get("value")
+    if not isinstance(detail, Mapping):
+        return
+    ports = detail.get("output_ports")
+    if (not isinstance(ports, list) or not ports) and ir is not None:
+        node_id = detail.get("node_id")
+        node = next((item for item in ir.nodes if item.id == node_id), None)
+        if node is not None and node.kind == "human":
+            ports = [
+                {"id": port.id, "required": port.required}
+                for port in node.outputs
+            ]
+    if not isinstance(ports, list) or not ports:
+        return
+    declared = {
+        str(port["id"])
+        for port in ports
+        if isinstance(port, Mapping) and port.get("id")
+    }
+    if not declared:
+        return
+    if not isinstance(value, Mapping):
+        if len(declared) == 1:
+            return
+        raise ValueError("human response must be an object for multiple output ports")
+    unknown = set(value) - declared
+    if unknown:
+        raise ValueError(
+            f"human response contains undeclared outputs: {sorted(unknown)}"
+        )
+    required = {
+        str(port["id"])
+        for port in ports
+        if isinstance(port, Mapping) and port.get("id") and port.get("required") is True
+    }
+    missing = required - set(value)
+    if missing:
+        raise ValueError(f"human response omitted required outputs: {sorted(missing)}")
+
+
 def append_event(
     connection,
     run_id: str,
@@ -545,6 +622,12 @@ class LangGraphWorkflowService:
         goal = _goal(goal)
         record = self._workflow(workflow_id, workflow_version, starting=True)
         ir, binding = self._bound(record.ir)
+        inputs = _bind_goal_input(ir, inputs, goal)
+        # Validate before a durable Run (and its MCP App card) exists. When
+        # deferred execution used to discover a missing or unknown input in
+        # the background, the caller could only recover by starting another
+        # Run, leaving one card per rejected attempt in the conversation.
+        compile_workflow(ir, self.handlers).validate_inputs(inputs)
         request = {
             "workflow_id": workflow_id,
             "workflow_version": record.version.value,
@@ -847,6 +930,11 @@ class LangGraphWorkflowService:
             interrupt_id = next(iter(available))
         elif interrupt_id not in available:
             raise ValueError(f"interrupt is not pending: {interrupt_id}")
+        answered_interrupt = next(
+            item for item in current.interrupts if item["id"] == interrupt_id
+        )
+        ir = self._run_ir(current)
+        _validate_interrupt_response(answered_interrupt, value, ir=ir)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             receipt = connection.execute(
@@ -874,9 +962,6 @@ class LangGraphWorkflowService:
             answered_nodes = set() if row is None else set(json.loads(
                 row["answered_interrupt_nodes_json"] or "[]"
             ))
-            answered_interrupt = next(
-                item for item in current.interrupts if item["id"] == interrupt_id
-            )
             answered_value = answered_interrupt.get("value") or {}
             if isinstance(answered_value, Mapping) and answered_value.get("node_id"):
                 answered_nodes.add(str(answered_value["node_id"]))
@@ -913,7 +998,7 @@ class LangGraphWorkflowService:
             self._append_event(connection, run_id)
             connection.commit()
         return self._execute(
-            run_id, self._run_ir(current), resume=responses,
+            run_id, ir, resume=responses,
         )
 
     def recover(self, run_id: str) -> LangGraphRun:

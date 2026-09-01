@@ -37,7 +37,7 @@ from orbit.workflow.domain.handlers import (
     RecoveryDisposition, RecoveryResult, ResourceProfile,
     UnknownExternalResultError,
 )
-from orbit.workflow.domain.serialization import definition_hash, to_primitive
+from orbit.workflow.domain.serialization import canonical_json, definition_hash, to_primitive
 from unittest.mock import patch
 
 from orbit.workflow.langgraph_runtime import service as langgraph_service_module
@@ -1189,7 +1189,8 @@ class LangGraphWorkflowCompilerTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            [{"id": "submission", "schema_id": SCHEMA}], asked["output_ports"],
+            [{"id": "submission", "schema_id": SCHEMA, "required": True}],
+            asked["output_ports"],
         )
         # Answering on the port the question named is enough.
         completed = compiled.resume(
@@ -2383,6 +2384,142 @@ class LangGraphWorkflowCompilerTests(unittest.TestCase):
 
 
 class LangGraphWorkflowServiceTests(unittest.TestCase):
+    def test_invalid_human_output_is_rejected_before_interrupt_is_consumed(self) -> None:
+        waiting = node(
+            "waiting", inputs=("value",), outputs=("value",),
+            kind="human", handler=False,
+        )
+        done = node("done", inputs=("value",), kind="terminal", handler=False)
+        ir = workflow(
+            (waiting, done), (edge("finish", "waiting", "done"),),
+            entry=("waiting",), terminals=("done",), result=("waiting", "value"),
+        )
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            service = self.service(
+                directory, self.publish(directory, ir),
+                LangGraphHandlerRegistry([]),
+            )
+            started = service.start(
+                ir.workflow_id, {"value": "in"}, idempotency_key="start",
+            )
+
+            with self.assertRaisesRegex(ValueError, "undeclared outputs"):
+                service.resume(
+                    started.run_id, {"approved": True},
+                    expected_revision=started.revision,
+                    idempotency_key="bad-answer",
+                )
+            unchanged = service.get(started.run_id)
+            completed = service.resume(
+                started.run_id, {"value": "approved"},
+                expected_revision=unchanged.revision,
+                idempotency_key="good-answer",
+            )
+
+        self.assertEqual("interrupted", unchanged.status)
+        self.assertEqual(started.revision, unchanged.revision)
+        self.assertEqual(started.interrupts, unchanged.interrupts)
+        self.assertEqual("completed", completed.status)
+        self.assertEqual("approved", completed.result)
+
+    def test_old_interrupt_without_port_metadata_is_validated_before_resume(self) -> None:
+        """The pinned IR protects old checkpoints before LangGraph consumes them."""
+
+        waiting = node(
+            "waiting", inputs=("value",), outputs=("value",),
+            kind="human", handler=False,
+        )
+        done = node("done", inputs=("value",), kind="terminal", handler=False)
+        ir = workflow(
+            (waiting, done), (edge("finish", "waiting", "done"),),
+            entry=("waiting",), terminals=("done",), result=("waiting", "value"),
+        )
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            service = self.service(
+                directory, self.publish(directory, ir),
+                LangGraphHandlerRegistry([]),
+            )
+            started = service.start(
+                ir.workflow_id, {"value": "in"}, idempotency_key="start-old",
+            )
+            legacy_interrupts = tuple({
+                **item,
+                "value": {
+                    key: value for key, value in item["value"].items()
+                    if key != "output_ports"
+                },
+            } for item in started.interrupts)
+            with service._connect() as connection:
+                connection.execute(
+                    "UPDATE langgraph_runs SET interrupts_json=? WHERE run_id=?",
+                    (canonical_json(legacy_interrupts), started.run_id),
+                )
+                connection.commit()
+            legacy = service.get(started.run_id)
+
+            with self.assertRaisesRegex(ValueError, "undeclared outputs"):
+                service.resume(
+                    legacy.run_id, {"approved": True},
+                    expected_revision=legacy.revision,
+                    idempotency_key="bad-old-answer",
+                )
+            restored = service.get(legacy.run_id)
+            completed = service.resume(
+                restored.run_id, {"value": "approved"},
+                expected_revision=restored.revision,
+                idempotency_key="good-old-answer",
+                interrupt_id=restored.interrupts[0]["id"],
+            )
+
+        self.assertEqual("interrupted", restored.status)
+        self.assertEqual(legacy.interrupts, restored.interrupts)
+        self.assertEqual(legacy.revision, restored.revision)
+        self.assertIsNone(restored.error)
+        self.assertEqual("completed", completed.status)
+        self.assertEqual("approved", completed.result)
+
+    def test_goal_ready_agent_workflow_binds_goal_into_prompt_input(self) -> None:
+        prompt = IRPort(
+            "prompt", "schema://object/1.0", True, False, None, "",
+        )
+        result = IRPort(
+            "result", "schema://object/1.0", True, False, None, "",
+        )
+        agent = IRNode(
+            "translate", "action", (prompt,), (result,),
+            IRHandlerRef("agent.codex", "1.0.0", FINGERPRINT),
+            {}, (), None,
+        )
+        terminal = IRNode(
+            "complete", "terminal", (result,), (), None, {}, (), None,
+        )
+        ir = WorkflowIR(
+            "1.3", "workflow:goal-ready", "Goal ready", "", {},
+            (prompt,), (), (agent, terminal),
+            (IREdge(
+                "done", "translate", "result", "complete", "result",
+                "success", TRUE, IDENTITY,
+            ),),
+            ("translate",), ("complete",), (), (), {},
+            IRResult("translate", "result"),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("agent.codex", lambda values, config, context: {
+                "result": values["prompt"],
+            }),
+        ])
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            service = self.service(directory, self.publish(directory, ir), registry)
+            run = service.start(
+                ir.workflow_id, {}, goal="Translate this",
+                idempotency_key="goal-binding",
+            )
+
+        self.assertEqual("completed", run.status)
+        self.assertEqual({"prompt": {"goal": "Translate this"}}, run.inputs)
+        self.assertEqual({"goal": "Translate this"}, run.result)
+
     def test_parallel_interrupts_require_and_accept_explicit_id(self) -> None:
         fan = node(
             "fan", inputs=("value",), outputs=("value",), route_mode="parallel",
