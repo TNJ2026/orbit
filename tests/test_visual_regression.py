@@ -44,14 +44,40 @@ from orbit.web.local_identity import local_authorizer, loopback_authenticator
 from orbit.workflow.api.routes import RateLimiter
 from orbit.workflow.artifacts.local_cas import LocalCASBackend
 from orbit.workflow.persistence.database import connect_workflow_database
+from orbit.web.app import HandlerRegistration
+from orbit.workflow.catalogs import HandlerManifest
+from orbit.workflow.domain.durable_execution import ExecutionSafety
+from orbit.workflow.domain.handlers import ResourceProfile
 from tests.test_web_composition import (
-    SCHEMAS, publish_linear_workflow, transform_registration,
+    SCHEMAS, TransformHandler, publish_linear_workflow, transform_registration,
 )
 from tests.test_workflow_drafts import dsl as editable_dsl
 
 BASELINES = Path(__file__).parent / "visual_baselines"
 UPDATE = os.environ.get("VISUAL_UPDATE") == "1"
 MAX_DIFF_PIXEL_RATIO = 0.001
+
+def agent_registration() -> HandlerRegistration:
+    """One registered Agent, so the Agents page has a row to draw.
+
+    Without it the page is its own empty state, and the colours that live
+    only there — the avatar hue, the run and failure chips — are not in the
+    picture the baseline keeps. The name is deliberately dull: the avatar hue
+    is derived from it, so a memorable one would make the baseline turn on a
+    joke somebody later wants to change.
+    """
+
+    manifest = HandlerManifest(
+        "agent.demo", "1.0.0", ("action",),
+        {"value": "example://integer/1.0"},
+        {"value": "example://integer/1.0"},
+        {"type": "object"},
+        ExecutionSafety.REPLAY_SAFE,
+        ResourceProfile(100, 100, 5, 60, 1_000_000, "test"),
+        "schema://object/1.0", (), (), True, True,
+    )
+    return HandlerRegistration(manifest, TransformHandler(), "agent.demo@1.0.0")
+
 
 # Determinism: freeze everything the page could vary on (plan §9.2).
 VIEWPORTS = {
@@ -202,7 +228,8 @@ class VisualCaptureCase(unittest.TestCase):
         source = json.dumps(editable_dsl("linear", "Visual Editor"))
         cls.app = create_app(
             cls.db,
-            handlers=[transform_registration()], schemas=SCHEMAS,
+            handlers=[transform_registration(), agent_registration()],
+            schemas=SCHEMAS,
             poll_seconds=0.02,
             clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc),
             authenticator=loopback_authenticator,
@@ -461,6 +488,46 @@ class SimplifiedVisualRegressionTests(VisualCaptureCase):
                 image = self.capture(
                     f"{self.base}/ui/#/workflows", theme=theme, viewport=viewport,
                     ready_selector=".simplified-workflow-generator",
+                )
+                self.assert_matches_baseline(name, image, viewport)
+
+    def test_the_agents_page_in_both_themes(self) -> None:
+        """The one page with no baseline at all until now.
+
+        Its own colours — the avatar hues, the online dot and the halo around
+        it, the run and failure chips — appear nowhere else, so nothing that
+        watches the other four pages was ever going to see them change. The
+        halo had in fact been written mint-green for the dark theme and stayed
+        mint on the light one, where the dot itself is a dark ink.
+        """
+
+        viewport = VIEWPORTS["1280x800"]
+        for theme in ("dark", "light"):
+            name = f"simplified-agents-{theme}-1280x800"
+            with self.subTest(name=name):
+                image = self.capture(
+                    f"{self.base}/ui/#/agents", theme=theme, viewport=viewport,
+                    ready_selector=".agents-list",
+                )
+                self.assert_matches_baseline(name, image, viewport)
+
+    def test_the_goal_detail_drawer_in_both_themes(self) -> None:
+        """An overlay, which no other baseline holds.
+
+        It is reached by its own address, so it needs no clicking to open: the
+        scrim, the drawer's cards and the step rows inside it are all on the
+        page as soon as the route is. The step row hover is the one thing here
+        a screenshot still cannot see.
+        """
+
+        viewport = VIEWPORTS["1280x800"]
+        for theme in ("dark", "light"):
+            name = f"simplified-goal-detail-{theme}-1280x800"
+            with self.subTest(name=name):
+                image = self.capture(
+                    f"{self.base}/ui/#/history/{self.visual_run_id}",
+                    theme=theme, viewport=viewport,
+                    ready_selector=".goal-detail",
                 )
                 self.assert_matches_baseline(name, image, viewport)
 

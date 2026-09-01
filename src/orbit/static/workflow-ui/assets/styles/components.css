@@ -202,7 +202,7 @@ dialog {
 }
 /* Overlays keep context with a subtle backdrop blur (DESIGN.md) rather than a
    flat blackout. */
-dialog::backdrop { background: rgba(6, 9, 15, .6); backdrop-filter: blur(8px); }
+dialog::backdrop { background: var(--scrim); backdrop-filter: blur(8px); }
 /* A short viewport must never push the confirm button out of reach: the body
    scrolls, the actions stay pinned. */
 dialog { max-height: 85vh; display: flex; }

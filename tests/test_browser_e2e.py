@@ -643,15 +643,29 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         page.goto(f"{self.base}/ui/#/runs/{run_id}")
         page.wait_for_selector(".run-canvas")
         page.wait_for_selector("iframe.workflow-graph-frame")
-        heading_box = page.locator(".simplified-steps-head").bounding_box()
-        steps_box = page.locator(".simplified-steps").bounding_box()
+        # All three rectangles from one layout. Read one at a time they
+        # straddled the frame loading and a scrollbar arriving, and the boxes
+        # disagreed by a pixel or two — enough to fail a delta of one, and
+        # only when the machine was busy enough for the reads to land either
+        # side of it.
+        boxes = page.evaluate('''() => {
+          const rect = (sel) => {
+            const {x, y, width, height} = document.querySelector(sel).getBoundingClientRect();
+            return {x, y, width, height};
+          };
+          return {
+            heading: rect(".simplified-steps-head"),
+            steps: rect(".simplified-steps"),
+            frame: rect("iframe.workflow-graph-frame"),
+          };
+        }''')
         self.assertAlmostEqual(
-            8, steps_box["y"] - heading_box["y"] - heading_box["height"], delta=1,
+            8,
+            boxes["steps"]["y"] - boxes["heading"]["y"] - boxes["heading"]["height"],
+            delta=1,
         )
         self.assertAlmostEqual(
-            page.locator(".simplified-steps").bounding_box()["width"],
-            page.locator("iframe.workflow-graph-frame").bounding_box()["width"],
-            delta=1,
+            boxes["steps"]["width"], boxes["frame"]["width"], delta=1,
         )
         frame = page.frame_locator("iframe.workflow-graph-frame")
         frame.locator(".node").first.wait_for(timeout=15000)

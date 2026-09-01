@@ -273,12 +273,10 @@ class AccessibilityTests(unittest.TestCase):
         styles = ASSETS / "styles"
         colour = re.compile(r"#[0-9a-fA-F]{3,8}\b|\brgba?\([^)]*\)|\bhsla?\([^)]*\)")
 
-        # Scrims dim the page under a modal, and a dim is dark on either
-        # theme. Anything else added here needs the same kind of reason.
-        exempt = {
-            ("components.css", "dialog::backdrop"),
-            ("views.css", ".page-modal-scrim"),
-        }
+        # Empty, and worth keeping that way. The two scrims that used to sit
+        # here are `--scrim` now, which says the same thing where a reader
+        # will look for it. Anything added back needs a reason of that kind.
+        exempt: set[tuple[str, str]] = set()
 
         tokens = (styles / "tokens.css").read_text(encoding="utf-8")
 
