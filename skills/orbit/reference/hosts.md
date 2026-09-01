@@ -12,12 +12,19 @@ Orbit lists a connected App under the name it registers. Use:
 | --- | --- |
 | Codex | `codex-app` |
 | Claude Code | `claude-app` |
+| WorkBuddy | `orbit`, or `workbuddy-third-party:custom-mcp:orbit` — it registers under both |
 | Another MCP-capable App | its own stable name — see [using-from-other-agent-apps.md](using-from-other-agent-apps.md) |
 
 The `-app` suffix is not decoration. A Runtime discovers installed CLIs as the
 authoring Agents `codex`, `claude` and others, and a client name may not shadow
 an installed Agent: registering as one is refused outright rather than
 renamed. Two Apps connected at once need two distinct names.
+
+WorkBuddy is the exception that shows the rule is about Agents and not about
+tidiness: it announces `workbuddy-third-party:custom-mcp:orbit` from the
+connector settings and plain `orbit` once the connector is loaded into an
+agent, so the same App appears under two names depending on which of its own
+paths made the call. Neither shadows a discovered CLI, so neither is refused.
 
 ## How the Runtime and its MCP proxy are reached
 
@@ -47,6 +54,20 @@ working inside it. It is not installable as a Claude plugin: there is no
 `.claude-plugin/plugin.json`, and `scripts/build-marketplace-release.py`
 packages `.codex-plugin` alone.
 
+**WorkBuddy.** There is no plugin and no proxy: it takes a custom connector
+pointing straight at the Hub over HTTP, `http://127.0.0.1:8848/mcp`, with no
+credentials — the Hub is on loopback and a loopback caller is already the
+operator. It speaks Streamable HTTP (`accept: application/json,
+text/event-stream`) and negotiates protocol `2025-11-25` against Orbit's
+`2025-06-18`, which it accepts. It opens a GET on the endpoint for a
+server-initiated stream; the 405 it gets back is the answer, not a fault.
+
+Do not reach for `orbit mcp` here. Its stdio transport is the only shape
+WorkBuddy's own documentation describes, but the process it starts wants the
+project database that a running Hub or `orbit serve` already owns, and it
+exits with `Runtime database is already owned` rather than sharing. HTTP is
+what leaves the rest of the machine working.
+
 ## Showing the UI beside the conversation
 
 `open_orbit_dashboard` always starts or discovers the Runtime and returns the
@@ -54,7 +75,7 @@ current run list. Whether it also *draws* anything is the host's decision, not
 Orbit's, so treat the visible surface as a separate question from the call.
 
 The card it offers is an MCP App (the MCP Apps extension, SEP-1865). Orbit
-serves it as the resource `ui://orbit/current-task-v14.html` with mime type
+serves it as the resource `ui://orbit/current-task-v25.html` with mime type
 `text/html;profile=mcp-app`, and binds it to the tool through
 `_meta.ui.resourceUri` — see `src/orbit/web/mcp_app.py`. There is nothing
 host-specific in any of that: a host that implements MCP Apps mounts the card
@@ -74,6 +95,27 @@ graphs, logs, and workflow management remain in the full UI.
 sees nothing. Say that this host does not currently render the MCP App. Send
 the user to the full `/ui` only when they explicitly ask to operate Orbit
 directly.
+
+**WorkBuddy.** Mounts it. Observed in full: it lists the resources, asks for
+`resources/templates/list`, then reads the one the tool named through
+`_meta.ui.resourceUri` and draws the card. Two consequences follow from that
+being real rather than theoretical.
+
+The card fetches its own data. Each mounted card opens its own MCP session and
+calls the tools it needs — the workflows card calls `list_workflows`, the
+dashboard card polls `list_runs` and `list_authoring_jobs` every fifteen
+seconds — so a conversation holding six cards is making six sets of those
+calls. A tool that mounts a card per item will fill the transcript with them.
+
+And the text block a tool returns is read by the model, not only by the host.
+It is tempting to shorten it for a card-bound tool, since the host prints the
+card and the JSON underneath it and the answer arrives twice. Tried and
+reverted: with the names gone from a workflow listing the model fetched every
+definition one at a time, mounting a card for each. Six cards is worse than
+one table. If this is worth solving, solve it by offering a second tool that
+draws no card — the way `inspect_workflow_definition` stands beside
+`get_workflow_definition` — and let the wording of the two descriptions decide
+which one a question wants.
 
 **Another App.** The card performs the MCP Apps handshake itself, so a host
 that mounts it gets a working card rather than one stuck connecting. Hosts
