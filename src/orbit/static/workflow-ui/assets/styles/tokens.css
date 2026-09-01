@@ -54,10 +54,6 @@
   --hue-cyan: #22d3ee;    --hue-cyan-soft: rgba(6, 182, 212, .12);
   --hue-rose: #fb7185;    --hue-rose-soft: rgba(244, 63, 94, .12);
   --hue-pink: #f472b6;    --hue-pink-soft: rgba(236, 72, 153, .12);
-  /* Filled primary control: the vibrant blue with white text DESIGN.md calls
-     for, distinct from the lighter --blue used for accented text. */
-  --primary: #3b82f6;
-  --on-primary: #ffffff;
   /* Card border when an Agent card is hovered: the brand blue at half alpha. */
   --brand-line: rgba(59, 130, 246, .5);
   /* Neutral chip fill behind count pills. */
@@ -131,8 +127,6 @@ html[data-theme="light"] {
   --hue-cyan: #0891b2;    --hue-cyan-soft: rgba(8, 145, 178, .10);
   --hue-rose: #e11d48;    --hue-rose-soft: rgba(225, 29, 72, .10);
   --hue-pink: #db2777;    --hue-pink-soft: rgba(219, 39, 119, .10);
-  --primary: #3b82f6;
-  --on-primary: #ffffff;
   --brand-line: rgba(37, 99, 235, .45);
   --chip-bg: rgba(15, 23, 42, .06);
   --shadow: 0 18px 50px rgba(30, 41, 59, .14);

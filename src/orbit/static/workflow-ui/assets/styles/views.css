@@ -674,16 +674,13 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 .goal-status-pill.completed, .goal-status-pill.succeeded,
 .goal-status-pill.answered {
   color: var(--green); background: var(--green-soft);
-  border-color: rgba(86, 214, 160, .4);
 }
 .goal-status-pill.failed, .goal-status-pill.cancelled {
   color: var(--red); background: var(--red-soft);
-  border-color: rgba(240, 86, 86, .4);
 }
 .goal-status-pill.running, .goal-status-pill.waiting,
 .goal-status-pill.interrupted, .goal-status-pill.unknown {
   color: var(--blue); background: var(--blue-soft);
-  border-color: rgba(77, 142, 255, .4);
 }
 .goal-result-code {
   margin: 0; padding: 14px 16px; border-radius: var(--radius);
@@ -1255,7 +1252,11 @@ html[data-theme="light"] .history-goal-meta { color: var(--muted); }
 .glyph-amber  { color: var(--amber); }
 .glyph-purple { color: var(--purple); }
 .glyph-muted  { color: var(--muted-2); }
-.defn-row:hover .glyph-blue   { background: var(--blue);   color: var(--on-primary); }
+/* The page's own colour, like the three rows under it. Written-out white was
+   right on the light theme's blue and unreadable on the dark theme's, which is
+   a pale one — and this is a hover, so nothing that watches a screenshot was
+   ever going to say so. */
+.defn-row:hover .glyph-blue   { background: var(--blue);   color: var(--chrome); }
 .defn-row:hover .glyph-amber  { background: var(--amber);  color: var(--chrome); }
 .defn-row:hover .glyph-purple { background: var(--purple); color: var(--chrome); }
 .defn-row:hover .glyph-muted  { background: var(--muted-2); color: var(--chrome); }

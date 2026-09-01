@@ -247,6 +247,85 @@ class AccessibilityTests(unittest.TestCase):
                             contrast(palette[foreground], palette[background]), 4.5
                         )
 
+    def test_no_colour_is_written_for_one_theme_only(self) -> None:
+        """A colour decided while looking at one theme is a colour half-made.
+
+        Three have shipped that way and each was invisible rather than
+        wrong-looking, so nothing caught them: a 2% white row hover that is a
+        fill on the dark canvas and nothing on the light one; a written-out
+        mint halo around a dot that goes dark ink on the light theme; and
+        every field, list and button near-black on white, because the three
+        control tokens were written once for the dark theme and copied.
+
+        The baselines cannot catch this class. They photograph four pages in
+        their resting state, and these live in `:hover`, in a keyframe, and on
+        pages that have no baseline at all. This reads the stylesheets
+        instead, which costs nothing and answers at the moment the colour is
+        written down.
+
+        Two rules. A colour token must not be defined to the same value in
+        both themes — that is how `--control-bg` was black on white. And a
+        colour written into a rule must either be a token or be overridden for
+        the light theme within the next few lines, the way
+        `.console-chunk.stderr` is.
+        """
+
+        styles = ASSETS / "styles"
+        colour = re.compile(r"#[0-9a-fA-F]{3,8}\b|\brgba?\([^)]*\)|\bhsla?\([^)]*\)")
+
+        # Scrims dim the page under a modal, and a dim is dark on either
+        # theme. Anything else added here needs the same kind of reason.
+        exempt = {
+            ("components.css", "dialog::backdrop"),
+            ("views.css", ".page-modal-scrim"),
+        }
+
+        tokens = (styles / "tokens.css").read_text(encoding="utf-8")
+
+        def block(selector: str) -> dict[str, str]:
+            match = re.search(
+                rf"{re.escape(selector)}\s*\{{(.*?)\n\}}", tokens, re.S,
+            )
+            self.assertIsNotNone(match, selector)
+            return dict(re.findall(r"(--[\w-]+)\s*:\s*([^;]+);", match.group(1)))
+
+        dark = block(":root")
+        light = block('html[data-theme="light"]')
+        shared = sorted(
+            name for name, value in dark.items()
+            if colour.search(value) and light.get(name, "").strip() == value.strip()
+        )
+        self.assertEqual(
+            [], shared,
+            "colour tokens carrying one theme's value into the other: "
+            + ", ".join(shared),
+        )
+
+        offenders = []
+        for path in sorted(styles.glob("*.css")):
+            if path.name == "tokens.css":
+                continue
+            lines = path.read_text(encoding="utf-8").splitlines()
+            selector = ""
+            for index, line in enumerate(lines):
+                code = line.split("/*")[0]
+                if "{" in code:
+                    selector = code.split("{")[0].strip() or selector
+                if not colour.search(code) or "white-space" in code:
+                    continue
+                if (path.name, selector) in exempt:
+                    continue
+                # The override is written directly under the rule it corrects.
+                following = "\n".join(lines[index + 1:index + 4])
+                if 'data-theme="light"' in following:
+                    continue
+                offenders.append(f"{path.name}:{index + 1} {code.strip()[:60]}")
+        self.assertEqual(
+            [], offenders,
+            "colours written for one theme with no light-theme answer:\n  "
+            + "\n  ".join(offenders),
+        )
+
     def test_the_layout_responds_to_small_screens(self) -> None:
         css = stylesheet_source()
         self.assertIn("@media (max-width", css)
