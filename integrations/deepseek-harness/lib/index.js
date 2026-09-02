@@ -226,10 +226,21 @@ let OrbitRemoteService = (() => {
                 // tools above can be pointed at.
                 order: 190,
                 text: context => {
-                    const sessionId = context.agent === undefined
-                        ? undefined : String(context.agent.session.id);
-                    const workspace = sessionId === undefined
-                        ? undefined : this.bridgedWorkspaces.get(sessionId);
+                    const session = context.agent?.session;
+                    if (session === undefined)
+                        return '';
+                    // A delegated Session is never bridged — `sessionCanBridge` requires
+                    // depth 0 — but it works in the same directory, calls the same tools,
+                    // and `route` already resolves those by its cwd. Only the prompt went
+                    // quiet, so a sub-agent had to discover Orbit by calling something
+                    // first: the exact cost this contribution exists to remove.
+                    //
+                    // Matched against Workspaces this Host has already derived from a live
+                    // Session, never resolved afresh here. A directory that matches none of
+                    // them says nothing, which is the answer it had before.
+                    const workspace = this.bridgedWorkspaces.get(String(session.id))
+                        ?? (session.header.cwd === undefined ? undefined
+                            : [...this.bridgedWorkspaces.values()].find(item => item.canonicalPath === session.header.cwd));
                     if (workspace === undefined)
                         return '';
                     if (this.catalog.stale(workspace.canonicalPath))
@@ -305,7 +316,7 @@ let OrbitRemoteService = (() => {
         }
         async getAuthoringOutput(sessionId, outputHref, after, signal) {
             signal.throwIfAborted();
-            const scope = await this.sessionWorkspace(sessionId);
+            const scope = await this.sessionWorkspace(sessionId, true);
             return await this.gateway.authoringOutput(scope, sessionId, outputHref, after);
         }
         refreshCatalog(scope) {
@@ -496,9 +507,21 @@ let OrbitRemoteService = (() => {
          * with, so there is nothing to check.
          */
         async sessionWorkspace(sessionId, allowPersisted = false) {
+            return (await this.sessionScope(sessionId, allowPersisted)).scope;
+        }
+        /**
+         * The Workspace of a Session, and whether the Session was actually there.
+         *
+         * The second half matters to one caller: what may be read from the durable
+         * registry during the window before a persisted conversation enters its Host
+         * Session is a projection, and a projection does not start processes. The
+         * panel asks for both so it can decline to launch a Runtime for a Workspace
+         * no live Session vouched for.
+         */
+        async sessionScope(sessionId, allowPersisted = false) {
             const live = this.hostSessions.list().find(item => String(item.id) === sessionId);
             if (live)
-                return await this.workspaceForSession(live);
+                return { scope: await this.workspaceForSession(live), live: true };
             if (allowPersisted) {
                 // Since Harness rc.6, opening a persisted conversation in the browser
                 // doesn't necessarily enter its Host Session until an Agent turn needs
@@ -508,7 +531,10 @@ let OrbitRemoteService = (() => {
                 // panel projection; mutations continue through liveSession()/verified().
                 const matches = this.workspaceRegistry.list().filter(workspace => workspace.sessionIds.some(id => String(id) === sessionId));
                 if (matches.length === 1) {
-                    return { id: String(matches[0].id), canonicalPath: matches[0].path };
+                    return {
+                        scope: { id: String(matches[0].id), canonicalPath: matches[0].path },
+                        live: false,
+                    };
                 }
                 if (matches.length > 1) {
                     // An inconsistent durable index grants no authority. Keep the same
@@ -758,8 +784,13 @@ let OrbitRemoteService = (() => {
          */
         async getPanelState(sessionId, force, startIfMissing, signal) {
             signal.throwIfAborted();
-            const scope = await this.sessionWorkspace(sessionId, true);
-            const release = await this.gateway.acquire(scope, startIfMissing);
+            const { scope, live } = await this.sessionScope(sessionId, true);
+            // Starting a Runtime is not a projection. `startIfMissing` is the panel
+            // being opened deliberately, and only a live Session is evidence that
+            // somebody did: during the persisted window the Workspace comes from the
+            // durable registry, and launching a process for it would be this Host
+            // acting on a claim nobody made this turn.
+            const release = await this.gateway.acquire(scope, startIfMissing && live);
             try {
                 // The panel is a view of the Workspace, not of one chat: a Run started in
                 // Orbit's own UI is the same Run, and a History that hid it would sit
@@ -798,7 +829,7 @@ let OrbitRemoteService = (() => {
                     ...(attemptCounts?.get(agent.name) ?? {}),
                 }));
                 const workflows = this.catalog.list(scope.canonicalPath);
-                const retired = await this.retiredWorkflowNames(scope, sessionId, result.runs, workflows);
+                const retired = await this.retiredWorkflowNames(scope, sessionId, result.runs, workflows, force);
                 // A retained definition means the Workflow was deliberately retired and
                 // the Run is still a real piece of History. No definition at all means
                 // the row is orphaned (for example, from an old or replaced database),
@@ -832,29 +863,45 @@ let OrbitRemoteService = (() => {
          * Read once per id and remembered, negative answers included: a retired id
          * is never reissued, so neither answer can go out of date, and a poll that
          * runs every couple of seconds must not re-ask either one.
+         *
+         * `force` is the refresh button, and it clears what is held here as well.
+         * A negative is only as immutable as the database it was asked of: a
+         * Runtime pointed at the wrong one answers "not found" for every id, and
+         * those answers would then hide those Runs for the life of the Host.
          */
-        async retiredWorkflowNames(scope, sessionId, runs, listed) {
+        async retiredWorkflowNames(scope, sessionId, runs, listed, force = false) {
             const offered = new Set(listed.map(item => item.workflow_id));
             const retired = [...new Set(runs.map(run => run.workflow_id))]
                 .filter(id => !offered.has(id));
+            if (force)
+                for (const id of retired)
+                    this.retiredNames.delete(this.retiredKey(scope, id));
             await Promise.all(retired
                 .filter(id => !this.retiredNames.has(this.retiredKey(scope, id)))
                 .map(async (id) => {
                 try {
                     const definition = await this.gateway.call(scope, sessionId, 'inspect_workflow_definition', { workflow_id: id });
-                    this.retiredNames.set(this.retiredKey(scope, id), definition.name || null);
+                    // `''`, not `null`: a definition that answered without a usable
+                    // name is still a definition. Collapsing the two made a Workflow
+                    // with an empty name indistinguishable from one that is not there,
+                    // and the caller drops the second — so every Run of it vanished
+                    // from the panel instead of falling back to showing its id.
+                    this.retiredNames.set(this.retiredKey(scope, id), definition.name || '');
                 }
                 catch (reason) {
                     const detail = reason instanceof Error ? reason.message : String(reason);
                     if (/workflow (?:version )?not found/iu.test(detail)) {
-                        // A genuine negative is immutable: retired ids are never reused.
+                        // The definition is genuinely gone. Held until a refresh, which
+                        // is also the gesture for "you are looking at the wrong answer".
                         this.retiredNames.set(this.retiredKey(scope, id), null);
-                        return;
                     }
-                    // Transport, authentication and protocol failures say nothing about
-                    // whether the definition exists. Leave them uncached so the next
-                    // panel poll retries instead of printing the id until Host restart.
-                    throw reason;
+                    // Anything else — transport, authentication, protocol — says
+                    // nothing about whether the definition exists, so nothing is
+                    // cached and the next poll asks again. Deliberately not rethrown:
+                    // this runs inside `Promise.all` inside `getPanelState`, so one
+                    // failed lookup used to reject the whole answer and blank the
+                    // panel — runs, workflows, agents, authoring and steps — over a
+                    // row that would otherwise just have shown its id.
                 }
             }));
             const names = {};
@@ -916,7 +963,7 @@ let OrbitRemoteService = (() => {
          */
         async getRunDetail(sessionId, runId, signal) {
             signal.throwIfAborted();
-            const scope = await this.sessionWorkspace(sessionId);
+            const scope = await this.sessionWorkspace(sessionId, true);
             const release = await this.gateway.acquire(scope);
             try {
                 return await this.gateway.call(scope, sessionId, 'get_run_steps', {
@@ -935,7 +982,7 @@ let OrbitRemoteService = (() => {
          */
         async getWorkflowDefinition(sessionId, workflowId, signal) {
             signal.throwIfAborted();
-            const scope = await this.sessionWorkspace(sessionId);
+            const scope = await this.sessionWorkspace(sessionId, true);
             const release = await this.gateway.acquire(scope);
             try {
                 return await this.gateway.call(scope, sessionId, 'get_workflow_definition', {
@@ -948,7 +995,7 @@ let OrbitRemoteService = (() => {
         }
         async getStepOutput(sessionId, runId, nodeId, after, signal) {
             signal.throwIfAborted();
-            const scope = await this.sessionWorkspace(sessionId);
+            const scope = await this.sessionWorkspace(sessionId, true);
             const release = await this.gateway.acquire(scope);
             try {
                 return await this.gateway.call(scope, sessionId, 'read_run_output', {
@@ -972,17 +1019,14 @@ let OrbitRemoteService = (() => {
             const scope = await this.sessionWorkspace(sessionId);
             const release = await this.gateway.acquire(scope);
             try {
-                // Deliberately the caller's scope, unlike the reads above: a write also
-                // records who acted, so acting on a Run started elsewhere would file it
-                // under this Session. Orbit answers "not found" for one it does not own,
-                // which is true and useless here — the panel showed the Run, so the
-                // reader knows it exists.
-                const run = await this.gateway.run(scope, sessionId, runId).catch((reason) => {
-                    if (/not found/i.test(String(reason))) {
-                        throw new Error('This Run was started elsewhere; act on it where it began, or in Orbit');
-                    }
-                    throw reason;
-                });
+                // Read plainly. This used to translate Orbit's "not found" into "started
+                // elsewhere; act on it where it began", because acting on a Run was
+                // scoped to the Session that started it and the panel — a view of the
+                // Workspace — drew Runs it could not act on. Orbit bounds a write by the
+                // Workspace now, the same as a read, so a Run this answer cannot find is
+                // a Run that is not there, and saying anything else would send the
+                // reader looking for a Session to go back to.
+                const run = await this.gateway.run(scope, sessionId, runId);
                 const advertised = advertisedAt(run, command, expectedRevision);
                 if (advertised === undefined) {
                     throw new Error(`Orbit no longer offers ${command} at revision ${String(expectedRevision)}`);
@@ -1206,7 +1250,7 @@ let OrbitRemoteService = (() => {
          */
         async readArtifactText(sessionId, artifactId, signal) {
             signal.throwIfAborted();
-            const scope = await this.sessionWorkspace(sessionId);
+            const scope = await this.sessionWorkspace(sessionId, true);
             const meta = await this.gateway.call(scope, sessionId, 'read_artifact', { artifact_id: artifactId });
             const contentType = String(meta.content_type ?? '');
             const sizeBytes = Number(meta.size_bytes ?? 0);

@@ -8,6 +8,29 @@ declare module '@deepseek-ai/cordis' {
         orbit: OrbitRemoteService;
     }
 }
+interface WorkflowGraph {
+    nodes?: readonly {
+        node_id: string;
+        kind: string;
+        label?: string;
+        handler_name?: string | null;
+        handler_version?: string | null;
+    }[];
+    edges?: readonly {
+        edge_id: string;
+        from: string;
+        to: string;
+        route?: string;
+        back_edge?: boolean;
+    }[];
+    layout?: {
+        positions?: readonly {
+            node_id: string;
+            depth: number;
+            lane: number;
+        }[];
+    };
+}
 export declare class OrbitRemoteService extends TypertRemoteService {
     static inject: string[];
     private readonly gateway;
@@ -90,6 +113,16 @@ export declare class OrbitRemoteService extends TypertRemoteService {
      * with, so there is nothing to check.
      */
     private sessionWorkspace;
+    /**
+     * The Workspace of a Session, and whether the Session was actually there.
+     *
+     * The second half matters to one caller: what may be read from the durable
+     * registry during the window before a persisted conversation enters its Host
+     * Session is a projection, and a projection does not start processes. The
+     * panel asks for both so it can decline to launch a Runtime for a Workspace
+     * no live Session vouched for.
+     */
+    private sessionScope;
     private liveSession;
     private startSessionBridge;
     private stopSessionBridge;
@@ -197,6 +230,11 @@ export declare class OrbitRemoteService extends TypertRemoteService {
      * Read once per id and remembered, negative answers included: a retired id
      * is never reissued, so neither answer can go out of date, and a poll that
      * runs every couple of seconds must not re-ask either one.
+     *
+     * `force` is the refresh button, and it clears what is held here as well.
+     * A negative is only as immutable as the database it was asked of: a
+     * Runtime pointed at the wrong one answers "not found" for every id, and
+     * those answers would then hide those Runs for the life of the Host.
      */
     private retiredWorkflowNames;
     private retiredKey;
@@ -233,6 +271,7 @@ export declare class OrbitRemoteService extends TypertRemoteService {
      */
     getWorkflowDefinition(sessionId: string, workflowId: string, signal: AbortSignal): Promise<{
         nodes: WorkflowNode[];
+        graph?: WorkflowGraph;
     }>;
     getStepOutput(sessionId: string, runId: string, nodeId: string, after: number, signal: AbortSignal): Promise<OutputPage>;
     /**

@@ -253,9 +253,11 @@ export interface OrbitPanelProps {
   useSessions: <T>(selector: (state: { current?: string }) => T) => T
   /** Writes the selected workflow invocation into the conversation composer. */
   onSelectWorkflow: (workflow: WorkflowSummary, sessionId: string) => void
+  onEditWorkflow: (workflow: WorkflowSummary, sessionId: string) => void
+  onDeleteWorkflow: (workflow: WorkflowSummary, sessionId: string) => Promise<void>
 }
 
-export function OrbitPanel({ t, useSessions, onSelectWorkflow }: OrbitPanelProps) {
+export function OrbitPanel({ t, useSessions, onSelectWorkflow, onEditWorkflow, onDeleteWorkflow }: OrbitPanelProps) {
   const sessionId = useSessions(state => state.current)
   const [layout, setLayout] = useState<PanelLayout>(() => {
     try { return readLayout(localStorage.getItem(PANEL_STORAGE_KEY)) } catch { return DEFAULT_PANEL_LAYOUT }
@@ -567,8 +569,11 @@ export function OrbitPanel({ t, useSessions, onSelectWorkflow }: OrbitPanelProps
         ) : chosenFlow !== undefined && sessionId !== undefined ? (
           <OrbitWorkflowDetail
             call={hostCall} t={t} sessionId={sessionId}
-            workflow={chosenFlow} runs={rows ?? []} uiUrl={uiUrl}
+            workflow={chosenFlow} runs={rows ?? []}
             onBack={() => setSelectedFlow(null)}
+            onNewGoal={() => onSelectWorkflow(chosenFlow, sessionId)}
+            onModify={() => onEditWorkflow(chosenFlow, sessionId)}
+            onDelete={() => onDeleteWorkflow(chosenFlow, sessionId)}
             onOpenRun={runId => setSelected(runId)}
           />
         ) : <>
@@ -604,14 +609,12 @@ export function OrbitPanel({ t, useSessions, onSelectWorkflow }: OrbitPanelProps
           : null}
         {!connecting && error === null && tab === 'workflows' ? (
           workflows.length ? workflows.map(item => (
-            <button
-              type="button"
-              className={`${styles.flowRow} ${styles.flowButton}`}
-              key={item.workflow_id}
-              onClick={() => {
-                if (sessionId) onSelectWorkflow(item, sessionId)
-              }}
-            >
+            <div className={styles.flowRow} key={item.workflow_id}>
+              <button
+                type="button"
+                className={styles.flowButton}
+                onClick={() => setSelectedFlow(item.workflow_id)}
+              >
               {/* Name and shape, as Orbit's own card reads: the id is how a
                   machine addresses this, and it is a line above the only thing
                   a person is choosing by. Both are on the detail page. */}
@@ -630,7 +633,16 @@ export function OrbitPanel({ t, useSessions, onSelectWorkflow }: OrbitPanelProps
               <WorkflowShape
                 kinds={item.node_kinds ?? {}} total={item.node_count ?? 0}
               />
-            </button>
+              </button>
+              <button
+                type="button"
+                className={styles.flowNewGoal}
+                disabled={!sessionId || item.goal_readiness !== 'ready'}
+                onClick={() => { if (sessionId) onSelectWorkflow(item, sessionId) }}
+              >
+                {t('newGoal')}
+              </button>
+            </div>
           )) : <p className={styles.empty}>{t('emptyWorkflows')}</p>
         ) : null}
 

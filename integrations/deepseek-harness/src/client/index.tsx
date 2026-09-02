@@ -128,8 +128,29 @@ interface SessionInput {
   setDraft(text: string): void
   readonly state: { getSnapshot(): { draft: string; draftRev: number } }
 }
-interface Conversation { readonly input: { for(actx: unknown): SessionInput } }
-interface Sessions { scope(id: string): unknown }
+interface Conversation {
+  readonly input: { for(actx: unknown): SessionInput }
+  send(text: string): Promise<void>
+}
+interface Sessions { scope(id: string): ClientContext | undefined }
+
+function conversationFor(
+  ctx: ClientContext, sessionId: string,
+): { conversation: Conversation; actx: ClientContext } | undefined {
+  const sessions = ctx.get('sessions') as unknown as Sessions | undefined
+  const actx = sessions?.scope(sessionId)
+  if (actx === undefined) return undefined
+  const conversation = actx.get('conversation') as unknown as Conversation | undefined
+  return conversation ? { conversation, actx } : undefined
+}
+
+function writeDraft(ctx: ClientContext, sessionId: string, text: string): void {
+  const scoped = conversationFor(ctx, sessionId)
+  if (!scoped) return
+  const input = scoped.conversation.input.for(scoped.actx)
+  input.setDraft(text)
+  caretToEnd(input.state.getSnapshot().draft)
+}
 
 /** Write the workflow invocation prefix into the active conversation draft.
  *
@@ -144,14 +165,12 @@ function writeWorkflowDraft(
   workflow: { workflow_id: string; name?: string },
   sessionId: string,
 ): void {
-  const conversation = ctx.get('conversation') as unknown as Conversation | undefined
-  const sessions = ctx.get('sessions') as unknown as Sessions | undefined
-  const actx = sessions?.scope(sessionId)
-  if (!conversation || actx === undefined) return
-  const input = conversation.input.for(actx)
   const label = workflow.name || workflow.workflow_id
-  input.setDraft(`${t('runHead')}${MARK_OPEN}${label}${MARK_CLOSE}${t('runTail')}`)
-  caretToEnd(input.state.getSnapshot().draft)
+  writeDraft(
+    ctx,
+    sessionId,
+    `${t('runHead')}${MARK_OPEN}${label}${MARK_CLOSE}（${workflow.workflow_id}）${t('runTail')}`,
+  )
 }
 
 /**
@@ -304,6 +323,16 @@ export function apply(ctx: ClientContext): void {
     t={t}
     useSessions={useSessions}
     onSelectWorkflow={(workflow, sessionId) => writeWorkflowDraft(ctx, t, workflow, sessionId)}
+    onEditWorkflow={(workflow, sessionId) => writeDraft(ctx, sessionId, t('editWorkflowPrompt', {
+      name: workflow.name || workflow.workflow_id, id: workflow.workflow_id,
+    }))}
+    onDeleteWorkflow={async (workflow, sessionId) => {
+      const scoped = conversationFor(ctx, sessionId)
+      if (!scoped) return
+      await scoped.conversation.send(t('deleteWorkflowPrompt', {
+        name: workflow.name || workflow.workflow_id, id: workflow.workflow_id,
+      }))
+    }}
   />
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({
     name: 'shell.overlay',

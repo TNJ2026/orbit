@@ -375,7 +375,16 @@
 
 /* A Workflow leads with its id, small, because that is the half the Agent uses
    and the half a person checks — the name below is what they read. */
-.flowRow { padding: 9px 12px; }
+.flowRow {
+  display: flex;
+  align-items: center;
+  min-height: 68px;
+  padding: 0 12px;
+  transition: background-color 120ms ease;
+}
+.flowRow:has(.flowButton:hover) {
+  background: var(--dsw-alias-bg-module-platform, rgb(128 128 128 / 8%));
+}
 .flowName { font-size: 12.5px; font-weight: 600; line-height: 1.45; }
 
 /* A Run in a list is a control: the whole row opens it, so the whole row is the
@@ -487,22 +496,28 @@
  * it reached for only ever existed as the `LinkText` beside it. */
 .back {
   display: flex;
+  align-self: flex-start;
   align-items: center;
   gap: 5px;
-  padding: 8px 12px 4px;
+  width: fit-content;
+  margin: 6px;
+  padding: 6px 10px;
   border: 0;
+  border-radius: 10px;
   background: none;
   color: var(--dsw-alias-state-business-primary, Highlight);
   font-size: 14px;
   font-weight: 500;
   cursor: pointer;
+  transition: background-color 120ms ease;
 }
 /* A size of its own: the arrow is what the eye lands on, and inside the label
    it could only ever be as big as the word. */
 .backArrow { font-size: 16px; line-height: 1; }
 /* On the label, not the button: a flex container does not pass its
    text-decoration down to its items, so the same rule up there drew nothing. */
-.back:hover .backLabel { text-decoration: underline; }
+.back:hover { background: var(--dsw-alias-bg-module-platform, rgb(128 128 128 / 8%)); }
+.back:hover .backLabel { text-decoration: none; }
 /* The Goal's own heading: what it was called, then what was actually asked.
    The title is one line and clips; the request folds at five and unfolds. */
 .goalTitle {
@@ -559,6 +574,7 @@
   margin-top: 4px;
   padding: 0;
   border: 0;
+  border-radius: 6px;
   background: none;
   /* The accent, like the way out of a detail page: this is the one control
      inside the card, and a control the colour of the text it sits under is
@@ -755,7 +771,10 @@ a.artifact:hover { text-decoration: underline; }
 /* A Workflow row opens too, so it is a control like a Run row is. */
 .flowButton {
   display: block;
-  width: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
+  align-self: stretch;
+  padding: 9px 0;
   /* All four sides. Three of them were zeroed because the fourth used to carry
      this row's divider — and when that moved into a rule of its own, what came
      back was the browser's own 2px outset black, which is why this list looked
@@ -766,7 +785,29 @@ a.artifact:hover { text-decoration: underline; }
   text-align: left;
   cursor: pointer;
 }
-.flowButton:hover { background: var(--dsw-alias-bg-module-platform, rgb(128 128 128 / 8%)); }
+.flowButton:hover {
+  background: none;
+  color: var(--dsw-alias-state-business-primary, Highlight);
+}
+.flowNewGoal {
+  flex: 0 0 auto;
+  min-height: 32px;
+  margin-left: 12px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: var(--dsw-alias-label-secondary, GrayText);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+.flowNewGoal:hover:not(:disabled) {
+  background: var(--dsw-alias-bg-module-platform, rgb(128 128 128 / 8%));
+  text-decoration: none;
+}
+.flowNewGoal:disabled { opacity: .45; cursor: not-allowed; }
 
 .prose {
   margin: 0;
@@ -777,13 +818,161 @@ a.artifact:hover { text-decoration: underline; }
 }
 /* The same room above as below. It had none above, so it sat against whatever
    ended the block before it and floated over the section that follows. */
-.outLink { display: block; padding: 10px 12px; font-size: 11.5px; }
+.workflowDetail { min-height: 100%; display: flex; flex-direction: column; }
+.workflowDetail .detailMeta,
+.workflowDetailTabs,
+.workflowActions,
+.workflowDetail .sectionLabel { position: relative; }
+.workflowDetail .detailMeta { border-bottom: 0; }
+.workflowDetailTabs {
+  display: flex;
+  padding: 0 12px;
+  border: 0;
+}
+.workflowDetail .detailMeta::after,
+.workflowDetailTabs::before,
+.workflowDetailTabs::after,
+.workflowActions::before,
+.workflowDetail .sectionLabel::before {
+  content: '';
+  position: absolute;
+  right: 12px;
+  left: 12px;
+  height: 1px;
+  background: var(--dsw-alias-border-l2, rgb(128 128 128 / 12%));
+}
+.workflowDetail .detailMeta::after,
+.workflowDetailTabs::after { bottom: 0; }
+.workflowDetailTabs::before,
+.workflowActions::before,
+.workflowDetail .sectionLabel::before { top: 0; }
+.workflowDetailTab,
+.workflowDetailTabActive {
+  position: relative;
+  padding: 8px 10px;
+  border: 0;
+  background: none;
+  color: var(--dsw-alias-label-tertiary, GrayText);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.workflowDetailTabActive { color: var(--dsw-alias-label-primary, CanvasText); font-weight: 600; }
+.workflowDetailTabActive::after {
+  content: '';
+  position: absolute;
+  right: 8px;
+  bottom: -1px;
+  left: 8px;
+  height: 2px;
+  background: var(--dsw-alias-state-business-primary, Highlight);
+}
+.workflowGraph {
+  flex: 0 0 auto;
+  width: auto;
+  height: 300px;
+  min-height: 240px;
+  margin: 0 12px;
+  background: var(--dsw-alias-bg-base, Canvas);
+}
+.workflowDefinitionPanel { margin: 0 12px; }
+.workflowGraph :global(.react-flow__controls) {
+  overflow: hidden;
+  border: 1px solid var(--dsw-alias-border-l3, rgb(128 128 128 / 16%));
+  border-radius: 8px;
+  box-shadow: none;
+}
+.workflowGraph :global(.react-flow__controls-button) {
+  border-bottom-color: var(--dsw-alias-border-l2, rgb(128 128 128 / 12%));
+  background: var(--dsw-alias-bg-layer-1, Canvas);
+  color: var(--dsw-alias-label-primary, CanvasText);
+}
+.workflowGraph :global(.react-flow__edge-text) {
+  fill: var(--dsw-alias-label-secondary, GrayText);
+  font-size: 10px;
+}
+.workflowGraph :global(.react-flow__edge-textbg) { fill: var(--dsw-alias-bg-base, Canvas); }
+.graphNode {
+  position: relative;
+  min-width: 210px;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l3, rgb(128 128 128 / 16%));
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1, Canvas);
+  color: var(--dsw-alias-label-primary, CanvasText);
+}
+.graphNode_action { border-left: 3px solid var(--dsw-alias-state-business-primary, rgb(103 158 254 / 85%)); }
+.graphNode_human { border-left: 3px solid var(--dsw-alias-state-warn-primary, rgb(245 158 11 / 85%)); }
+.graphNode_terminal { border-left: 3px solid var(--dsw-alias-state-success-primary, rgb(34 197 94 / 85%)); }
+.graphNode_decision { border-left: 3px solid var(--dsw-alias-state-warn-primary, rgb(217 119 6)); }
+.graphNode_join { border-left: 3px solid var(--dsw-alias-label-tertiary, GrayText); }
+.graphNodeKind {
+  display: block;
+  color: var(--dsw-alias-label-tertiary, GrayText);
+  font-size: 10px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.graphNodeTitle { display: block; margin-top: 2px; font-size: 13px; font-weight: 600; }
+.graphNodeHandler {
+  display: block;
+  margin-top: 6px;
+  color: var(--dsw-alias-label-tertiary, GrayText);
+  font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.graphNode :global(.react-flow__handle) { width: 7px; height: 7px; opacity: 0; }
+.workflowActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-top: 0;
+}
+.workflowAction,
+.workflowPrimaryAction,
+.workflowDangerAction {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 5px 10px;
+  border: 1px solid var(--dsw-alias-border-l3, rgb(128 128 128 / 16%));
+  border-radius: 7px;
+  background: var(--dsw-alias-bg-module-platform, rgb(128 128 128 / 8%));
+  color: var(--dsw-alias-label-primary, CanvasText);
+  font-size: 11.5px;
+  text-decoration: none;
+  cursor: pointer;
+}
+.workflowPrimaryAction {
+  border-color: transparent;
+  background: var(--dsw-alias-state-business-primary, Highlight);
+  color: var(--dsw-alias-label-on-color, HighlightText);
+}
+.workflowDangerAction {
+  border-color: var(--dsw-alias-state-error-primary, rgb(242 90 90));
+  background: transparent;
+  color: var(--dsw-alias-state-error-primary, LinkText);
+}
+.workflowDangerAction:disabled { opacity: .55; cursor: default; }
+.workflowDeleteConfirm {
+  display: grid;
+  gap: 7px;
+  margin: 0 12px 8px;
+  padding: 10px;
+  border: 1px solid var(--dsw-alias-border-l3, rgb(128 128 128 / 16%));
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-module-platform, rgb(128 128 128 / 8%));
+  color: var(--dsw-alias-label-secondary, GrayText);
+  font-size: 11.5px;
+}
+.workflowDeleteConfirm strong { color: var(--dsw-alias-label-primary, CanvasText); font-size: 12px; }
+.workflowDeleteConfirm code { overflow-wrap: anywhere; font-size: 10.5px; }
 .sectionLabel {
   padding: 8px 12px 4px;
   border-top: 1px solid var(--dsw-alias-border-l2, rgb(128 128 128 / 12%));
   color: var(--dsw-alias-label-tertiary, GrayText);
   font-size: 11px;
 }
+.workflowDetail .sectionLabel { border-top: 0; }
 
 /* A published step, listed rather than drawn. The accent stripe carries the
    kind at a glance so the chip is confirmation, not the only signal. */

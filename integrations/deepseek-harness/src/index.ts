@@ -32,6 +32,12 @@ interface AgentLookup {
   } | undefined
 }
 
+interface WorkflowGraph {
+  nodes?: readonly { node_id: string; kind: string; label?: string; handler_name?: string | null; handler_version?: string | null }[]
+  edges?: readonly { edge_id: string; from: string; to: string; route?: string; back_edge?: boolean }[]
+  layout?: { positions?: readonly { node_id: string; depth: number; lane: number }[] }
+}
+
 /** How long to let one authoring turn run before giving the request back.
  *  Under the broker's own lease, so this Host stops waiting before Orbit
  *  stops expecting it to. */

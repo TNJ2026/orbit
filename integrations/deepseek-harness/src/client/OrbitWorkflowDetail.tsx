@@ -1,16 +1,12 @@
-/** One Workflow as the panel's body: what it needs, what it does, what it did.
- *
- * The steps are listed, not drawn. A graph answers "how do these connect",
- * which needs room this panel does not have; a list answers "what happens and
- * who does it", which is the question a reader has before starting a goal. The
- * header still links out for the picture.
- */
+/** One Workflow as the panel's body, using the same graph/definition hierarchy
+ * as Orbit's MCP App card. */
 
 import { useEffect, useState } from 'react'
 import { panelError, type PanelError } from '@orbit-runtime/integration-core'
 import type { OrbitRunRow as RunRowData, WorkflowNode, WorkflowSummary } from '@orbit-runtime/integration-core'
 import styles from './OrbitPanel.module.css'
 import { BackButton, OrbitRunListRow, PanelErrorText } from './OrbitRunRow.tsx'
+import { OrbitWorkflowGraph, type WorkflowGraph } from './OrbitWorkflowGraph.tsx'
 import type { OrbitLocaleKey } from './locales.ts'
 
 type Translate = (key: OrbitLocaleKey, values?: Record<string, string | number>) => string
@@ -54,33 +50,42 @@ export interface OrbitWorkflowDetailProps {
   workflow: WorkflowSummary
   /** Every Run the panel knows of; this one's are picked out here. */
   runs: readonly RunRowData[]
-  uiUrl: string
   onBack: () => void
+  onNewGoal: () => void
+  onModify: () => void
+  onDelete: () => Promise<void>
   onOpenRun: (runId: string) => void
 }
 
 export function OrbitWorkflowDetail(
-  { call, t, sessionId, workflow, runs, uiUrl, onBack, onOpenRun }: OrbitWorkflowDetailProps,
+  { call, t, sessionId, workflow, runs, onBack, onNewGoal, onModify, onDelete, onOpenRun }: OrbitWorkflowDetailProps,
 ) {
   const ran = runs.filter(run => run.workflow.startsWith(`${workflow.workflow_id}@`))
   const [steps, setSteps] = useState<readonly WorkflowNode[] | null>(null)
+  const [graph, setGraph] = useState<WorkflowGraph | null>(null)
+  const [view, setView] = useState<'graph' | 'definition'>('graph')
   const [stepsError, setStepsError] = useState<PanelError | null>(null)
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState<PanelError | null>(null)
 
   // Read once per Workflow, and not again: a definition changes only when
   // somebody republishes it, so polling it would ask a settled question.
   useEffect(() => {
     const controller = new AbortController()
     setSteps(null); setStepsError(null)
-    call<{ nodes: WorkflowNode[] }>(
+    call<{ nodes: WorkflowNode[]; graph?: WorkflowGraph }>(
       'getWorkflowDefinition', [sessionId, workflow.workflow_id], controller.signal,
     )
-      .then(detail => { if (!controller.signal.aborted) setSteps(detail.nodes) })
+      .then(detail => {
+        if (!controller.signal.aborted) { setSteps(detail.nodes); setGraph(detail.graph ?? null) }
+      })
       .catch(reason => { if (!controller.signal.aborted) setStepsError(panelError(reason)) })
     return () => controller.abort()
   }, [call, sessionId, workflow.workflow_id])
 
   return (
-    <div>
+    <div className={styles.workflowDetail}>
       <BackButton t={t} onBack={onBack} />
       <div className={styles.detailHead}>
         <span className={styles.detailGoal}>{workflow.name || workflow.workflow_id}</span>
@@ -91,14 +96,56 @@ export function OrbitWorkflowDetail(
 
       {workflow.description ? <p className={styles.prose}>{workflow.description}</p> : null}
 
-      <a className={styles.outLink} href={`${uiUrl}#/workflows/${encodeURIComponent(workflow.workflow_id)}`} target="_blank" rel="noopener">
-        {t('openThisInOrbit')}
-      </a>
-
-      <div className={styles.sectionLabel}>{t('factSteps', { total: steps?.length ?? 0 })}</div>
       <PanelErrorText t={t} error={stepsError} />
       {stepsError === null && steps === null ? <p className={styles.empty}>{t('stepsLoading')}</p> : null}
-      {steps?.map(step => <StepRow key={step.node_id} t={t} step={step} />)}
+
+      {steps !== null ? <>
+        <div className={styles.workflowDetailTabs} role="tablist" aria-label={t('workflowViews')}>
+          <button type="button" role="tab" aria-selected={view === 'graph'} className={view === 'graph' ? styles.workflowDetailTabActive : styles.workflowDetailTab} onClick={() => setView('graph')}>
+            {t('workflowGraph')}
+          </button>
+          <button type="button" role="tab" aria-selected={view === 'definition'} className={view === 'definition' ? styles.workflowDetailTabActive : styles.workflowDetailTab} onClick={() => setView('definition')}>
+            {t('workflowDefinition')}
+          </button>
+        </div>
+        {view === 'graph'
+          ? graph?.nodes?.length
+            ? <OrbitWorkflowGraph graph={graph} />
+            : <p className={styles.empty}>{t('noWorkflowGraph')}</p>
+          : <div className={styles.workflowDefinitionPanel}>{steps.map(step => <StepRow key={step.node_id} t={t} step={step} />)}</div>}
+      </> : null}
+
+      <div className={styles.workflowActions}>
+        <button type="button" className={styles.workflowPrimaryAction} onClick={onNewGoal}>{t('newGoal')}</button>
+        <button type="button" className={styles.workflowAction} onClick={onModify}>{t('editWorkflow')}</button>
+        <button type="button" className={styles.workflowDangerAction} onClick={() => setConfirmingDelete(true)}>{t('deleteWorkflow')}</button>
+      </div>
+
+      {confirmingDelete ? (
+        <div className={styles.workflowDeleteConfirm} role="alertdialog" aria-label={t('deleteWorkflowTitle')}>
+          <strong>{t('deleteWorkflowTitle')}</strong>
+          <span>{workflow.name || workflow.workflow_id}</span>
+          <code>{workflow.workflow_id}</code>
+          <div className={styles.confirmActions}>
+            <button type="button" className={styles.confirmCancel} onClick={() => { setConfirmingDelete(false); setDeleteError(null) }}>
+              {t('deleteCancel')}
+            </button>
+            <button
+              type="button" className={styles.workflowDangerAction} disabled={deleting}
+              onClick={() => {
+                setDeleting(true); setDeleteError(null)
+                void onDelete()
+                  .then(() => setConfirmingDelete(false))
+                  .catch(reason => setDeleteError(panelError(reason)))
+                  .finally(() => setDeleting(false))
+              }}
+            >
+              {deleting ? t('working') : t('deleteConfirm')}
+            </button>
+          </div>
+          <PanelErrorText t={t} error={deleteError} />
+        </div>
+      ) : null}
 
       <div className={styles.sectionLabel}>{t('factRuns', { total: ran.length })}</div>
       {ran.length

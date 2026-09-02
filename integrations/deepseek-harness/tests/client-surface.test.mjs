@@ -30,9 +30,9 @@ test('the deep surfaces stay in Orbit', () => {
     'getGraph', 'getEdges', 'listArtifacts', 'getArtifactContent', 'importArtifact',
     // Not the bare 'generateWorkflow': `/orbit-generate` starts a job from this
     // Session and the Workflows page follows its console, which is news about
-    // this Workspace. Changing a published Workflow is the authoring surface,
-    // and Orbit draws all of it.
-    'modifyWorkflow', 'getAuthoringJob',
+    // this Workspace. The resident detail may prepare a modification prompt,
+    // but the actual authoring surface remains in Orbit.
+    'getAuthoringJob',
   ]) {
     assert.equal(code.includes(elsewhere), false, `${elsewhere} belongs to Orbit's own UI`)
   }
@@ -208,6 +208,11 @@ test('workflow cards use the host conversation input bridge', async () => {
   assert.match(client, /conversation\.input\.for\(actx\)/)
   assert.match(client, /input\.setDraft\(/)
   assert.match(client, /onSelectWorkflow=\{\(workflow, sessionId\) => writeWorkflowDraft\(/)
+  assert.match(
+    client,
+    /MARK_CLOSE\}（\$\{workflow\.workflow_id\}）/,
+    'New goal drafts must identify the selected Workflow by both name and id',
+  )
   assert.match(panel, /onSelectWorkflow: \(workflow: WorkflowSummary, sessionId: string\) => void/)
   assert.match(client, /'conversation', 'sessions'/)
 })
@@ -383,19 +388,42 @@ test('changing page clears every detail it was showing', () => {
   assert.match(handler, /setSelectedFlow\(null\)/)
 })
 
-test('a Workflow lists its steps and links out for the graph', async () => {
-  // The steps are listed, not drawn: a list answers "what happens and who does
-  // it" in the width a panel has, and the picture stays with Orbit, which has
-  // a frame built for it.
+test('a Workflow detail draws the compiled graph and keeps its definition list', async () => {
+  // The resident detail mirrors the MCP App card: the graph and definition
+  // are two views over the same definition response, not a second catalog.
   const detail = await readFile(join(clientDir, 'OrbitWorkflowDetail.tsx'), 'utf8')
-  assert.match(detail, /openThisInOrbit/)
-  assert.match(detail, /#\/workflows\//)
+  const graph = await readFile(join(clientDir, 'OrbitWorkflowGraph.tsx'), 'utf8')
+  assert.doesNotMatch(detail, /openThisInOrbit|#\/workflows\//)
   assert.match(detail, /getWorkflowDefinition/)
-  const body = detail.replace(/^\s*\*.*$/gm, '')
-  for (const drawn of ['getGraph', 'getEdges', 'edges', 'layout']) {
-    assert.equal(new RegExp(`\\b${drawn}\\b`).test(body), false,
-      `${drawn} is being drawn here`)
-  }
+  assert.match(detail, /detail\.graph/)
+  assert.match(detail, /<OrbitWorkflowGraph graph=\{graph\}/)
+  assert.match(detail, /view === 'definition'/)
+  assert.match(graph, /from '@xyflow\/react'/)
+  assert.match(graph, /graph\.layout\?\.positions/)
+})
+
+test('a Workflow row opens detail and its New goal action writes the draft', () => {
+  const list = code.slice(
+    code.lastIndexOf("tab === 'workflows'"), code.lastIndexOf("tab === 'agents'"),
+  )
+  assert.match(list, /onClick=\{\(\) => setSelectedFlow\(item\.workflow_id\)\}/)
+  assert.match(list, /className=\{styles\.flowNewGoal\}/)
+  assert.match(list, /onSelectWorkflow\(item, sessionId\)/)
+})
+
+test('Workflow detail modification edits the draft and deletion confirms before sending', async () => {
+  const panel = sources[names.indexOf('OrbitPanel.tsx')]
+  const detail = await readFile(join(clientDir, 'OrbitWorkflowDetail.tsx'), 'utf8')
+  const client = await readFile(join(clientDir, 'index.tsx'), 'utf8')
+  const locales = await readFile(join(clientDir, 'locales.ts'), 'utf8')
+  assert.match(panel, /onModify=\{\(\) => onEditWorkflow\(chosenFlow, sessionId\)\}/)
+  assert.match(panel, /onDelete=\{\(\) => onDeleteWorkflow\(chosenFlow, sessionId\)\}/)
+  assert.match(detail, /setConfirmingDelete\(true\)/)
+  assert.match(detail, /role="alertdialog"/)
+  assert.match(detail, /void onDelete\(\)/)
+  assert.match(client, /onEditWorkflow=.*writeDraft/)
+  assert.match(client, /scoped\.conversation\.send\(t\('deleteWorkflowPrompt'/)
+  assert.match(locales, /delete_workflow tool/)
 })
 
 test('the listing draws a workflow from the tally it was sent', async () => {
@@ -664,11 +692,10 @@ test('an authoring turn is queued on the Agent, framed as the platform frames on
  *
  * A Run's detail and a Workflow's are reached alike and left alike; a back
  * control spelled once in each file is two affordances for one idea, and they
- * drift the moment one of them is restyled. It carries the accent colour
- * because it is the one control on a detail page a reader is looking for — a
- * body-coloured word is something they have to find.
+ * drift the moment one of them is restyled. It carries the accent colour and
+ * a compact hover surface, so it remains easy to find without filling a row.
  */
-test('detail pages share a bright, readable back control', async () => {
+test('detail pages share a compact, readable back control', async () => {
   const rows = sources[names.indexOf('OrbitRunRow.tsx')]
   const flow = sources[names.indexOf('OrbitWorkflowDetail.tsx')]
   assert.ok(rows.includes('export function BackButton'))
@@ -692,10 +719,10 @@ test('detail pages share a bright, readable back control', async () => {
   assert.equal(/var\(--dsw-alias-label-accent/.test(css), false)
   // The arrow is drawn, not glued into the copy, so it can carry its own size.
   assert.match(css, /\.backArrow \{ font-size: 16px/)
-  // Hover underlines the label, not the button. `text-decoration` on a flex
-  // container is not passed down to its items, so the rule on `.back` drew
-  // nothing at all — and the label is a bare text node without an element.
-  assert.match(css, /\.back:hover \.backLabel \{ text-decoration: underline/)
+  // Hover belongs to the button-sized surface and never turns the label into
+  // a link: both detail pages use this as navigation within the panel.
+  assert.match(css, /\.back:hover \{ background: var\(--dsw-alias-bg-module-platform/)
+  assert.match(css, /\.back:hover \.backLabel \{ text-decoration: none/)
   assert.match(rows, /className=\{styles\.backLabel\}>\{t\('back'\)\}/)
   assert.equal(/back: '←/.test(sources[names.indexOf('locales.ts')]), false)
 })
@@ -1014,7 +1041,8 @@ test('list rows are separated, not bounded', async () => {
   // A row that is a <button> must zero all four sides, not the three that were
   // not carrying the divider: the browser's own is 2px outset black, and it
   // reappears the moment the fourth side stops being overridden.
-  const button = css.slice(css.indexOf('.flowButton {'), css.indexOf('.flowButton:hover'))
+  const buttonStart = css.indexOf('.flowButton {')
+  const button = css.slice(buttonStart, css.indexOf('.flowButton:hover', buttonStart))
   assert.match(button, /border: 0;/)
   assert.doesNotMatch(button, /border-left: 0/)
 })
@@ -1351,10 +1379,11 @@ test('module surfaces name a token that exists, and lift off the page', async ()
   }
   // The hovers in particular, since they are the ones with nothing else to
   // say they happened.
-  for (const hover of ['listRow', 'flowButton', 'agentCard']) {
+  for (const hover of ['listRow', 'agentCard']) {
     const rule = new RegExp(`\\.${hover}:hover[^}]*background: var\\(--dsw-alias-bg-module-platform`)
     assert.match(rules, rule, `.${hover}:hover does not lift off the page`)
   }
+  assert.match(rules, /\.flowRow:has\(\.flowButton:hover\)[^}]*background: var\(--dsw-alias-bg-module-platform/)
 })
 
 /**

@@ -64,20 +64,26 @@ export default defineConfig({
       )
     },
   }, {
-    name: 'dsh-css-modules-inline',
+    name: 'dsh-css-inline',
     resolveId(source: string, importer: string | undefined) {
-      if (!source.endsWith('.module.css')) return null
-      const abs = importer === undefined
-        ? source
-        : fileURLToPath(new URL(source, `file://${importer}`))
+      if (!source.endsWith('.css')) return null
+      let abs: string
+      if (source.startsWith('.') && importer !== undefined) {
+        abs = fileURLToPath(new URL(source, `file://${importer}`))
+      } else if (source.startsWith('/')) {
+        abs = source
+      } else {
+        abs = fileURLToPath(import.meta.resolve(source))
+      }
       return CSS_VIRTUAL_PREFIX + abs + CSS_VIRTUAL_SUFFIX
     },
     load(virtualId: string) {
       if (!virtualId.startsWith(CSS_VIRTUAL_PREFIX)) return null
       const fileId = virtualId.slice(CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
+      const isModule = fileId.endsWith('.module.css')
       const { code, exports: cssExports } = transform({
         filename: fileId, code: readFileSync(fileId),
-        cssModules: { pattern: '[hash]_[local]' }, minify: true,
+        cssModules: isModule ? { pattern: '[hash]_[local]' } : undefined, minify: true,
       })
       // Sorted so the emitted map is byte-stable: lightningcss does not promise
       // an export order, and an unstable one rewrites lib/client.js on every
