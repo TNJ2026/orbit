@@ -471,6 +471,31 @@ class ToolCallTests(ApiTestCase):
             started = self._start(client)
             self.assertTrue(started["run_id"].startswith("langgraph_run:"))
 
+    def test_a_run_may_be_cancelled_by_someone_who_did_not_start_it(self) -> None:
+        """Acting on a Run is bounded by the Workspace, as looking at it is.
+
+        The panel is a view of the Workspace and offers each Run the commands
+        that Run advertises. While `cancel` filtered by owner, pressing one on
+        a Run from another Session got "not found" for something plainly on
+        screen — and a Run whose Session had ended could not be answered by
+        anyone, which is how an approval sat in a panel for ten days.
+        """
+
+        with AsgiHarness(self.app) as client:
+            started = self._start(client, key="started-by-writer")
+            answer = tool(client, "cancel_run", {
+                "run_id": started["run_id"],
+                "expected_version": started["revision"],
+                "idempotency_key": "cancelled-by-another",
+            }, actor="second-writer")
+
+        payload = payload_of(answer)
+        # Either it cancelled, or the Run had already moved on and this is a
+        # revision conflict. What it must never be again is unfindable.
+        self.assertNotIn("not found", json.dumps(payload, ensure_ascii=False))
+        if not answer["result"]["isError"]:
+            self.assertEqual("cancelled", payload["status"])
+
     def test_start_exposes_goal_wait_and_the_public_run_projection(self) -> None:
         with AsgiHarness(self.app) as client:
             result = tool(

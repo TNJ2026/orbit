@@ -5502,9 +5502,9 @@ class LangGraphHttpApiTests(unittest.TestCase):
                         },
                     },
                 ).json()
-                # A read-only actor: refused for whose run it is, never for
-                # lacking a write scope. That is what puts replay on the read
-                # side — it derives state and writes nothing.
+                # A read-only actor: replay is on the read scope, and it
+                # derives state without writing any, so nothing about it turns
+                # on holding a write scope or on having started the run.
                 by_reader = client.request(
                     "POST", "/mcp", actor="test:reader",
                     body={
@@ -5533,7 +5533,11 @@ class LangGraphHttpApiTests(unittest.TestCase):
             json.loads(over_mcp["result"]["content"][0]["text"])["steps"],
         )
         self.assertNotIn("lacks scope", json.dumps(by_reader))
-        self.assertIn("not found", json.dumps(by_reader))
+        # Both doors, one rule. The MCP door used to answer "not found" to a
+        # reader who had not started the run while the line above asserts the
+        # HTTP door showed that same reader the same steps: two rules over one
+        # database, which is the thing `run_visibility` exists to prevent.
+        self.assertEqual(steps, by_reader["result"]["structuredContent"]["steps"])
 
     def test_interrupt_resume_is_authorized_versioned_and_idempotent(self) -> None:
         action = node("action", inputs=("value",), outputs=("value",))

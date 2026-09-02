@@ -709,6 +709,50 @@ class ProgressIsObservableTests(unittest.TestCase):
             )
         self.assertEqual("the first", caught.exception.active_goal["goal"])
 
+    def test_the_single_goal_slot_belongs_to_the_workspace_not_the_caller(self) -> None:
+        """One goal at a time here means here, not per caller.
+
+        The slot was per-actor because a Run belonging to somebody else could
+        not be opened to see why it was blocking. Reads stopped being scoped
+        that way, and now writes have too: the Run holding the slot is visible
+        to whoever is refused, and cancellable by them.
+        """
+
+        from orbit.workflow.langgraph_runtime.service import ActiveGoalExists
+
+        service, ir, _visits = self.deferring_service(0.5, single_goal=True)
+        service.start(
+            ir.workflow_id, {"value": 1}, idempotency_key="one",
+            actor="harness:session:first", wait=False, goal="the first",
+        )
+        with self.assertRaises(ActiveGoalExists) as caught:
+            service.start(
+                ir.workflow_id, {"value": 2}, idempotency_key="two",
+                actor="harness:session:second", wait=False,
+            )
+        self.assertEqual("the first", caught.exception.active_goal["goal"])
+
+    def test_a_run_started_elsewhere_can_still_be_cancelled(self) -> None:
+        """The Session that started a Run is not the only one that may end it.
+
+        A Run parked on a human step outlives the Session that started it, and
+        the panel that draws it is a view of the Workspace. While `cancel`
+        filtered by owner, the Runtime answered "not found" for a Run the
+        person was looking at, and one whose Session had ended could not be
+        answered by anybody — recoverable only by editing SQLite.
+        """
+
+        service, ir, _visits = self.deferring_service(0.5)
+        run = service.start(
+            ir.workflow_id, {"value": 1}, idempotency_key="started",
+            actor="harness:session:gone", wait=False, goal="left behind",
+        )
+        cancelled = service.cancel(
+            run.run_id, expected_revision=run.revision,
+            idempotency_key="ended-by-another", actor=None,
+        )
+        self.assertEqual("cancelled", cancelled.status)
+
     def test_a_shutdown_waits_for_runs_nobody_else_is_waiting_for(self) -> None:
         service, ir, _visits = self.deferring_service(0.3)
         run = service.start(

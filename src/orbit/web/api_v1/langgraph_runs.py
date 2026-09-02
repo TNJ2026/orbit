@@ -16,7 +16,7 @@ from .common import (
     OPS_WRITE_SCOPE, READ_SCOPE, SENSITIVE_SCOPE, WRITE_SCOPE, error,
 )
 from ..run_projection import langgraph_run_dto
-from ..run_visibility import reading_actor
+from ..run_visibility import reading_actor, writing_actor
 
 
 CURSOR_KIND = "langgraph-runs-v1"
@@ -266,7 +266,7 @@ def build_routes(ctx, service) -> list[Route]:
                     expected_revision=int(body["expected_version"]),
                     idempotency_key=key,
                     interrupt_id=body.get("interrupt_id"),
-                    actor=actor,
+                    actor=writing_actor(actor),
                 )
             except LookupError as exc:
                 raise ValueError(str(exc)) from None
@@ -301,7 +301,7 @@ def build_routes(ctx, service) -> list[Route]:
                     run_id,
                     expected_revision=int(body["expected_version"]),
                     idempotency_key=key,
-                    actor=actor,
+                    actor=writing_actor(actor),
                 )
             except LookupError as exc:
                 raise ValueError(str(exc)) from None

@@ -23,7 +23,7 @@ import time
 from typing import Any, Callable, Mapping
 
 from orbit import __version__
-from .run_visibility import reading_actor
+from .run_visibility import reading_actor, writing_actor
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -1099,14 +1099,17 @@ def build_mcp_dispatcher(
                     expected_revision=int(arguments["expected_version"]),
                     idempotency_key=str(arguments["idempotency_key"]),
                     interrupt_id=arguments.get("interrupt_id"),
-                    actor=actor,
+                    actor=writing_actor(actor),
                 ),
                 can_write=True,
             )
         if name == "replay_langgraph_run":
             return {"steps": list(langgraph_service.replay(
                 str(arguments["run_id"]),
-                actor=actor,
+                # A replay reads what a Run did, and `/api/v1` has always read
+                # it that way. Two transports disagreeing about one database is
+                # the thing `run_visibility` exists to stop.
+                actor=reading_actor(actor),
                 limit=min(200, max(1, int(arguments.get("limit", 50)))),
             ))}
         if name == "recover_run":
@@ -1120,7 +1123,7 @@ def build_mcp_dispatcher(
                     str(arguments["run_id"]),
                     expected_revision=int(arguments["expected_version"]),
                     idempotency_key=str(arguments["idempotency_key"]),
-                    actor=actor,
+                    actor=writing_actor(actor),
                 ),
                 can_write=True,
             )

@@ -555,8 +555,8 @@ class LangGraphWorkflowService:
             timespec="microseconds"
         ).replace("+00:00", "Z")
 
-    def _refuse_second_goal(self, connection, actor: str) -> None:
-        """Refuse a start while this actor already has a run in flight.
+    def _refuse_second_goal(self, connection) -> None:
+        """Refuse a start while this Workspace already has a run in flight.
 
         Called inside the transaction that inserts the run, never before it:
         two starts arriving together would otherwise both find nothing and
@@ -564,9 +564,13 @@ class LangGraphWorkflowService:
         needs no lock file of its own — the previous engine kept one because
         its check and its insert were in separate transactions.
 
-        Scoped to the owner. Runs are read by owner everywhere else, so a
-        global slot would let one actor block another with a run the second
-        cannot even open to see why.
+        The slot was per-actor, on the grounds that a global one would let a
+        caller block another with a run the second could not open to see why.
+        That has not been true since reads were widened: every Run in this
+        Workspace is visible to everyone who can reach this Runtime, and now
+        actionable by them too. A slot narrower than the boundary those two
+        rules draw would refuse a start for a reason the person is looking at
+        and can already cancel.
         """
 
         if not self.single_goal:
@@ -574,9 +578,9 @@ class LangGraphWorkflowService:
         placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
         row = connection.execute(
             "SELECT run_id,goal,workflow_id,status FROM langgraph_runs"
-            f" WHERE owner_actor=? AND status IN ({placeholders})"
+            f" WHERE status IN ({placeholders})"
             " ORDER BY created_at DESC,run_id LIMIT 1",
-            (actor, *ACTIVE_STATUSES),
+            ACTIVE_STATUSES,
         ).fetchone()
         if row is not None:
             raise ActiveGoalExists(dict(row))
@@ -694,7 +698,7 @@ class LangGraphWorkflowService:
                 return self.get(receipt["run_id"])
             # After the receipt, so replaying a start is never refused for
             # conflicting with the run it started.
-            self._refuse_second_goal(connection, actor)
+            self._refuse_second_goal(connection)
             run_id = "langgraph_run:" + uuid.uuid4().hex
             now = self._stamp()
             connection.execute(
@@ -766,7 +770,7 @@ class LangGraphWorkflowService:
                     )
                 return self.get(receipt["run_id"])
             # A template run is a goal like any other, and holds the slot.
-            self._refuse_second_goal(connection, actor)
+            self._refuse_second_goal(connection)
             run_id = "langgraph_run:" + uuid.uuid4().hex
             now = self._stamp()
             connection.execute(

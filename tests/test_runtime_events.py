@@ -555,23 +555,28 @@ class SingleGoalTests(unittest.TestCase):
         )
         self.assertEqual("interrupted", self.start(engine, "two").status)
 
-    def test_one_actor_does_not_block_another(self) -> None:
-        """A global slot would refuse an actor over a run they cannot open.
+    def test_the_slot_is_the_workspace_and_names_what_holds_it(self) -> None:
+        """One goal at a time here means here, not one per caller.
 
-        Runs are read by owner everywhere else, so the run holding the slot
-        would be invisible to the person being refused because of it.
+        The slot was per-actor while the premise for it was that a Run holding
+        it would be invisible to whoever it refused. Reads stopped being scoped
+        by owner, and writes have followed, so that Run is now both visible and
+        cancellable to the person being refused — and the refusal names it.
         """
+
+        from orbit.workflow.langgraph_runtime.service import ActiveGoalExists
 
         engine = self.engine()
         engine.start(
             "workflow:human", {"value": 1}, idempotency_key="a",
             actor="alice", goal="Alice's goal",
         )
-        started = engine.start(
-            "workflow:human", {"value": 1}, idempotency_key="b",
-            actor="bob", goal="Bob's goal",
-        )
-        self.assertEqual("interrupted", started.status)
+        with self.assertRaises(ActiveGoalExists) as caught:
+            engine.start(
+                "workflow:human", {"value": 1}, idempotency_key="b",
+                actor="bob", goal="Bob's goal",
+            )
+        self.assertEqual("Alice's goal", caught.exception.active_goal["goal"])
 
     def test_without_the_mode_nothing_is_serialised(self) -> None:
         """An embedder running many workflows is not quietly made sequential."""

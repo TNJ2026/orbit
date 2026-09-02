@@ -912,17 +912,14 @@ export class OrbitRemoteService extends TypertRemoteService {
     const scope = await this.sessionWorkspace(sessionId)
     const release = await this.gateway.acquire(scope)
     try {
-      // Deliberately the caller's scope, unlike the reads above: a write also
-      // records who acted, so acting on a Run started elsewhere would file it
-      // under this Session. Orbit answers "not found" for one it does not own,
-      // which is true and useless here — the panel showed the Run, so the
-      // reader knows it exists.
-      const run = await this.gateway.run(scope, sessionId, runId).catch((reason: unknown) => {
-        if (/not found/i.test(String(reason))) {
-          throw new Error('This Run was started elsewhere; act on it where it began, or in Orbit')
-        }
-        throw reason
-      })
+      // Read plainly. This used to translate Orbit's "not found" into "started
+      // elsewhere; act on it where it began", because acting on a Run was
+      // scoped to the Session that started it and the panel — a view of the
+      // Workspace — drew Runs it could not act on. Orbit bounds a write by the
+      // Workspace now, the same as a read, so a Run this answer cannot find is
+      // a Run that is not there, and saying anything else would send the
+      // reader looking for a Session to go back to.
+      const run = await this.gateway.run(scope, sessionId, runId)
       const advertised = advertisedAt(run, command, expectedRevision)
       if (advertised === undefined) {
         throw new Error(`Orbit no longer offers ${command} at revision ${String(expectedRevision)}`)

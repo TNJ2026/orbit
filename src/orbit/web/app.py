@@ -624,39 +624,6 @@ def create_app(
                 flush=True,
             )
 
-    # There were two host-wide libraries, one per authoring product, kept
-    # deliberately apart. With one product there is one library — but `orbit
-    # serve` defaulted to the single-Agent one, so on a default install that
-    # file is where everything a person published actually is. Leaving it
-    # behind would open the catalog empty on the build that removed the mode.
-    #
-    # Merged rather than swapped to: the other library is not necessarily
-    # empty either, and `merge_workflow_library` is built for exactly this —
-    # equal definitions collapse, and a Workflow id with two histories keeps
-    # both as new immutable versions rather than one overwriting the other.
-    # Idempotent, so every boot after the first finds nothing to do.
-    from ..platform import public_workflow_db_path, retired_workflow_library_path
-
-    retired = retired_workflow_library_path()
-    # Only for the library it is the predecessor *of*. An explicit database is
-    # self-contained — that is the rule everywhere else — and without this the
-    # merge reached into the home directory from a Runtime that had been
-    # pointed somewhere else entirely, including every test with a temporary
-    # library of its own.
-    if (
-        retired.exists()
-        and Path(composition.workflow_db_path) == public_workflow_db_path()
-    ):
-        from ..workflow.persistence.workflow_versions import merge_workflow_library
-
-        moved = merge_workflow_library(retired, composition.workflow_db_path)
-        if moved:
-            print(
-                f"workflow library: merged {moved} definition version(s) from "
-                f"{retired} into {composition.workflow_db_path}",
-                flush=True,
-            )
-
     @asynccontextmanager
     async def lifespan(app: Starlette):
         if langgraph_service is not None:
