@@ -407,8 +407,32 @@ export class OrbitRemoteService extends TypertRemoteService {
    * Stronger than `verified`: there is no caller-supplied value to disagree
    * with, so there is nothing to check.
    */
-  private async sessionWorkspace(sessionId: string): Promise<WorkspaceRef> {
-    return await this.workspaceForSession(this.liveSession(sessionId))
+  private async sessionWorkspace(
+    sessionId: string, allowPersisted = false,
+  ): Promise<WorkspaceRef> {
+    const live = this.hostSessions.list().find(item => String(item.id) === sessionId)
+    if (live) return await this.workspaceForSession(live)
+    if (allowPersisted) {
+      // Since Harness rc.6, opening a persisted conversation in the browser
+      // doesn't necessarily enter its Host Session until an Agent turn needs
+      // it. popupSelect is deliberately client-owned, so its options request
+      // can arrive in that interval. The durable Workspace registry is still
+      // authoritative for the Session's cwd and is safe for this read-only
+      // panel projection; mutations continue through liveSession()/verified().
+      const matches = this.workspaceRegistry.list().filter(workspace =>
+        workspace.sessionIds.some(id => String(id) === sessionId),
+      )
+      if (matches.length === 1) {
+        return { id: String(matches[0].id), canonicalPath: matches[0].path }
+      }
+      if (matches.length > 1) {
+        // An inconsistent durable index grants no authority. Keep the same
+        // classified failure as an absent live Session rather than exposing
+        // registry internals in the panel.
+        throw new Error('Orbit requires a live Harness Session')
+      }
+    }
+    throw new Error('Orbit requires a live Harness Session')
   }
 
   private liveSession(sessionId: string): Session {
@@ -624,7 +648,7 @@ export class OrbitRemoteService extends TypertRemoteService {
   @Remote('getRuntimeUi')
   async getRuntimeUi(sessionId: string, signal: AbortSignal): Promise<string> {
     signal.throwIfAborted()
-    const scope = await this.sessionWorkspace(sessionId)
+    const scope = await this.sessionWorkspace(sessionId, true)
     const release = await this.gateway.acquire(scope)
     try { return await this.gateway.uiUrl(scope) }
     finally { await release() }
@@ -655,7 +679,7 @@ export class OrbitRemoteService extends TypertRemoteService {
     steps: Record<string, StepSummary[]>
   }> {
     signal.throwIfAborted()
-    const scope = await this.sessionWorkspace(sessionId)
+    const scope = await this.sessionWorkspace(sessionId, true)
     const release = await this.gateway.acquire(scope, startIfMissing)
     try {
       // The panel is a view of the Workspace, not of one chat: a Run started in

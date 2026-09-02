@@ -32,6 +32,7 @@ class RuntimeOwnership:
         self.db_path = Path(db_path).expanduser().resolve()
         self.lock_path = self.db_path.with_suffix(self.db_path.suffix + ".owner.lock")
         self._file: TextIO | None = None
+        self._fork_hook_registered = False
 
     def acquire(self) -> "RuntimeOwnership":
         if self._file is not None:
@@ -57,8 +58,26 @@ class RuntimeOwnership:
                 f"Runtime database is already owned: {self.db_path}"
             ) from exc
         self._file = handle
+        # Execution workers use multiprocessing's `fork` start method on Unix.
+        # A flock belongs to the inherited open-file description, so if a
+        # worker keeps this descriptor after the Runtime exits, discovery sees
+        # a live lock carrying the dead parent's PID and endpoint forever. In
+        # the child close only its duplicate; never call release(), whose
+        # LOCK_UN would also unlock the parent's shared open-file description.
+        if (
+            os.name != "nt"
+            and hasattr(os, "register_at_fork")
+            and not self._fork_hook_registered
+        ):
+            os.register_at_fork(after_in_child=self._drop_in_forked_child)
+            self._fork_hook_registered = True
         self._write({})
         return self
+
+    def _drop_in_forked_child(self) -> None:
+        handle, self._file = self._file, None
+        if handle is not None:
+            handle.close()
 
     def _write(self, facts: Mapping[str, object]) -> None:
         handle = self._file

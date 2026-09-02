@@ -10,6 +10,7 @@ from orbit.hub import (
     HubError, MultipleRuntimesError, WorkspaceRegistry,
     WorkspaceRuntimeManager, create_hub_app, workspace_urls,
 )
+from orbit.global_control import WorkflowTemplateStore
 from orbit.platform.projects import project_id
 from orbit.platform.runtime_ownership import DiscoveredRuntime
 from tests.test_web_composition import AsgiHarness
@@ -374,6 +375,108 @@ class HubHttpTests(unittest.TestCase):
             response.headers["location"],
         )
         self.assertEqual(["project-a"], manager.identifiers)
+
+
+class HubGlobalControlTests(unittest.TestCase):
+    class Registry:
+        def list(self):
+            return [{
+                "workspace_id": "project-a", "name": "Project A",
+                "path": "/projects/a", "kind": "registered", "available": True,
+            }, {
+                "workspace_id": "project-b", "name": "Project B",
+                "path": "/projects/b", "kind": "registered", "available": True,
+            }]
+
+    class Manager:
+        def __init__(self):
+            self.registry = HubGlobalControlTests.Registry()
+
+        def ensure(self, identifier):
+            self.ensured = identifier
+            return "http://127.0.0.1:41001"
+
+        def find_live(self, identifier):
+            return "http://127.0.0.1:41001" if identifier == "project-a" else None
+
+    def test_template_is_global_then_published_by_target_runtime(self) -> None:
+        source = json.dumps({
+            "dsl_version": "1.0",
+            "metadata": {"id": "workflow:shared", "name": "Shared"},
+            "nodes": [], "edges": [],
+        })
+        manager = self.Manager()
+        with tempfile.TemporaryDirectory() as temporary:
+            store = WorkflowTemplateStore(Path(temporary) / "templates.json")
+            with mock.patch(
+                "orbit.hub._runtime_json",
+                return_value=(201, {"data": {"workflow_id": "workflow:shared", "version": 1}}),
+            ) as runtime, AsgiHarness(create_hub_app(manager, template_store=store)) as client:
+                created = client.request("POST", "/api/v1/workflow-templates", body={
+                    "name": "Shared", "source": source, "expected_version": 0,
+                }, headers={"idempotency-key": "template-1"})
+                template_id = created.json()["template_id"]
+                listed = client.get("/api/v1/workflow-templates")
+                imported = client.request(
+                    "POST", f"/api/v1/workflow-templates/{template_id}/instantiate",
+                    headers={"idempotency-key": "import-1"},
+                    body={"workspace_id": "project-a", "expected_latest_version": 0},
+                )
+
+        self.assertEqual(201, created.status_code)
+        self.assertEqual(1, len(listed.json()["templates"]))
+        self.assertEqual(201, imported.status_code)
+        self.assertEqual("project-a", manager.ensured)
+        call = runtime.call_args.args[0]
+        self.assertIn("/api/v1/workflows/workflow:shared/versions", call)
+        self.assertEqual("import-1", runtime.call_args.kwargs["headers"]["idempotency-key"])
+
+    def test_agent_statistics_sum_only_live_workspace_runtimes(self) -> None:
+        catalog = {"data": {"handlers": [{
+            "name": "agent.codex", "version": "1.2.3",
+            "attempt_count": 7, "failed_count": 2,
+        }, {"name": "transform", "attempt_count": 99, "failed_count": 99}]}}
+        with mock.patch(
+            "orbit.hub._runtime_json", return_value=(200, catalog),
+        ), AsgiHarness(create_hub_app(self.Manager())) as client:
+            response = client.get("/api/v1/global/agent-stats")
+
+        payload = response.json()
+        self.assertEqual([{
+            "name": "agent.codex", "attempt_count": 7, "failed_count": 2,
+            "workspaces": 1, "versions": ["1.2.3"],
+        }], payload["agents"])
+        self.assertEqual(
+            ["online", "offline"],
+            [item["runtime"] for item in payload["workspaces"]],
+        )
+        self.assertEqual("sum_of_workspace_runtime_statistics", payload["semantics"])
+
+    def test_global_template_writes_require_concurrency_controls(self) -> None:
+        source = json.dumps({
+            "dsl_version": "1.0",
+            "metadata": {"id": "workflow:shared", "name": "Shared"},
+            "nodes": [], "edges": [],
+        })
+        with tempfile.TemporaryDirectory() as temporary, AsgiHarness(create_hub_app(
+            self.Manager(), template_store=WorkflowTemplateStore(
+                Path(temporary) / "templates.json"
+            ),
+        )) as client:
+            missing_key = client.request(
+                "POST", "/api/v1/workflow-templates",
+                body={"name": "Shared", "source": source, "expected_version": 0},
+            )
+            missing_version = client.request(
+                "POST", "/api/v1/workflow-templates",
+                headers={"idempotency-key": "template-1"},
+                body={"name": "Shared", "source": source},
+            )
+
+        self.assertEqual(400, missing_key.status_code)
+        self.assertIn("idempotency-key", missing_key.text)
+        self.assertEqual(400, missing_version.status_code)
+        self.assertIn("expected_version", missing_version.text)
 
 
 if __name__ == "__main__":

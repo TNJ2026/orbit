@@ -495,8 +495,29 @@ let OrbitRemoteService = (() => {
          * Stronger than `verified`: there is no caller-supplied value to disagree
          * with, so there is nothing to check.
          */
-        async sessionWorkspace(sessionId) {
-            return await this.workspaceForSession(this.liveSession(sessionId));
+        async sessionWorkspace(sessionId, allowPersisted = false) {
+            const live = this.hostSessions.list().find(item => String(item.id) === sessionId);
+            if (live)
+                return await this.workspaceForSession(live);
+            if (allowPersisted) {
+                // Since Harness rc.6, opening a persisted conversation in the browser
+                // doesn't necessarily enter its Host Session until an Agent turn needs
+                // it. popupSelect is deliberately client-owned, so its options request
+                // can arrive in that interval. The durable Workspace registry is still
+                // authoritative for the Session's cwd and is safe for this read-only
+                // panel projection; mutations continue through liveSession()/verified().
+                const matches = this.workspaceRegistry.list().filter(workspace => workspace.sessionIds.some(id => String(id) === sessionId));
+                if (matches.length === 1) {
+                    return { id: String(matches[0].id), canonicalPath: matches[0].path };
+                }
+                if (matches.length > 1) {
+                    // An inconsistent durable index grants no authority. Keep the same
+                    // classified failure as an absent live Session rather than exposing
+                    // registry internals in the panel.
+                    throw new Error('Orbit requires a live Harness Session');
+                }
+            }
+            throw new Error('Orbit requires a live Harness Session');
         }
         liveSession(sessionId) {
             const session = this.hostSessions.list().find(item => String(item.id) === sessionId);
@@ -710,7 +731,7 @@ let OrbitRemoteService = (() => {
         }
         async getRuntimeUi(sessionId, signal) {
             signal.throwIfAborted();
-            const scope = await this.sessionWorkspace(sessionId);
+            const scope = await this.sessionWorkspace(sessionId, true);
             const release = await this.gateway.acquire(scope);
             try {
                 return await this.gateway.uiUrl(scope);
@@ -737,7 +758,7 @@ let OrbitRemoteService = (() => {
          */
         async getPanelState(sessionId, force, startIfMissing, signal) {
             signal.throwIfAborted();
-            const scope = await this.sessionWorkspace(sessionId);
+            const scope = await this.sessionWorkspace(sessionId, true);
             const release = await this.gateway.acquire(scope, startIfMissing);
             try {
                 // The panel is a view of the Workspace, not of one chat: a Run started in

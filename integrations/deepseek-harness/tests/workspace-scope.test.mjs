@@ -37,3 +37,26 @@ test('a Workspace becomes a scope only through a derivation this Host owns', () 
     ['registered', 'sessionWorkspace', 'verified'],
   )
 })
+
+test('read-only panel state can resolve a persisted Harness Session', () => {
+  const resolver = source.slice(
+    source.indexOf('private async sessionWorkspace('),
+    source.indexOf('private liveSession('),
+  )
+  assert.match(resolver, /allowPersisted = false/)
+  assert.match(resolver, /this\.workspaceRegistry\.list\(\)/)
+  assert.match(resolver, /workspace\.sessionIds\.some/)
+
+  const panel = source.slice(
+    source.indexOf("@Remote('getPanelState')"),
+    source.indexOf("@Remote('getRunDetail')"),
+  )
+  assert.match(panel, /sessionWorkspace\(sessionId, true\)/)
+
+  const verified = source.slice(
+    source.indexOf('private async verified('),
+    source.indexOf('private async registered('),
+  )
+  assert.match(verified, /liveSession\(sessionId\)/,
+    'caller-supplied Workspace mutations must still require a live Session')
+})

@@ -187,8 +187,10 @@ orbit workflow publish <file> --catalog <catalog.json> --expected-version <n>
 ```
 
 `orbit serve` binds to `127.0.0.1` by default. Runtime state and Artifacts are
-project-scoped; published workflow definitions are shared through the local
-Orbit workflow library.
+project-scoped, including published Workflow definitions and Handler bindings.
+The Hub shares only reusable Workflow source templates and aggregates Agent
+statistics from live Workspace Runtimes; importing a template always compiles
+and publishes it through the selected Runtime.
 
 ## Development
 

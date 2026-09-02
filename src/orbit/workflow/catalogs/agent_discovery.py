@@ -20,11 +20,14 @@ unpinned version would make the manifest fingerprint a lie.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
+import json
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import time
 from typing import Callable, Iterable, Mapping, Sequence
 
 from ..cli_environment import trusted_cli_environment
@@ -36,6 +39,8 @@ from .handlers import HandlerManifest
 
 
 VERSION_PROBE_TIMEOUT_SECONDS = 10
+AGENT_DISCOVERY_CACHE_SECONDS = 300
+DEFAULT_AGENT_DISCOVERY_CACHE = Path.home() / ".orbit" / "cache" / "agents.json"
 _VERSION_PATTERN = re.compile(r"(\d+\.\d+(?:\.\d+)?)")
 _SAFE_NAME = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
@@ -301,6 +306,95 @@ def discover_agent_clis(
         if spec.name == "hermes":
             for profile_spec in _hermes_profile_specs(spec, hermes_profiles):
                 found.append(DiscoveredAgent(profile_spec, path, version))
+    return tuple(found)
+
+
+def discover_agent_clis_cached(
+    specs: Sequence[AgentCliSpec] = TRUSTED_AGENT_CLIS,
+    *,
+    cache_path: Path | str = DEFAULT_AGENT_DISCOVERY_CACHE,
+    max_age_seconds: int = AGENT_DISCOVERY_CACHE_SECONDS,
+    which: Callable[[str], str | None] = shutil.which,
+    runner=subprocess.run,
+    profile_root: Path | None = None,
+    now: Callable[[], float] | None = None,
+) -> tuple[DiscoveredAgent, ...]:
+    """Reuse machine-wide version probes while revalidating each Runtime's PATH.
+
+    The cache is only evidence that one reviewed executable reported a version
+    recently. Every Runtime still resolves the code-owned allowlist on its own
+    PATH and reconstructs its own Handler registrations and policy boundary.
+    """
+
+    clock = now or time.time
+    path = Path(cache_path).expanduser()
+    cached: dict[tuple[str, str, tuple[int, int, int, int] | None], str | None] = {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        written_at = float(payload.get("written_at", 0))
+        if clock() - written_at <= max_age_seconds:
+            for item in payload.get("agents", ()):
+                if not isinstance(item, Mapping):
+                    continue
+                name, executable = item.get("name"), item.get("executable_path")
+                version = item.get("version")
+                raw_identity = item.get("identity")
+                identity = (
+                    tuple(raw_identity) if isinstance(raw_identity, list)
+                    and len(raw_identity) == 4
+                    and all(isinstance(value, int) for value in raw_identity)
+                    else None
+                )
+                if isinstance(name, str) and isinstance(executable, str) and (
+                    version is None or isinstance(version, str)
+                ):
+                    cached[(name, executable, identity)] = version
+    except (OSError, ValueError, TypeError):
+        pass
+
+    hermes_profiles = profile_root or (Path.home() / ".hermes" / "profiles")
+    found: list[DiscoveredAgent] = []
+    for base_spec in specs:
+        resolved = which(base_spec.executable)
+        if not resolved:
+            continue
+        executable = str(Path(resolved))
+        try:
+            stat = Path(executable).stat()
+            identity = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+        except OSError:
+            identity = None
+        candidates = (base_spec,)
+        if base_spec.name == "hermes":
+            candidates += _hermes_profile_specs(base_spec, hermes_profiles)
+        for spec in candidates:
+            key = (spec.name, executable, identity)
+            version = cached[key] if key in cached else _probe_version(
+                executable, spec, runner,
+            )
+            found.append(DiscoveredAgent(spec, executable, version))
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(f".{os.getpid()}.tmp")
+        temporary.write_text(json.dumps({
+            "schema_version": 2,
+            "written_at": clock(),
+            "written_at_iso": datetime.now(timezone.utc).isoformat(),
+            "agents": [{
+                "name": item.name,
+                "executable_path": item.executable_path,
+                "version": item.version,
+                "identity": (lambda executable: (
+                    [executable.st_dev, executable.st_ino, executable.st_size,
+                     executable.st_mtime_ns]
+                ))(Path(item.executable_path).stat())
+                if Path(item.executable_path).exists() else None,
+            } for item in found],
+        }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temporary.replace(path)
+    except OSError:
+        pass
     return tuple(found)
 
 

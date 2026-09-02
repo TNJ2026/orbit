@@ -448,12 +448,12 @@ def create_app(
     registrations = list(handlers)
     if discover_agents:
         from ..workflow.catalogs.agent_discovery import (
-            catalog_entries, discover_agent_clis,
+            catalog_entries, discover_agent_clis_cached,
         )
 
         from .builtin_handlers import agent_handlers
 
-        discovered = discover_agent_clis()
+        discovered = discover_agent_clis_cached()
         agent_catalog = catalog_entries(discovered)
         invokable_agents = tuple(
             agent for agent in discovered if agent.spec.runtime_compatible

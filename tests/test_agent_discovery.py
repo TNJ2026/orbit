@@ -17,7 +17,8 @@ import unittest
 from orbit.workflow.catalogs.agent_discovery import (
     TRUSTED_AGENT_CLIS, AgentCliSpec, AgentDiscoveryError, AgentInvocation,
     DiscoveredAgent,
-    agent_manifest, catalog_entries, discover_agent_clis, registrable_agents,
+    agent_manifest, catalog_entries, discover_agent_clis,
+    discover_agent_clis_cached, registrable_agents,
 )
 from orbit.workflow.cli_environment import trusted_cli_environment
 from orbit.workflow.domain.durable_execution import ExecutionSafety
@@ -121,6 +122,59 @@ class SpecValidationTests(unittest.TestCase):
 
 
 class DiscoveryTests(unittest.TestCase):
+    def test_machine_cache_reuses_probe_but_revalidates_path(self) -> None:
+        calls = []
+
+        def runner(argv, **_kwargs):
+            calls.append(argv)
+            return SimpleNamespace(returncode=0, stdout="claude 2.1.3", stderr="")
+
+        with tempfile.TemporaryDirectory() as root:
+            cache = Path(root) / "agents.json"
+            first = discover_agent_clis_cached(
+                (CLAUDE,), cache_path=cache, which=fake_which({"claude"}),
+                runner=runner, now=lambda: 100,
+            )
+            second = discover_agent_clis_cached(
+                (CLAUDE,), cache_path=cache, which=fake_which({"claude"}),
+                runner=runner, now=lambda: 101,
+            )
+            missing = discover_agent_clis_cached(
+                (CLAUDE,), cache_path=cache, which=fake_which(set()),
+                runner=runner, now=lambda: 102,
+            )
+
+        self.assertEqual("2.1.3", first[0].version)
+        self.assertEqual("2.1.3", second[0].version)
+        self.assertEqual(1, len(calls), "the second Runtime should reuse the global probe")
+        self.assertEqual((), missing, "cache never overrides this Runtime's PATH")
+
+    def test_machine_cache_reprobes_an_executable_replaced_in_place(self) -> None:
+        calls = []
+        with tempfile.TemporaryDirectory() as root:
+            executable = Path(root) / "claude"
+            executable.write_text("first")
+            cache = Path(root) / "agents.json"
+
+            def runner(argv, **_kwargs):
+                calls.append(argv)
+                return SimpleNamespace(
+                    returncode=0, stdout=f"claude 2.1.{len(calls)}", stderr="",
+                )
+
+            discover_agent_clis_cached(
+                (CLAUDE,), cache_path=cache, which=lambda _name: str(executable),
+                runner=runner, now=lambda: 100,
+            )
+            executable.write_text("replacement-is-different")
+            result = discover_agent_clis_cached(
+                (CLAUDE,), cache_path=cache, which=lambda _name: str(executable),
+                runner=runner, now=lambda: 101,
+            )
+
+        self.assertEqual(2, len(calls))
+        self.assertEqual("2.1.2", result[0].version)
+
     def test_trusted_cli_environment_keeps_identity_but_not_provider_tokens(self) -> None:
         environment = trusted_cli_environment({
             "PATH": "/bin", "HOME": "/home/operator", "USER": "operator",
@@ -465,7 +519,7 @@ class RegistrationTests(unittest.TestCase):
         from orbit.web.builtin_handlers import BUILTIN_SCHEMAS
 
         with patch(
-            "orbit.workflow.catalogs.agent_discovery.discover_agent_clis",
+            "orbit.workflow.catalogs.agent_discovery.discover_agent_clis_cached",
             return_value=(self.agent,),
         ):
             app = create_app(

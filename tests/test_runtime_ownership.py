@@ -48,6 +48,33 @@ class RuntimeOwnershipTests(unittest.TestCase):
             with RuntimeOwnership(database):
                 pass
 
+    @unittest.skipUnless(hasattr(os, "fork"), "requires Unix fork semantics")
+    def test_a_forked_worker_does_not_keep_the_runtime_lock_alive(self) -> None:
+        """A worker may outlive its parent without publishing the parent's endpoint."""
+
+        with tempfile.TemporaryDirectory() as root:
+            owner = RuntimeOwnership(Path(root) / "runtime.db").acquire()
+            owner.publish(base_url="http://127.0.0.1:8848")
+            read_fd, write_fd = os.pipe()
+            child = os.fork()
+            if child == 0:  # pragma: no cover - assertions run in the parent
+                try:
+                    os.close(write_fd)
+                    os.read(read_fd, 1)
+                finally:
+                    os._exit(0)
+
+            os.close(read_fd)
+            try:
+                owner.release()
+                # The child is deliberately still alive here. Its fork hook
+                # must have closed the inherited duplicate of the owner lock.
+                self.assertEqual((), discover_runtimes(root))
+            finally:
+                os.write(write_fd, b"x")
+                os.close(write_fd)
+                os.waitpid(child, 0)
+
 
 class McpOwnershipCleanupTests(unittest.TestCase):
     """The two paths that only run when something else has already gone wrong.

@@ -151,6 +151,7 @@ class PatchTests(unittest.TestCase):
             )
             for relative in (
                 "src/orbit/workflow/catalogs/agent_discovery.py",
+                "src/orbit/web/app.py",
                 "tests/test_agent_discovery.py",
             ):
                 (work / relative).write_text(

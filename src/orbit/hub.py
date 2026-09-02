@@ -12,6 +12,7 @@ import time
 import uuid
 from typing import Any, Callable, Iterable, Mapping
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import Request as UrlRequest, urlopen
 
 import anyio
@@ -23,6 +24,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from websockets.asyncio.client import connect as websocket_connect
 
 from .agent_apps.host import default_workspace
+from .global_control import WorkflowTemplateError, WorkflowTemplateStore
 from .platform.projects import project_id, resolve_project_root
 from .platform.runtime_ownership import DiscoveredRuntime, discover_runtimes
 from .web.mcp import (
@@ -218,6 +220,10 @@ class WorkspaceRuntimeManager:
             )
         return matches[0] if matches else None
 
+    def find_live(self, identifier: str) -> str | None:
+        """Return an already-live Runtime without starting an offline Workspace."""
+        return self._find(self.registry.resolve(identifier))
+
     def _launch(self, workspace: Path) -> subprocess.Popen:
         identifier = project_id(workspace)
         directory = self.log_root / identifier
@@ -260,12 +266,38 @@ def _forward(url: str, body: bytes, headers: dict[str, str]) -> tuple[int, bytes
         raise HubError(f"Orbit Runtime is unavailable: {exc}") from exc
 
 
+def _runtime_json(
+    url: str, *, method: str = "GET", body: Mapping[str, Any] | None = None,
+    headers: Mapping[str, str] | None = None, timeout: float = 10,
+) -> tuple[int, Mapping[str, Any]]:
+    encoded = None if body is None else json.dumps(body).encode("utf-8")
+    request = UrlRequest(url, data=encoded, method=method, headers={
+        "accept": "application/json", **({} if encoded is None else {
+            "content-type": "application/json",
+        }), **dict(headers or {}),
+    })
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            status, payload = response.status, response.read()
+    except HTTPError as exc:
+        status, payload = exc.code, exc.read()
+    except (OSError, URLError) as exc:
+        raise HubError(f"Orbit Runtime is unavailable: {exc}") from exc
+    try:
+        decoded = json.loads(payload)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HubError("Orbit Runtime returned invalid JSON") from exc
+    return status, decoded if isinstance(decoded, Mapping) else {}
+
+
 def create_hub_app(
     manager: WorkspaceRuntimeManager | None = None, *, forward_concurrency: int = 24,
+    template_store: WorkflowTemplateStore | None = None,
 ) -> Starlette:
     if forward_concurrency < 1:
         raise ValueError("forward concurrency must be positive")
     runtimes = manager or WorkspaceRuntimeManager()
+    templates = template_store or WorkflowTemplateStore()
     sessions = McpSessionRegistry()
     selections: dict[str, str] = {}
     selection_lock = threading.Lock()
@@ -434,6 +466,127 @@ def create_hub_app(
     async def ready(_request: Request) -> Response:
         return JSONResponse({"status": "ready", "service": "orbit-hub"})
 
+    async def template_catalog(request: Request) -> Response:
+        if request.method == "GET":
+            return JSONResponse({"templates": templates.list()})
+        try:
+            body = await request.json()
+            idempotency_key = request.headers.get("idempotency-key", "").strip()
+            if not idempotency_key:
+                raise WorkflowTemplateError("idempotency-key header is required")
+            item = templates.put(
+                name=str(body.get("name", "")), source=str(body.get("source", "")),
+                source_format=str(body.get("source_format", "json")),
+                expected_version=body.get("expected_version"),
+                idempotency_key=idempotency_key,
+            )
+        except (ValueError, WorkflowTemplateError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse(item, status_code=201)
+
+    async def template_item(request: Request) -> Response:
+        template_id = request.path_params["template_id"]
+        if request.method == "DELETE":
+            try:
+                body = await request.json()
+                idempotency_key = request.headers.get("idempotency-key", "").strip()
+                if not idempotency_key:
+                    raise WorkflowTemplateError("idempotency-key header is required")
+                expected_version = body.get("expected_version")
+                if not isinstance(expected_version, int) or isinstance(expected_version, bool):
+                    raise WorkflowTemplateError("expected_version must be an integer")
+                deleted = templates.delete(
+                    template_id, expected_version=expected_version,
+                    idempotency_key=idempotency_key,
+                )
+            except (ValueError, WorkflowTemplateError) as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            return JSONResponse({"template_id": template_id, "deleted": deleted})
+        try:
+            return JSONResponse(templates.get(template_id))
+        except WorkflowTemplateError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+
+    async def instantiate_template(request: Request) -> Response:
+        template_id = request.path_params["template_id"]
+        try:
+            body = await request.json()
+            idempotency_key = request.headers.get("idempotency-key", "").strip()
+            if not idempotency_key:
+                raise WorkflowTemplateError("idempotency-key header is required")
+            identifier = str(body.get("workspace_id", ""))
+            expected = body.get("expected_latest_version")
+            if not isinstance(expected, int) or isinstance(expected, bool) or expected < 0:
+                raise WorkflowTemplateError(
+                    "expected_latest_version must be a non-negative integer"
+                )
+            item = templates.get(template_id)
+            base = await anyio.to_thread.run_sync(runtimes.ensure, identifier)
+            status, result_payload = await anyio.to_thread.run_sync(
+                lambda: _runtime_json(
+                    f"{base}/api/v1/workflows/{quote(item['workflow_id'], safe=':')}/versions",
+                    method="POST",
+                    body={"source": item["source"], "expected_version": expected},
+                    headers={
+                        "x-orbit-actor": "local",
+                        "idempotency-key": idempotency_key,
+                    }, timeout=60,
+                )
+            )
+        except (ValueError, WorkflowTemplateError, HubError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse({
+            "template_id": template_id, "workspace_id": identifier,
+            "runtime_response": result_payload,
+        }, status_code=status)
+
+    async def global_agent_stats(_request: Request) -> Response:
+        totals: dict[str, dict[str, Any]] = {}
+        workspaces: list[dict[str, Any]] = []
+        for workspace in runtimes.registry.list():
+            if not workspace.get("available", True):
+                workspaces.append({**workspace, "runtime": "unavailable"})
+                continue
+            identifier = str(workspace["workspace_id"])
+            try:
+                base = await anyio.to_thread.run_sync(runtimes.find_live, identifier)
+                if base is None:
+                    workspaces.append({**workspace, "runtime": "offline"})
+                    continue
+                status, payload = await anyio.to_thread.run_sync(
+                    lambda: _runtime_json(
+                        f"{base}/api/v1/handler-catalog",
+                        headers={"x-orbit-actor": "local"},
+                    )
+                )
+                if status >= 400:
+                    raise HubError(f"handler catalog failed ({status})")
+                handlers = payload.get("data", {}).get("handlers", ())
+                agents = [
+                    item for item in handlers
+                    if isinstance(item, Mapping) and str(item.get("name", "")).startswith("agent.")
+                ]
+                workspaces.append({**workspace, "runtime": "online", "agent_count": len(agents)})
+                for item in agents:
+                    name = str(item["name"])
+                    total = totals.setdefault(name, {
+                        "name": name, "attempt_count": 0, "failed_count": 0,
+                        "workspaces": 0, "versions": [],
+                    })
+                    total["attempt_count"] += int(item.get("attempt_count", 0))
+                    total["failed_count"] += int(item.get("failed_count", 0))
+                    total["workspaces"] += 1
+                    version = item.get("version")
+                    if isinstance(version, str) and version not in total["versions"]:
+                        total["versions"].append(version)
+            except (HubError, OSError, ValueError) as exc:
+                workspaces.append({**workspace, "runtime": "error", "error": str(exc)})
+        return JSONResponse({
+            "agents": sorted(totals.values(), key=lambda item: item["name"]),
+            "workspaces": workspaces,
+            "semantics": "sum_of_workspace_runtime_statistics",
+        })
+
     async def mcp(request: Request) -> Response:
         explicit_identifier = request.path_params.get("workspace_id")
         session_id = request.headers.get("mcp-session-id")
@@ -529,6 +682,10 @@ def create_hub_app(
 
     app = Starlette(routes=[
         Route("/health/ready", ready, methods=["GET"]),
+        Route("/api/v1/global/agent-stats", global_agent_stats, methods=["GET"]),
+        Route("/api/v1/workflow-templates", template_catalog, methods=["GET", "POST"]),
+        Route("/api/v1/workflow-templates/{template_id}", template_item, methods=["GET", "DELETE"]),
+        Route("/api/v1/workflow-templates/{template_id}/instantiate", instantiate_template, methods=["POST"]),
         Route("/mcp", mcp, methods=["POST"]),
         Route("/workspaces/{workspace_id}/mcp", mcp, methods=["POST"]),
         Route("/ui", ui, methods=["GET"]),

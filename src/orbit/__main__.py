@@ -18,7 +18,6 @@ from .platform.cutover import (
 )
 from .platform.projects import (
     project_db_path,
-    public_workflow_db_path,
     project_state_dir,
     resolve_project_root,
     upsert_project,
@@ -30,21 +29,18 @@ def _workflow_db_path(
     *,
     project_root: Path | str | None = None,
 ) -> str:
-    """Which library holds published definitions, for every command alike.
+    """Return this Workspace's published-Workflow database.
 
-    One rule now, which is the point: an explicit database is self-contained,
-    and everything else is the one host-wide library. There used to be two,
-    one per authoring product, and which one a command addressed depended on a
-    flag — so a Workflow published from the command line could be invisible in
-    the UI served from the same machine.
+    Published definitions are executable state: their Handler bindings and
+    versions belong to the Runtime that validated them.  Reusable, host-wide
+    source belongs in the Hub's WorkflowTemplateStore instead.  Keeping the
+    two categories separate prevents one Workspace's catalog from leaking into
+    another while still allowing an explicit template instantiation there.
     """
 
     if explicit:
         return explicit
-    _runtime_db_path(
-        None, project_root=project_root,
-    )  # Preserve the existing cutover acknowledgement gate.
-    return str(public_workflow_db_path())
+    return _runtime_db_path(None, project_root=project_root)
 
 
 def _runtime_db_path(
@@ -1033,7 +1029,25 @@ def main() -> None:
             identifier, _ = WorkspaceRegistry().register(args.workspace)
             print(json.dumps(workspace_urls(identifier), sort_keys=True))
             return
-        uvicorn.run(create_hub_app(), host=args.host, port=args.port, log_level="info")
+        from .global_control import (
+            WorkflowTemplateStore, import_legacy_workflow_library,
+        )
+        from .platform.projects import public_workflow_db_path
+
+        templates = WorkflowTemplateStore()
+        imported = import_legacy_workflow_library(
+            public_workflow_db_path(), templates,
+        )
+        if imported:
+            print(
+                f"workflow templates: imported {imported} source(s) from the "
+                "legacy host-wide library",
+                flush=True,
+            )
+        uvicorn.run(
+            create_hub_app(template_store=templates),
+            host=args.host, port=args.port, log_level="info",
+        )
         return
 
 

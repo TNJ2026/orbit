@@ -32,6 +32,11 @@ Orbit 会为当前项目启动 Runtime，在 Codex 对话旁打开原生工作�
 Agent 选择器会出现 `codex`，并默认
 选中它。
 
+多 Workspace 时，Agent CLI 的安装发现和 Workflow 源码模板可全局共用；
+Handler 注册/授权、已发布 Workflow 及原始执行统计仍按 Workspace 隔离。
+Hub 可聚合在线 Runtime 的 Agent 统计，把模板实例化到目标 Workspace 时会
+重新编译并校验，不直接共用可执行版本。
+
 监听状态属于当前 Codex 任务。任务结束后 `codex` 会离线，但 Runtime
 可以继续运行。新建任务并再次说“打开 Orbit”即可重新连接。
 

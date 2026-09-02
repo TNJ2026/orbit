@@ -413,33 +413,37 @@ if __name__ == "__main__":
 
 
 class WorkflowLibraryResolutionTests(unittest.TestCase):
-    """One rule for which library a command addresses, for every command.
-
-    Each surface used to resolve it for itself, against one of two host-wide
-    libraries chosen by a flag — a default install where a Workflow published
-    from the command line never appeared in the UI, and one authored in the UI
-    could not be started from the command line. Nothing failed; the two
-    catalogs simply had nothing to do with each other. There is one library
-    now, so there is nothing left to disagree about.
-    """
+    """Every surface resolves the same Workspace-local executable catalog."""
 
     def parse(self, *arguments: str):
         from orbit.__main__ import build_parser
 
         return build_parser().parse_args(list(arguments))
 
-    def resolved(self, *arguments: str) -> str:
+    def resolved(self, *arguments: str, project_root=None) -> str:
         from orbit.__main__ import _workflow_db_path
 
-        return _workflow_db_path(self.parse(*arguments).db)
+        return _workflow_db_path(
+            self.parse(*arguments).db, project_root=project_root,
+        )
 
-    def test_every_default_surface_resolves_the_one_library(self) -> None:
-        from orbit.platform.projects import public_workflow_db_path
+    def test_every_default_surface_resolves_the_workspace_database(self) -> None:
+        from orbit.platform.projects import project_db_path
 
-        expected = str(public_workflow_db_path())
-        for command in (("serve",), ("mcp",), ("workflow", "inventory")):
-            with self.subTest(command=command):
-                self.assertEqual(expected, self.resolved(*command))
+        with tempfile.TemporaryDirectory() as directory:
+            expected = str(project_db_path(directory))
+            for command in (("serve",), ("mcp",), ("workflow", "inventory")):
+                with self.subTest(command=command):
+                    self.assertEqual(
+                        expected, self.resolved(*command, project_root=directory),
+                    )
+
+    def test_different_workspaces_have_different_workflow_catalogs(self) -> None:
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+            self.assertNotEqual(
+                self.resolved("serve", project_root=first),
+                self.resolved("serve", project_root=second),
+            )
 
     def test_no_command_takes_a_mode_that_would_split_them_again(self) -> None:
         for command in (("serve",), ("mcp",), ("workflow", "inventory")):
