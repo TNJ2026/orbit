@@ -301,11 +301,20 @@ test('the model sees only the Workflow catalog routed by its own Session', async
   )
   assert.match(contribution, /context\.agent/,
     'prompt assembly must derive identity from the Agent being assembled')
-  assert.match(contribution, /this\.bridgedWorkspaces\.get\(sessionId\)/,
+  assert.match(contribution, /this\.bridgedWorkspaces\.get\(String\(session\.id\)\)/,
     'that Session must select exactly one routed Workspace')
   assert.match(contribution, /this\.catalog\.render\(workspace\.canonicalPath\)/)
   assert.doesNotMatch(contribution, /this\.catalog\.render\(\)/,
     'a Host-global catalog would leak other Session Workspaces')
+  // A delegated Session is never bridged, so routing by bridge alone left
+  // every sub-agent with no catalog at all — while its tools resolved fine by
+  // cwd. The fallback matches that cwd against Workspaces already derived
+  // from a live Session; it never resolves one of its own, so a directory
+  // matching none of them still says nothing.
+  assert.match(contribution, /item\.canonicalPath === session\.header\.cwd/,
+    'a delegated Session works in a directory and deserves that catalog')
+  assert.doesNotMatch(contribution, /workspaceRegistry/,
+    'the contribution must not resolve a Workspace this Host has not derived')
 
   const teardown = host.slice(
     host.indexOf('private stopSessionBridge('),

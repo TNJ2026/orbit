@@ -138,10 +138,22 @@ export class OrbitRemoteService extends TypertRemoteService {
       // tools above can be pointed at.
       order: 190,
       text: context => {
-        const sessionId = context.agent === undefined
-          ? undefined : String(context.agent.session.id)
-        const workspace = sessionId === undefined
-          ? undefined : this.bridgedWorkspaces.get(sessionId)
+        const session = context.agent?.session
+        if (session === undefined) return ''
+        // A delegated Session is never bridged — `sessionCanBridge` requires
+        // depth 0 — but it works in the same directory, calls the same tools,
+        // and `route` already resolves those by its cwd. Only the prompt went
+        // quiet, so a sub-agent had to discover Orbit by calling something
+        // first: the exact cost this contribution exists to remove.
+        //
+        // Matched against Workspaces this Host has already derived from a live
+        // Session, never resolved afresh here. A directory that matches none of
+        // them says nothing, which is the answer it had before.
+        const workspace = this.bridgedWorkspaces.get(String(session.id))
+          ?? (session.header.cwd === undefined ? undefined
+            : [...this.bridgedWorkspaces.values()].find(
+              item => item.canonicalPath === session.header.cwd,
+            ))
         if (workspace === undefined) return ''
         if (this.catalog.stale(workspace.canonicalPath)) this.refreshCatalog(workspace)
         return this.catalog.render(workspace.canonicalPath)
@@ -219,7 +231,7 @@ export class OrbitRemoteService extends TypertRemoteService {
     sessionId: string, outputHref: string, after: number, signal: AbortSignal,
   ): Promise<AuthoringOutputPage> {
     signal.throwIfAborted()
-    const scope = await this.sessionWorkspace(sessionId)
+    const scope = await this.sessionWorkspace(sessionId, true)
     return await this.gateway.authoringOutput(scope, sessionId, outputHref, after)
   }
 
@@ -410,8 +422,23 @@ export class OrbitRemoteService extends TypertRemoteService {
   private async sessionWorkspace(
     sessionId: string, allowPersisted = false,
   ): Promise<WorkspaceRef> {
+    return (await this.sessionScope(sessionId, allowPersisted)).scope
+  }
+
+  /**
+   * The Workspace of a Session, and whether the Session was actually there.
+   *
+   * The second half matters to one caller: what may be read from the durable
+   * registry during the window before a persisted conversation enters its Host
+   * Session is a projection, and a projection does not start processes. The
+   * panel asks for both so it can decline to launch a Runtime for a Workspace
+   * no live Session vouched for.
+   */
+  private async sessionScope(
+    sessionId: string, allowPersisted = false,
+  ): Promise<{ scope: WorkspaceRef; live: boolean }> {
     const live = this.hostSessions.list().find(item => String(item.id) === sessionId)
-    if (live) return await this.workspaceForSession(live)
+    if (live) return { scope: await this.workspaceForSession(live), live: true }
     if (allowPersisted) {
       // Since Harness rc.6, opening a persisted conversation in the browser
       // doesn't necessarily enter its Host Session until an Agent turn needs
@@ -423,7 +450,10 @@ export class OrbitRemoteService extends TypertRemoteService {
         workspace.sessionIds.some(id => String(id) === sessionId),
       )
       if (matches.length === 1) {
-        return { id: String(matches[0].id), canonicalPath: matches[0].path }
+        return {
+          scope: { id: String(matches[0].id), canonicalPath: matches[0].path },
+          live: false,
+        }
       }
       if (matches.length > 1) {
         // An inconsistent durable index grants no authority. Keep the same
@@ -679,8 +709,13 @@ export class OrbitRemoteService extends TypertRemoteService {
     steps: Record<string, StepSummary[]>
   }> {
     signal.throwIfAborted()
-    const scope = await this.sessionWorkspace(sessionId, true)
-    const release = await this.gateway.acquire(scope, startIfMissing)
+    const { scope, live } = await this.sessionScope(sessionId, true)
+    // Starting a Runtime is not a projection. `startIfMissing` is the panel
+    // being opened deliberately, and only a live Session is evidence that
+    // somebody did: during the persisted window the Workspace comes from the
+    // durable registry, and launching a process for it would be this Host
+    // acting on a claim nobody made this turn.
+    const release = await this.gateway.acquire(scope, startIfMissing && live)
     try {
       // The panel is a view of the Workspace, not of one chat: a Run started in
       // Orbit's own UI is the same Run, and a History that hid it would sit
@@ -865,7 +900,7 @@ export class OrbitRemoteService extends TypertRemoteService {
     steps: StepSummary[]
   }> {
     signal.throwIfAborted()
-    const scope = await this.sessionWorkspace(sessionId)
+    const scope = await this.sessionWorkspace(sessionId, true)
     const release = await this.gateway.acquire(scope)
     try {
       return await this.gateway.call(scope, sessionId, 'get_run_steps', {
@@ -883,14 +918,14 @@ export class OrbitRemoteService extends TypertRemoteService {
   @Remote('getWorkflowDefinition')
   async getWorkflowDefinition(
     sessionId: string, workflowId: string, signal: AbortSignal,
-  ): Promise<{ nodes: WorkflowNode[] }> {
+  ): Promise<{ nodes: WorkflowNode[]; graph?: WorkflowGraph }> {
     signal.throwIfAborted()
-    const scope = await this.sessionWorkspace(sessionId)
+    const scope = await this.sessionWorkspace(sessionId, true)
     const release = await this.gateway.acquire(scope)
     try {
       return await this.gateway.call(scope, sessionId, 'get_workflow_definition', {
         workflow_id: workflowId,
-      }) as { nodes: WorkflowNode[] }
+      }) as { nodes: WorkflowNode[]; graph?: WorkflowGraph }
     } finally { await release() }
   }
 
@@ -899,7 +934,7 @@ export class OrbitRemoteService extends TypertRemoteService {
     sessionId: string, runId: string, nodeId: string, after: number, signal: AbortSignal,
   ): Promise<OutputPage> {
     signal.throwIfAborted()
-    const scope = await this.sessionWorkspace(sessionId)
+    const scope = await this.sessionWorkspace(sessionId, true)
     const release = await this.gateway.acquire(scope)
     try {
       return await this.gateway.call(scope, sessionId, 'read_run_output', {
@@ -1179,7 +1214,7 @@ export class OrbitRemoteService extends TypertRemoteService {
     sessionId: string, artifactId: string, signal: AbortSignal,
   ): Promise<{ contentType: string; sizeBytes: number; text: string | null }> {
     signal.throwIfAborted()
-    const scope = await this.sessionWorkspace(sessionId)
+    const scope = await this.sessionWorkspace(sessionId, true)
     const meta = await this.gateway.call(
       scope, sessionId, 'read_artifact', { artifact_id: artifactId },
     ) as ArtifactSummary
