@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 import hashlib
 import json
@@ -11,12 +11,21 @@ import re
 from pathlib import Path
 import threading
 import uuid
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from .workflow.dsl.schema import ID_PATTERN
 
 
 DEFAULT_GLOBAL_ROOT = Path.home() / ".orbit" / "global"
+# How long a receipt can still be replayed.
+#
+# A receipt makes a *retry* idempotent, and a retry belongs to the request it
+# repeats: a client that never saw a response tries again in seconds, or gives
+# up. Days later the same key is not a retry, it is a new request that happens
+# to reuse a string. Kept generously long against clock skew and a client that
+# queues offline work, and finite because nothing else here ever shrinks —
+# every write added a row and none was ever removed.
+RECEIPT_RETENTION = timedelta(days=7)
 _PROCESS_LOCKS: dict[str, threading.RLock] = {}
 _PROCESS_LOCKS_GUARD = threading.Lock()
 
@@ -112,8 +121,11 @@ class WorkflowTemplateStorageError(WorkflowTemplateError):
 class WorkflowTemplateStore:
     """Durable reusable DSL sources; publication remains a Runtime operation."""
 
-    def __init__(self, path: Path | str | None = None) -> None:
+    def __init__(
+        self, path: Path | str | None = None, *, clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self.path = Path(path or DEFAULT_GLOBAL_ROOT / "workflow-templates.json").expanduser()
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     def list(self) -> list[dict[str, Any]]:
         with _file_lock(self.path, shared=True):
@@ -161,7 +173,7 @@ class WorkflowTemplateStore:
             "name": name.strip(), "source": source,
             "source_format": source_format, "expected_version": expected_version,
         }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        now = datetime.now(timezone.utc).isoformat()
+        now = self._stamp()
         with _file_lock(self.path):
             values, receipts = self._read_state_unlocked()
             if idempotency_key:
@@ -190,9 +202,9 @@ class WorkflowTemplateStore:
             if idempotency_key:
                 receipts[idempotency_key] = {
                     "operation": "create", "request_hash": request_hash,
-                    "result": item,
+                    "result": item, "at": now,
                 }
-            self._write(values, receipts)
+            self._write(values, self._within_retention(receipts))
         return dict(item)
 
     def delete(
@@ -244,11 +256,39 @@ class WorkflowTemplateStore:
             if idempotency_key:
                 receipts[idempotency_key] = {
                     "operation": "delete", "request_hash": request_hash,
-                    "result": existed,
+                    "result": existed, "at": self._stamp(),
                 }
             if existed or idempotency_key:
-                self._write(values, receipts)
+                self._write(values, self._within_retention(receipts))
             return existed
+
+    def _stamp(self) -> str:
+        return self.clock().astimezone(timezone.utc).isoformat()
+
+    def _within_retention(
+        self, receipts: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        """The receipts still worth replaying, swept as the file is rewritten.
+
+        Here rather than on a timer because this is the only moment the whole
+        document is already in hand under the lock that owns it: a sweep costs
+        nothing extra, and a catalog nobody writes to is a catalog that is not
+        growing either.
+
+        A receipt from before this had a date is stamped now rather than
+        dropped — it may still be somebody's retry — so the first write after
+        an upgrade starts every old row's clock instead of ending it.
+        """
+
+        cutoff = (self.clock().astimezone(timezone.utc) - RECEIPT_RETENTION).isoformat()
+        kept: dict[str, dict[str, Any]] = {}
+        for key, receipt in receipts.items():
+            at = receipt.get("at")
+            if not isinstance(at, str):
+                kept[key] = {**receipt, "at": self._stamp()}
+            elif at > cutoff:
+                kept[key] = receipt
+        return kept
 
     def _read_state_unlocked(self) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
         try:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,12 @@ from orbit.global_control import (
     WorkflowTemplateError, WorkflowTemplateStorageError, WorkflowTemplateStore,
 )
 
+
+SOURCE_OTHER = json.dumps({
+    "dsl_version": "1.0",
+    "metadata": {"id": "other", "name": "Other"},
+    "nodes": [], "edges": [],
+})
 
 SOURCE = json.dumps({
     "dsl_version": "1.0",
@@ -101,6 +108,61 @@ class WorkflowTemplateStoreTests(unittest.TestCase):
             fresh = store.put(name="Shared", source=SOURCE, idempotency_key="create-2")
             self.assertNotEqual(created["template_id"], fresh["template_id"])
             self.assertEqual(1, len(store.list()))
+
+    def test_receipts_do_not_outlive_the_retry_they_exist_for(self) -> None:
+        """Nothing here ever shrank: every write added a row and none left.
+
+        A receipt makes a *retry* idempotent, and a retry belongs to the
+        request it repeats. Days later the same key is a new request that
+        happens to reuse a string, so keeping it forever only grows the file.
+        """
+
+        moment = [datetime(2026, 1, 1, tzinfo=timezone.utc)]
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "templates.json"
+            store = WorkflowTemplateStore(path, clock=lambda: moment[0])
+            created = store.put(name="Shared", source=SOURCE, idempotency_key="k1")
+
+            # Inside the window the key is still that request's.
+            moment[0] += timedelta(days=6)
+            self.assertEqual(
+                created["template_id"],
+                store.put(name="Shared", source=SOURCE, idempotency_key="k1")["template_id"],
+            )
+
+            # Past it, the next write sweeps it and the key is free again.
+            moment[0] += timedelta(days=8)
+            store.put(name="Other", source=SOURCE_OTHER, idempotency_key="k2")
+            held = json.loads(path.read_text(encoding="utf-8"))["receipts"]
+            self.assertEqual(["k2"], sorted(held))
+            self.assertNotEqual(
+                created["template_id"],
+                store.put(name="Shared", source=SOURCE, idempotency_key="k1")["template_id"],
+            )
+
+    def test_a_receipt_written_before_dates_existed_starts_its_clock(self) -> None:
+        """An upgrade must not expire everybody's in-flight retry at once."""
+
+        moment = [datetime(2026, 1, 1, tzinfo=timezone.utc)]
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "templates.json"
+            path.write_text(json.dumps({
+                "schema_version": 1, "templates": {},
+                "receipts": {"old": {"operation": "create", "request_hash": "sha256:x"}},
+            }), encoding="utf-8")
+            store = WorkflowTemplateStore(path, clock=lambda: moment[0])
+
+            store.put(name="Shared", source=SOURCE, idempotency_key="k1")
+            held = json.loads(path.read_text(encoding="utf-8"))["receipts"]
+            self.assertIn("old", held, "an undated receipt may still be a retry")
+            self.assertIn("at", held["old"])
+
+            # Stamped now, so it leaves one window later rather than never.
+            moment[0] += timedelta(days=8)
+            store.put(name="Other", source=SOURCE_OTHER, idempotency_key="k2")
+            self.assertNotIn(
+                "old", json.loads(path.read_text(encoding="utf-8"))["receipts"],
+            )
 
     def test_an_already_prefixed_id_is_refused_rather_than_stored(self) -> None:
         """A template nobody can instantiate is worse than a rejected write.
