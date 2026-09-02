@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -38,6 +40,67 @@ class WorkspaceRegistryTests(unittest.TestCase):
             self.assertEqual(project_id(workspace), identifier)
             self.assertEqual(workspace.resolve(), resolved)
             self.assertEqual(workspace.resolve(), WorkspaceRegistry(registry.path).resolve(identifier))
+
+    def test_a_registration_can_be_taken_back(self) -> None:
+        """Registering made a directory routable; nothing was ever the reverse.
+
+        So a directory opened once stayed in the list for good, and a suite
+        that opens a throwaway directory per run added one every time.
+        """
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = root / "project"
+            workspace.mkdir()
+            registry = WorkspaceRegistry(root / "workspaces.json")
+            identifier, _ = registry.register(workspace)
+
+            self.assertTrue(registry.forget(identifier))
+            self.assertNotIn(
+                identifier,
+                {item["workspace_id"] for item in registry.list()},
+            )
+            self.assertTrue(workspace.is_dir(), "forgetting is not deleting")
+            self.assertFalse(registry.forget(identifier), "and it is idempotent")
+
+    def test_prune_takes_only_what_is_gone_and_unserved(self) -> None:
+        """Offline is not the same as gone, and a live Runtime outranks a stat."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            registry = WorkspaceRegistry(root / "workspaces.json")
+            kept, removed, served = (root / name for name in ("kept", "removed", "served"))
+            for directory in (kept, removed, served):
+                directory.mkdir()
+            ids = {
+                name: registry.register(directory)[0]
+                for name, directory in (
+                    ("kept", kept), ("removed", removed), ("served", served),
+                )
+            }
+            shutil.rmtree(removed)
+            shutil.rmtree(served)
+
+            forgotten = registry.prune(live={ids["served"]})
+
+            self.assertEqual([ids["removed"]], forgotten)
+            remaining = {item["workspace_id"] for item in registry.list()}
+            self.assertIn(ids["kept"], remaining, "offline is not gone")
+            self.assertIn(ids["served"], remaining, "a Runtime answers for it")
+            self.assertNotIn(ids["removed"], remaining)
+
+    def test_the_registry_can_be_pointed_somewhere_else(self) -> None:
+        """Registering runs through the CLI, so only an env var can redirect it.
+
+        Without that a test suite writes its throwaway directories into the
+        developer's own registry, which is how twenty-four of them got there.
+        """
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with mock.patch.dict(os.environ, {"ORBIT_HUB_ROOT": str(root)}):
+                self.assertEqual(root / "workspaces.json", WorkspaceRegistry().path)
+            self.assertNotEqual(root / "workspaces.json", WorkspaceRegistry().path)
 
     def test_default_workspace_is_created_on_first_resolution(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

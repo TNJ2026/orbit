@@ -40,11 +40,22 @@ async function stop(child) {
 
 test('Harness reaches its workspace Runtime through the fixed Hub', { timeout: 30_000 }, async t => {
   const root = await mkdtemp(join(tmpdir(), 'orbit-independent-e2e-'))
-  const previousRuntimeRoot = process.env.ORBIT_RUNTIME_ROOT
-  process.env.ORBIT_RUNTIME_ROOT = root
+  // Both roots, not just the discovery one. Acquiring a Workspace runs
+  // `orbit hub register`, which writes the machine-wide workspace registry —
+  // so without this every run of this test left its throwaway directory in the
+  // developer's real one, and nothing ever took it out. Redirecting beats
+  // deregistering in teardown: a run that dies half way leaves nothing behind
+  // either.
+  const overrides = { ORBIT_RUNTIME_ROOT: root, ORBIT_HUB_ROOT: join(root, 'hub') }
+  const previous = Object.fromEntries(
+    Object.keys(overrides).map(name => [name, process.env[name]]),
+  )
+  Object.assign(process.env, overrides)
   t.after(() => {
-    if (previousRuntimeRoot === undefined) delete process.env.ORBIT_RUNTIME_ROOT
-    else process.env.ORBIT_RUNTIME_ROOT = previousRuntimeRoot
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
   })
   const workspacePath = join(root, 'workspace')
   await mkdir(workspacePath)

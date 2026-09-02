@@ -884,6 +884,15 @@ def build_parser() -> argparse.ArgumentParser:
     hub_serve.add_argument("--port", type=int, default=8848)
     hub_register = hub_sub.add_parser("register", help="Register a workspace and print its URLs")
     hub_register.add_argument("workspace")
+    hub_forget = hub_sub.add_parser(
+        "forget",
+        help="Drop one workspace registration; the directory and any Runtime stay",
+    )
+    hub_forget.add_argument("workspace", help="Workspace id or path")
+    hub_sub.add_parser(
+        "prune",
+        help="Forget registrations whose directory is gone and which serve no Runtime",
+    )
 
     agent_app_cmd = sub.add_parser(
         "agent-app", help="Host a manifest-declared local Agent App",
@@ -1050,11 +1059,37 @@ def main() -> None:
         return
 
     if args.command == "hub":
-        from .hub import WorkspaceRegistry, create_hub_app, workspace_urls
+        from .hub import (
+            WorkspaceRegistry, WorkspaceRuntimeManager, create_hub_app, workspace_urls,
+        )
+        from .platform.projects import project_id, resolve_project_root
 
+        registry = WorkspaceRegistry()
         if args.hub_action == "register":
-            identifier, _ = WorkspaceRegistry().register(args.workspace)
+            identifier, _ = registry.register(args.workspace)
             print(json.dumps(workspace_urls(identifier), sort_keys=True))
+            return
+        if args.hub_action == "forget":
+            # By id or by path, because the caller that most wants to undo a
+            # registration is the one that made it, and it made it by path.
+            candidate = args.workspace
+            if candidate not in {item["workspace_id"] for item in registry.list()}:
+                candidate = project_id(resolve_project_root(
+                    Path(args.workspace).expanduser().resolve()
+                ))
+            print(json.dumps(
+                {"workspace_id": candidate, "forgotten": registry.forget(candidate)},
+                sort_keys=True,
+            ))
+            return
+        if args.hub_action == "prune":
+            # A Runtime answering for a directory outranks a `stat` of it.
+            manager = WorkspaceRuntimeManager(registry=registry)
+            live = {
+                item["workspace_id"] for item in registry.list()
+                if manager.serving(item["path"])
+            }
+            print(json.dumps({"forgotten": registry.prune(live=live)}, sort_keys=True))
             return
         from .global_control import WorkflowTemplateStore
 

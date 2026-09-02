@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 import uuid
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Container, Iterable, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request as UrlRequest, urlopen
@@ -36,7 +36,20 @@ from .web.mcp import (
 from .web.mcp_app import ORBIT_DASHBOARD_MIME_TYPE, ORBIT_MCP_APP_RESOURCES
 
 
-DEFAULT_HUB_ROOT = Path.home() / ".orbit" / "hub"
+def default_hub_root() -> Path:
+    """Where the Hub keeps the workspace registry and its Runtime logs.
+
+    Overridable, and read on each call rather than at import, because the
+    thing that most needs to move it is a test: registering a workspace goes
+    through the `orbit` CLI, so a suite that cannot redirect this writes its
+    throwaway directories into the developer's real registry and leaves them
+    there. Every e2e run added one, and none was ever removed.
+    """
+
+    configured = os.environ.get("ORBIT_HUB_ROOT")
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / ".orbit" / "hub"
 
 
 class HubError(RuntimeError):
@@ -49,7 +62,7 @@ class MultipleRuntimesError(HubError):
 
 class WorkspaceRegistry:
     def __init__(self, path: Path | str | None = None) -> None:
-        self.path = Path(path or DEFAULT_HUB_ROOT / "workspaces.json").expanduser()
+        self.path = Path(path or default_hub_root() / "workspaces.json").expanduser()
         self._lock = threading.Lock()
 
     def register(
@@ -65,14 +78,17 @@ class WorkspaceRegistry:
         with self._lock:
             entries = self._read()
             entries[identifier] = str(root)
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.path.with_suffix(f".{os.getpid()}.tmp")
-            temporary.write_text(
-                json.dumps({"workspaces": entries}, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
-            temporary.replace(self.path)
+            self._save(entries)
         return identifier, root
+
+    def _save(self, entries: dict[str, str]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_suffix(f".{os.getpid()}.tmp")
+        temporary.write_text(
+            json.dumps({"workspaces": entries}, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(self.path)
 
     def resolve(self, identifier: str | None) -> Path:
         if identifier is None or identifier == "default":
@@ -114,6 +130,48 @@ class WorkspaceRegistry:
             }
             for identifier, value in sorted(entries.items(), key=lambda item: item[1])
         ]
+
+    def forget(self, identifier: str) -> bool:
+        """Drop one registration. The Workspace and its Runtime are untouched.
+
+        Registering is how a Workspace becomes routable; nothing was ever the
+        reverse of it, so a directory that was opened once stayed in the list
+        for good — and a test suite that opens a throwaway directory per run
+        added one every time.
+        """
+
+        with self._lock:
+            entries = self._read()
+            if identifier not in entries:
+                return False
+            del entries[identifier]
+            self._save(entries)
+        return True
+
+    def prune(self, *, live: Container[str] = ()) -> list[str]:
+        """Forget the registrations whose directory is no longer there.
+
+        Only those. An entry that is merely offline is a Workspace nobody has
+        opened lately, which is not the same as one that is gone, and dropping
+        it would lose a routing id somebody may still hold. `live` names the
+        Workspaces a Runtime is currently serving; those are spared whatever
+        the filesystem says, because a Runtime answering for a directory is
+        better evidence than a `stat` of it.
+        """
+
+        with self._lock:
+            entries = self._read()
+            doomed = [
+                identifier for identifier, value in entries.items()
+                if identifier not in live
+                and not Path(value).expanduser().is_dir()
+            ]
+            if not doomed:
+                return []
+            for identifier in doomed:
+                del entries[identifier]
+            self._save(entries)
+        return sorted(doomed)
 
     def select(self, *, workspace_id: str | None = None, path: str | None = None, name: str | None = None) -> str:
         if path:
@@ -169,7 +227,7 @@ class WorkspaceRuntimeManager:
         self.timeout_seconds = timeout_seconds
         self.clock = clock
         self.sleep = sleep
-        self.log_root = Path(log_root or DEFAULT_HUB_ROOT / "runtimes").expanduser()
+        self.log_root = Path(log_root or default_hub_root() / "runtimes").expanduser()
         self._locks: dict[str, threading.Lock] = {}
         self._guard = threading.Lock()
 
@@ -227,6 +285,17 @@ class WorkspaceRuntimeManager:
     def find_live(self, identifier: str) -> str | None:
         """Return an already-live Runtime without starting an offline Workspace."""
         return self._find(self.registry.resolve(identifier))
+
+    def serving(self, workspace: Path | str) -> str | None:
+        """A live Runtime for this directory, asked without resolving a registration.
+
+        `find_live` goes through `resolve`, which refuses a Workspace whose
+        directory is gone — and that is exactly the entry a prune has to ask
+        about, since a Runtime may still be serving a directory somebody
+        deleted underneath it.
+        """
+
+        return self._find(Path(workspace).expanduser())
 
     def _launch(self, workspace: Path) -> subprocess.Popen:
         identifier = project_id(workspace)
