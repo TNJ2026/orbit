@@ -51,7 +51,9 @@ class RestartOrbitScriptTests(unittest.TestCase):
         uv.chmod(0o755)
         (root / "runtimes.json").write_text(json.dumps(listed), encoding="utf-8")
 
-        # `ps -p N -o command=` answers from a table the test wrote.
+        # `ps -p N -o lstart=,command=` answers from a table the test wrote.
+        # After `ORBIT_TEST_PS_SWITCH` calls it answers from the second table,
+        # which is how a PID reused mid-run is modelled.
         ps_script = bin_dir / "ps"
         ps_script.write_text(
             "#!/bin/sh\n"
@@ -59,14 +61,24 @@ class RestartOrbitScriptTests(unittest.TestCase):
             '  case "$1" in -p) shift; pid="$1";; esac\n'
             "  shift\n"
             "done\n"
-            'grep "^$pid " "$ORBIT_TEST_PS" | cut -d" " -f2- || true\n',
+            'calls=$(cat "$ORBIT_TEST_PS_CALLS" 2>/dev/null || echo 0)\n'
+            'echo $((calls + 1)) > "$ORBIT_TEST_PS_CALLS"\n'
+            'table="$ORBIT_TEST_PS"\n'
+            'if [ -n "${ORBIT_TEST_PS_SWITCH:-}" ] '
+            '&& [ "$calls" -ge "$ORBIT_TEST_PS_SWITCH" ]; then\n'
+            '  table="$ORBIT_TEST_PS_AFTER"\n'
+            "fi\n"
+            'grep "^$pid " "$table" | cut -d" " -f2- || true\n',
             encoding="utf-8",
         )
         ps_script.chmod(0o755)
-        (root / "ps.txt").write_text(
-            "".join(f"{pid} {command}\n" for pid, command in ps_answers.items()),
-            encoding="utf-8",
-        )
+        self.write_ps_table(root / "ps.txt", ps_answers)
+        self.write_ps_table(root / "ps-after.txt", ps_answers)
+
+        # The start half is somebody else's; a stub keeps `exec` from failing.
+        start = root / "scripts" / "start-orbit.sh"
+        start.write_text("#!/bin/sh\necho started\n", encoding="utf-8")
+        start.chmod(0o755)
 
         lsof = bin_dir / "lsof"
         lsof.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
@@ -78,7 +90,21 @@ class RestartOrbitScriptTests(unittest.TestCase):
             "AGENT_APP_STATE_DIR": str(root / "state"),
             "ORBIT_TEST_RUNTIMES": str(root / "runtimes.json"),
             "ORBIT_TEST_PS": str(root / "ps.txt"),
+            "ORBIT_TEST_PS_AFTER": str(root / "ps-after.txt"),
+            "ORBIT_TEST_PS_CALLS": str(root / "ps-calls.txt"),
         }
+
+    @staticmethod
+    def write_ps_table(path: Path, answers) -> None:
+        """`lstart` then `command`, the two fields the script asks `ps` for."""
+
+        path.write_text(
+            "".join(
+                f"{pid} Wed Sep  2 09:00:00 2026 {command}\n"
+                for pid, command in answers.items()
+            ),
+            encoding="utf-8",
+        )
 
     def run_dry(self, environment, root: Path):
         return subprocess.run(
@@ -129,6 +155,67 @@ class RestartOrbitScriptTests(unittest.TestCase):
 
             self.assertEqual(3, len(lines), lines)
             self.assertIn("Orbit Hub", lines[0])
+
+    def test_a_pid_reused_during_the_wait_is_not_killed(self) -> None:
+        """The gap between the check and the signal is up to 45 seconds long.
+
+        A graceful stop can finish in that gap and the OS can hand the number
+        straight to something else. Checking only that *a* process still exists
+        before SIGKILL is how a restart script destroys an unrelated program,
+        and a start time is what tells the two apart.
+        """
+
+        # A real process standing in for whoever got the number next, so an
+        # existence check passes and only the identity check can save it.
+        bystander = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(bystander.kill)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            environment = self.environment(
+                root, listed=[], recorded=bystander.pid,
+                ps_answers={bystander.pid: "python -m orbit hub serve"},
+            )
+            # One `ps` call discovers it; every later call sees a stranger.
+            self.write_ps_table(
+                root / "ps-after.txt",
+                {bystander.pid: "/usr/bin/postgres -D /var/lib/pg"},
+            )
+            environment["ORBIT_TEST_PS_SWITCH"] = "1"
+
+            result = subprocess.run(
+                ["bash", str(root / "restart-orbit.sh")], cwd=root, env=environment,
+                text=True, capture_output=True, check=False,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn(f"Stopping Orbit Hub (PID {bystander.pid})", result.stdout)
+            self.assertIn("no longer the Orbit Hub", result.stderr)
+            self.assertNotIn("Force stopping", result.stdout)
+            self.assertIn("started", result.stdout)
+            self.assertIsNone(
+                bystander.poll(), "the process that inherited the PID was signalled",
+            )
+
+    def test_a_process_that_stops_cleanly_is_not_forced(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            environment = self.environment(
+                root, listed=[], recorded=7002,
+                ps_answers={7002: "python -m orbit hub serve"},
+            )
+            # Gone after discovery: `ps` answers nothing for it.
+            self.write_ps_table(root / "ps-after.txt", {})
+            environment["ORBIT_TEST_PS_SWITCH"] = "1"
+
+            result = subprocess.run(
+                ["bash", str(root / "restart-orbit.sh")], cwd=root, env=environment,
+                text=True, capture_output=True, check=False,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertNotIn("Force stopping", result.stdout)
+            self.assertNotIn("no longer", result.stderr)
 
     def test_compact_json_is_read_as_a_document_not_scraped(self) -> None:
         """A pattern expecting one field per line finds nothing when it is not."""

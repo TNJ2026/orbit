@@ -55,14 +55,23 @@ from urllib.parse import urlparse
 runtimes_path, state_root, manifest_path = (Path(part) for part in sys.argv[1:4])
 
 
-def command_of(pid: int) -> str:
+def identity_of(pid: int) -> str:
+    """What this PID is right now: when it started, and what it is running.
+
+    Start time as well as the command, because a PID is not an identity. The
+    OS reuses them, and a restart waits up to 45 seconds for graceful exits —
+    long enough for one to come back as something else between the check and
+    the signal. The shell re-reads this exact string before it signals.
+    """
+
     try:
-        return subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="],
+        answer = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart=,command="],
             capture_output=True, text=True, check=False,
-        ).stdout.strip()
+        ).stdout
     except OSError:
         return ""
+    return " ".join(answer.split())
 
 
 candidates: list[tuple[int, str, str]] = []
@@ -117,17 +126,38 @@ for pid, label, expected in candidates:
     if pid <= 1 or pid in seen:
         continue
     seen.add(pid)
-    command = command_of(pid)
-    if not command:
+    identity = identity_of(pid)
+    if not identity:
         continue          # Already gone; nothing to stop and nothing to warn about.
-    if expected not in command:
+    if expected not in identity:
         print(
-            f"skipping PID {pid}: recorded as {label} but now runs {command}",
+            f"skipping PID {pid}: recorded as {label} but now runs {identity}",
             file=sys.stderr,
         )
         continue
-    print(f"{pid}\t{label}")
+    print(f"{pid}\t{label}\t{identity}")
 PYTHON
+
+# The same string the discovery recorded, read again. Anything that has become
+# something else — or gone and come back as something else — is not ours to
+# signal, and a PID that no longer answers at all is already stopped.
+identity_now() {
+  ps -p "$1" -o lstart=,command= 2>/dev/null | tr -s '[:space:]' ' ' \
+    | sed -e 's/^ //' -e 's/ $//'
+}
+
+signal_if_unchanged() {
+  pid="$1"; identity="$2"; signal="$3"; label="$4"
+  now="$(identity_now "$pid")"
+  if [ -z "$now" ]; then
+    return 0
+  fi
+  if [ "$now" != "$identity" ]; then
+    echo "PID $pid is no longer the $label this run found; leaving it alone." >&2
+    return 0
+  fi
+  kill -"$signal" "$pid" 2>/dev/null || true
+}
 
 if [ ! -s "$pids" ]; then
   echo "Nothing of Orbit's is running."
@@ -137,14 +167,14 @@ else
   # is still stopping the old ones. The separator is explicit: the default
   # splits on blanks, so `-k2,2` would compare the word "Orbit" on every line
   # and fall back to sorting by PID.
-  while IFS=$'\t' read -r pid label; do
+  while IFS=$'\t' read -r pid label identity; do
     [ -n "$pid" ] || continue
     if [ "$DRY_RUN" -eq 1 ]; then
       echo "Would stop $label (PID $pid)."
       continue
     fi
     echo "Stopping $label (PID $pid)..."
-    kill -TERM "$pid" 2>/dev/null || true
+    signal_if_unchanged "$pid" "$identity" TERM "$label"
   done < <(sort -t"$(printf '\t')" -k2,2 "$pids")
 fi
 
@@ -159,19 +189,20 @@ fi
 deadline=$((SECONDS + 45))
 while [ "$SECONDS" -lt "$deadline" ]; do
   alive=0
-  while IFS=$'\t' read -r pid _label; do
+  while IFS=$'\t' read -r pid _label identity; do
     [ -n "$pid" ] || continue
-    if kill -0 "$pid" 2>/dev/null; then alive=1; break; fi
+    # Still ours, not merely still a PID: one that came back as something else
+    # is not something to wait for.
+    if [ "$(identity_now "$pid")" = "$identity" ]; then alive=1; break; fi
   done <"$pids"
   [ "$alive" -eq 0 ] && break
   sleep 1
 done
-while IFS=$'\t' read -r pid label; do
+while IFS=$'\t' read -r pid label identity; do
   [ -n "$pid" ] || continue
-  if kill -0 "$pid" 2>/dev/null; then
-    echo "Force stopping $label (PID $pid)..."
-    kill -KILL "$pid" 2>/dev/null || true
-  fi
+  [ "$(identity_now "$pid")" = "$identity" ] || continue
+  echo "Force stopping $label (PID $pid)..."
+  signal_if_unchanged "$pid" "$identity" KILL "$label"
 done <"$pids"
 
 echo "Starting Orbit through the Agent App host..."
