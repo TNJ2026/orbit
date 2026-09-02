@@ -69,6 +69,39 @@ class WorkflowTemplateStoreTests(unittest.TestCase):
                 item["template_id"], expected_version=1, idempotency_key="delete-1",
             ))
 
+    def test_retrying_the_create_of_a_deleted_template_does_not_revive_it(self) -> None:
+        """A key with no receipt is a key that was never used.
+
+        Dropping the create receipt outright freed the idempotency key, so the
+        client that never saw the first response — a timeout, a dropped
+        connection — retried its create and was handed a new template_id, which
+        put the deletion straight back. The receipt has to stay; what it must
+        not keep is the source.
+        """
+
+        with tempfile.TemporaryDirectory() as root:
+            store = WorkflowTemplateStore(Path(root) / "templates.json")
+            created = store.put(
+                name="Shared", source=SOURCE, idempotency_key="create-1",
+            )
+            store.delete(
+                created["template_id"], expected_version=1,
+                idempotency_key="delete-1",
+            )
+
+            replayed = store.put(
+                name="Shared", source=SOURCE, idempotency_key="create-1",
+            )
+
+            self.assertEqual(created["template_id"], replayed["template_id"])
+            self.assertTrue(replayed["deleted"])
+            self.assertNotIn("source", replayed)
+            self.assertEqual([], store.list())
+            # A different key is a different request, and may create again.
+            fresh = store.put(name="Shared", source=SOURCE, idempotency_key="create-2")
+            self.assertNotEqual(created["template_id"], fresh["template_id"])
+            self.assertEqual(1, len(store.list()))
+
     def test_an_already_prefixed_id_is_refused_rather_than_stored(self) -> None:
         """A template nobody can instantiate is worse than a rejected write.
 
