@@ -37,6 +37,7 @@ from ..workflow.api.routes import ApiCommandExecutor
 from .api_v1 import (
     OPS_READ_SCOPE, OPS_WRITE_SCOPE, READ_SCOPE, SENSITIVE_SCOPE, WRITE_SCOPE, Authorizer,
 )
+from ..workflow.application.authoring_job_service import authoring_is_active
 from .run_projection import langgraph_run_dto
 from .mcp_app import (
     ORBIT_AUTHORING_URI, ORBIT_DASHBOARD_MIME_TYPE, ORBIT_DASHBOARD_URI,
@@ -1288,6 +1289,12 @@ def build_mcp_dispatcher(
                 raise ValueError("workflow deletion is not configured")
             workflow_id = workflow_id_argument(arguments)
             expected_version = int(arguments["expected_version"])
+            # The same refusal `/api/v1` has always made. Without it an Agent
+            # could delete a Workflow its own `modify` job was mid-way through,
+            # and the job then died on a retired id — the rare restart-gap the
+            # job service re-checks for, made the ordinary path over this door.
+            if authoring_is_active(db_path, workflow_id):
+                raise ValueError("workflow authoring is still active")
 
             def delete(_body, _actor, _key):
                 workflow_publisher.delete_workflow(

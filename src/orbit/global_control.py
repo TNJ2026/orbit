@@ -220,6 +220,18 @@ class WorkflowTemplateStore:
                         f"actual {item.get('version')}"
                     )
             existed = values.pop(template_id, None) is not None
+            # The create receipt holds the whole item, source text included.
+            # Left behind, a deleted template was still in the file — readable
+            # to anyone with the file, and replayable into a resurrection by
+            # whoever still held that key — while `list` reported it gone.
+            # A receipt for something the catalog no longer has cannot be
+            # replayed into anything true, so it goes with it.
+            for key in [
+                key for key, receipt in receipts.items()
+                if isinstance(receipt.get("result"), Mapping)
+                and receipt["result"].get("template_id") == template_id
+            ]:
+                receipts.pop(key)
             if idempotency_key:
                 receipts[idempotency_key] = {
                     "operation": "delete", "request_hash": request_hash,

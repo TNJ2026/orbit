@@ -38,7 +38,9 @@ from ..domain.serialization import definition_hash
 from ..dsl import DiagnosticError
 from ..persistence.database import connect_workflow_database
 from ..persistence.control import audit
-from ..persistence.workflow_versions import PublishConflictError
+from ..persistence.workflow_versions import (
+    PublishConflictError, workflow_is_archived,
+)
 from .workflows import WorkflowDefinitionService
 
 MAX_SOURCE_BYTES = 256 * 1024
@@ -386,6 +388,7 @@ class WorkflowDraftApplicationService:
         with connect_workflow_database(self.path) as db:
             db.execute("BEGIN IMMEDIATE")
             record = self._owned_active(db, draft_id, actor, expected_revision)
+            self._ensure_workflow_editable(record.workflow_id)
             new_hash = _source_hash(source)
             # An unchanged-from-validated source keeps its verdict; anything
             # else is dirty until the compiler says otherwise.
@@ -418,6 +421,7 @@ class WorkflowDraftApplicationService:
         with connect_workflow_database(self.path) as db:
             db.execute("BEGIN IMMEDIATE")
             record = self._owned_active(db, draft_id, actor, expected_revision)
+            self._ensure_workflow_editable(record.workflow_id)
             try:
                 compiled = self.definitions.validate_workflow(
                     record.source_text, source_name="<draft>",
@@ -459,6 +463,7 @@ class WorkflowDraftApplicationService:
     ) -> tuple[DraftRecord, Mapping[str, Any]]:
         with connect_workflow_database(self.path) as db:
             record = self._owned_active(db, draft_id, actor, expected_revision)
+            self._ensure_workflow_editable(record.workflow_id)
             if self._pending(db, draft_id) is not None:
                 raise DraftRevisionStateError(
                     "the pending Agent revision must be accepted or rejected"
@@ -545,6 +550,7 @@ class WorkflowDraftApplicationService:
         with connect_workflow_database(self.path) as db:
             db.execute("BEGIN IMMEDIATE")
             record = self._owned_active(db, draft_id, actor, expected_revision)
+            self._ensure_workflow_editable(record.workflow_id)
             active = self._active_revision(db, draft_id)
             if active is not None:
                 raise DraftRevisionStateError(
@@ -745,7 +751,8 @@ class WorkflowDraftApplicationService:
     ) -> DraftRecord:
         with connect_workflow_database(self.path) as db:
             db.execute("BEGIN IMMEDIATE")
-            self._owned_active(db, draft_id, actor, expected_revision)
+            record = self._owned_active(db, draft_id, actor, expected_revision)
+            self._ensure_workflow_editable(record.workflow_id)
             candidate = self._pending(db, draft_id)
             if candidate is None:
                 raise DraftRevisionStateError("there is no pending Agent revision")
@@ -1033,7 +1040,6 @@ class WorkflowDraftApplicationService:
         if row is None or row["actor"] != actor:
             raise DraftNotFoundError(f"draft not found: {draft_id}")
         record = _record(row)
-        self._ensure_workflow_editable(record.workflow_id)
         if record.status != "active":
             raise DraftNotFoundError(f"draft is {record.status}: {draft_id}")
         if record.revision != expected_revision:
@@ -1041,14 +1047,17 @@ class WorkflowDraftApplicationService:
         return record
 
     def _ensure_workflow_editable(self, workflow_id: str) -> None:
-        """A retained definition is readable by Runs, never an edit target."""
+        """A retained definition is readable by Runs, never an edit target.
 
-        with connect_workflow_database(self.workflow_path, read_only=True) as db:
-            archived = db.execute(
-                "SELECT 1 FROM archived_workflows WHERE workflow_id=?",
-                (workflow_id,),
-            ).fetchone()
-        if archived is not None:
+        Asked by the operations that carry a draft towards a new published
+        version, and deliberately not by `_owned_active`, which every draft
+        operation goes through. Guarding the shared gate closed the exits too:
+        a draft whose Workflow had been deleted could no longer be discarded or
+        have its revision rejected, so it stayed active forever, and nothing
+        stops a Workflow being deleted while a draft is open on it.
+        """
+
+        if workflow_is_archived(self.workflow_path, workflow_id):
             raise ValueError(f"workflow was deleted: {workflow_id}")
 
     def _finish_publish(

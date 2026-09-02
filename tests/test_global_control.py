@@ -43,6 +43,32 @@ class WorkflowTemplateStoreTests(unittest.TestCase):
             ).put(name="Plain", source=source)
         self.assertEqual("workflow:plain-id", item["workflow_id"])
 
+    def test_deleting_a_template_takes_its_source_with_it(self) -> None:
+        """`list` said it was gone while the file still held every byte.
+
+        The create receipt stores the whole item, source included, so a deleted
+        template stayed readable to anyone with the file — and replayable into
+        a resurrection by whoever still held that idempotency key.
+        """
+
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "templates.json"
+            store = WorkflowTemplateStore(path)
+            item = store.put(name="Shared", source=SOURCE, idempotency_key="create-1")
+            self.assertIn("dsl_version", path.read_text(encoding="utf-8"))
+
+            self.assertTrue(store.delete(
+                item["template_id"], expected_version=1, idempotency_key="delete-1",
+            ))
+
+            self.assertEqual([], store.list())
+            self.assertNotIn("dsl_version", path.read_text(encoding="utf-8"))
+            # The delete stays idempotent: that receipt is about something the
+            # catalog agrees is gone.
+            self.assertTrue(store.delete(
+                item["template_id"], expected_version=1, idempotency_key="delete-1",
+            ))
+
     def test_an_already_prefixed_id_is_refused_rather_than_stored(self) -> None:
         """A template nobody can instantiate is worse than a rejected write.
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import tempfile
 import types
 import unittest
@@ -306,3 +307,44 @@ class EphemeralPortTests(unittest.TestCase):
                 f"{runtime.base_url}/health/ready", timeout=5
             ) as response:
                 self.assertEqual(200, response.status)
+
+
+class ForkHookTests(unittest.TestCase):
+    def test_one_fork_handler_serves_every_owner(self) -> None:
+        """A fork handler cannot be unregistered, so only one may be installed.
+
+        Registering per instance grew CPython's handler list by one entry for
+        every database a process ever owned, each entry a bound method holding
+        its instance and its lock file alive for the life of the process.
+        """
+
+        from orbit.platform import runtime_ownership as module
+
+        registered: list[dict] = []
+        with patch.object(
+            os, "register_at_fork",
+            side_effect=lambda **kwargs: registered.append(kwargs),
+        ), patch.object(module, "_FORK_HOOK_REGISTERED", False):
+            owners = []
+            for _ in range(3):
+                directory = Path(tempfile.mkdtemp())
+                self.addCleanup(shutil.rmtree, directory, True)
+                owners.append(
+                    module.RuntimeOwnership(directory / "runtime.db").acquire()
+                )
+            self.addCleanup(lambda: [owner.release() for owner in owners])
+
+            self.assertEqual(1, len(registered), registered)
+            self.assertEqual(3, len(module._LIVE_OWNERS))
+            # The one handler still reaches every live owner.
+            registered[0]["after_in_child"]()
+            self.assertEqual([None, None, None], [owner._file for owner in owners])
+
+    def test_a_released_owner_is_not_reached_by_the_handler(self) -> None:
+        from orbit.platform import runtime_ownership as module
+
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, True)
+        owner = module.RuntimeOwnership(directory / "runtime.db").acquire()
+        owner.release()
+        self.assertNotIn(owner, module._LIVE_OWNERS)

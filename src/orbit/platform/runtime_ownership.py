@@ -14,11 +14,40 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import threading
 from typing import Iterator, Mapping, TextIO
+import weakref
 
 
 class RuntimeOwnershipError(RuntimeError):
     pass
+
+
+# A fork handler cannot be unregistered, so exactly one is installed for the
+# process and it walks the owners that are still alive. Registering per
+# instance meant a process that owned several databases in turn — or a test
+# suite exercising this class — grew CPython's fork-handler list forever, each
+# entry a bound method keeping its instance and its lock file from ever being
+# collected.
+_LIVE_OWNERS: "weakref.WeakSet[RuntimeOwnership]" = weakref.WeakSet()
+_FORK_HOOK_LOCK = threading.Lock()
+_FORK_HOOK_REGISTERED = False
+
+
+def _drop_inherited_locks() -> None:
+    for owner in list(_LIVE_OWNERS):
+        owner.drop_in_forked_child()
+
+
+def _register_fork_hook() -> None:
+    global _FORK_HOOK_REGISTERED
+    if os.name == "nt" or not hasattr(os, "register_at_fork"):
+        return
+    with _FORK_HOOK_LOCK:
+        if _FORK_HOOK_REGISTERED:
+            return
+        os.register_at_fork(after_in_child=_drop_inherited_locks)
+        _FORK_HOOK_REGISTERED = True
 
 
 class RuntimeOwnership:
@@ -32,7 +61,6 @@ class RuntimeOwnership:
         self.db_path = Path(db_path).expanduser().resolve()
         self.lock_path = self.db_path.with_suffix(self.db_path.suffix + ".owner.lock")
         self._file: TextIO | None = None
-        self._fork_hook_registered = False
 
     def acquire(self) -> "RuntimeOwnership":
         if self._file is not None:
@@ -64,17 +92,12 @@ class RuntimeOwnership:
         # a live lock carrying the dead parent's PID and endpoint forever. In
         # the child close only its duplicate; never call release(), whose
         # LOCK_UN would also unlock the parent's shared open-file description.
-        if (
-            os.name != "nt"
-            and hasattr(os, "register_at_fork")
-            and not self._fork_hook_registered
-        ):
-            os.register_at_fork(after_in_child=self._drop_in_forked_child)
-            self._fork_hook_registered = True
+        _register_fork_hook()
+        _LIVE_OWNERS.add(self)
         self._write({})
         return self
 
-    def _drop_in_forked_child(self) -> None:
+    def drop_in_forked_child(self) -> None:
         handle, self._file = self._file, None
         if handle is not None:
             handle.close()
@@ -105,6 +128,7 @@ class RuntimeOwnership:
         self._write(facts)
 
     def release(self) -> None:
+        _LIVE_OWNERS.discard(self)
         handle, self._file = self._file, None
         if handle is None:
             return

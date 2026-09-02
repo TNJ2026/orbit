@@ -114,6 +114,32 @@ class DraftLifecycleTests(DraftTestCase):
                 expected_revision=draft.revision, actor="author", now=NOW,
             )
 
+    def test_a_deleted_workflow_still_leaves_the_draft_a_way_out(self) -> None:
+        """Refusing the edits must not also refuse the exits.
+
+        The check lived in the gate every draft operation passes through, so
+        deleting a Workflow with a draft open on it closed `discard` and
+        `reject_revision` along with `save` and `publish` — and nothing stops
+        that deletion, so the draft stayed `active` with no way to end it but
+        editing SQLite.
+        """
+
+        draft = self.draft()
+        self.definitions.delete_workflow(
+            "workflow:draftable", expected_latest_version=1,
+        )
+
+        with self.assertRaisesRegex(ValueError, "workflow was deleted"):
+            self.service.publish(
+                EntityId.parse(draft.draft_id),
+                expected_revision=draft.revision, actor="author", now=NOW,
+            )
+        discarded = self.service.discard(
+            EntityId.parse(draft.draft_id),
+            expected_revision=draft.revision, actor="author", now=NOW,
+        )
+        self.assertEqual("discarded", discarded.status)
+
     def test_create_seeds_from_the_published_source_and_resume_returns_it(self) -> None:
         first = self.draft()
         self.assertEqual("active", first.status)

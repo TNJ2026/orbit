@@ -814,6 +814,47 @@ class DiscoveryAndResultTests(ApiTestCase):
             "workflow:reversed", {item["workflow_id"] for item in listed["workflows"]},
         )
 
+    def test_delete_refuses_a_workflow_its_own_authoring_is_still_writing(self) -> None:
+        """`/api/v1` has always refused this; this door went straight through.
+
+        An Agent could delete the Workflow its own `modify` job was part-way
+        into. The job then failed on a retired id — which is the outcome the
+        job service re-checks for as a rare restart-gap, made the ordinary
+        result of using this tool.
+        """
+
+        from datetime import datetime, timedelta, timezone
+
+        from orbit.workflow.persistence.database import connect_workflow_database
+
+        self.publish_reversed_workflow()
+        later = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        with connect_workflow_database(self.db) as connection:
+            connection.execute(
+                "INSERT INTO workflow_authoring_jobs(job_id,job_type,actor,"
+                "workflow_id,prompt,mode,status,idempotency_key,deadline_at,"
+                "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "authoring_job:busy", "modify", "writer", "workflow:reversed",
+                    "make it shorter", "modify", "running", "busy-key", later,
+                    later, later,
+                ),
+            )
+            connection.commit()
+
+        with AsgiHarness(self.app) as client:
+            refused = tool(client, "delete_workflow", {
+                "workflow_id": "workflow:reversed", "expected_version": 1,
+                "idempotency_key": "delete-while-writing",
+            }, actor="writer")
+            listed = payload_of(tool(client, "inspect_workflows", {}, actor="reader"))
+
+        self.assertTrue(refused["result"]["isError"], refused)
+        self.assertIn("authoring is still active", json.dumps(payload_of(refused)))
+        self.assertIn(
+            "workflow:reversed", {item["workflow_id"] for item in listed["workflows"]},
+        )
+
     def test_a_deleted_workflow_still_reads_for_the_runs_that_carry_it(self) -> None:
         """Deleting retires an id; it does not retract the Runs holding it.
 

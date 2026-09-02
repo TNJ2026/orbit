@@ -18,7 +18,9 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from ...workflow.api.dto import envelope, page_size
-from ...workflow.application.authoring_job_service import AuthoringJobConflict
+from ...workflow.application.authoring_job_service import (
+    AuthoringJobConflict, authoring_is_active,
+)
 from ...workflow.domain.ids import EntityId
 from ...workflow.dsl import LANGGRAPH_NODE_KINDS, authoring_json_schema
 from ...workflow.persistence.database import connect_workflow_database
@@ -210,13 +212,7 @@ def build_routes(ctx) -> list[Route]:
         def command(body: Mapping[str, Any], actor: str, key: str):
             from ...workflow.persistence import PublishConflictError
 
-            with connect_workflow_database(ctx.path, read_only=True) as connection:
-                active = connection.execute(
-                    "SELECT 1 FROM workflow_authoring_jobs WHERE workflow_id=?"
-                    " AND status IN ('queued','running') LIMIT 1",
-                    (workflow_id,),
-                ).fetchone()
-            if active is not None:
+            if authoring_is_active(ctx.path, workflow_id):
                 raise ValueError("workflow authoring is still active")
             try:
                 ctx.workflow_publisher.delete_workflow(

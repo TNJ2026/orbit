@@ -452,6 +452,51 @@ class HubGlobalControlTests(unittest.TestCase):
         )
         self.assertEqual("sum_of_workspace_runtime_statistics", payload["semantics"])
 
+    def test_a_malformed_catalog_costs_one_workspace_not_the_endpoint(self) -> None:
+        """The per-Workspace guard has to actually cover what a Runtime can say.
+
+        `{"data": null}` and a null tally raise AttributeError and TypeError,
+        neither of which the guard caught, so one older or half-booted Runtime
+        took the machine-wide statistics down with a 500. And the Workspace was
+        appended "online" before the totals were summed, so a failure mid-way
+        listed it twice, contradicting itself, over half-added numbers.
+        """
+
+        with mock.patch(
+            "orbit.hub._runtime_json", return_value=(200, {"data": None}),
+        ), AsgiHarness(create_hub_app(self.Manager())) as client:
+            response = client.get("/api/v1/global/agent-stats")
+
+        self.assertEqual(200, response.status_code, response.text)
+        payload = response.json()
+        self.assertEqual([], payload["agents"])
+        states = [item["runtime"] for item in payload["workspaces"]]
+        self.assertEqual(len(states), len(payload["workspaces"]))
+        self.assertNotIn("error", states, "a null `data` is an empty catalog")
+
+    def test_a_workspace_that_fails_mid_sum_contributes_nothing(self) -> None:
+        """All of a Workspace's numbers, or none: never half of them."""
+
+        catalog = {"data": {"handlers": [
+            {"name": "agent.codex", "attempt_count": 7, "failed_count": 0},
+            {"name": "agent.claude", "attempt_count": [], "failed_count": 0},
+        ]}}
+        with mock.patch(
+            "orbit.hub._runtime_json", return_value=(200, catalog),
+        ), AsgiHarness(create_hub_app(self.Manager())) as client:
+            response = client.get("/api/v1/global/agent-stats")
+
+        payload = response.json()
+        self.assertEqual(200, response.status_code, response.text)
+        # An unreadable tally is zero, not a refusal and not a partial sum.
+        self.assertEqual(
+            {"agent.claude": 0, "agent.codex": 7},
+            {item["name"]: item["attempt_count"] for item in payload["agents"]},
+        )
+        self.assertEqual(
+            1, sum(1 for item in payload["workspaces"] if item["runtime"] == "online"),
+        )
+
     def test_global_template_writes_require_concurrency_controls(self) -> None:
         source = json.dumps({
             "dsl_version": "1.0",

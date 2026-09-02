@@ -120,12 +120,14 @@ class WorkspaceRegistry:
             if not Path(path).expanduser().is_absolute():
                 raise HubError("workspace path must be absolute")
             return self.register(path)[0]
-        entries = self.list()
         if workspace_id:
             self.resolve(workspace_id)
             return workspace_id
         if name:
-            matches = [item for item in entries if item["name"] == name]
+            # Only this branch reads the listing, and the listing stats every
+            # registered path. Computing it first meant selecting by id paid
+            # for a sweep it never looked at.
+            matches = [item for item in self.list() if item["name"] == name]
             if len(matches) != 1:
                 raise HubError(
                     f"workspace name must match exactly one registered workspace: {name}"
@@ -292,6 +294,38 @@ def _runtime_json(
     return status, decoded if isinstance(decoded, Mapping) else {}
 
 
+def _agent_rows(payload: Any) -> list[Mapping[str, Any]]:
+    """The Agent handlers in a Runtime's catalog answer, or a typed refusal.
+
+    Written out rather than chained through `.get(...)` defaults because the
+    defaults do not hold: `{"data": null}` from an older or half-booted Runtime
+    makes `.get("handlers")` an AttributeError, which is not in any caller's
+    except clause and took the whole endpoint down with it.
+    """
+
+    data = payload.get("data") if isinstance(payload, Mapping) else None
+    handlers = data.get("handlers") if isinstance(data, Mapping) else None
+    if handlers is None:
+        return []
+    if not isinstance(handlers, (list, tuple)):
+        raise HubError("handler catalog did not return a list of handlers")
+    return [
+        item for item in handlers
+        if isinstance(item, Mapping) and str(item.get("name", "")).startswith("agent.")
+    ]
+
+
+def _count(value: Any) -> int:
+    """A tally from another process, or zero. Never a TypeError."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 def create_hub_app(
     manager: WorkspaceRuntimeManager | None = None, *, forward_concurrency: int = 24,
     template_store: WorkflowTemplateStore | None = None,
@@ -426,7 +460,11 @@ def create_hub_app(
             name = params.get("name", "")
             arguments = params.get("arguments") or {}
             if name == "list_workspaces":
-                workspaces = runtimes.registry.list()
+                # `list` stats every registered path to say whether it is still
+                # there. One entry on an unresponsive mount would otherwise
+                # stall every request this process is routing, not just this
+                # one — the same reason `ensure` and `_runtime_json` are here.
+                workspaces = await anyio.to_thread.run_sync(runtimes.registry.list)
                 return result(request_id, {
                     "content": [{"type": "text", "text": json.dumps({"workspaces": workspaces})}],
                     "structuredContent": {"workspaces": workspaces},
@@ -446,9 +484,9 @@ def create_hub_app(
                     })
                 with selection_lock:
                     selections[session_id] = selected
+                listed = await anyio.to_thread.run_sync(runtimes.registry.list)
                 payload = next(
-                    item for item in runtimes.registry.list()
-                    if item["workspace_id"] == selected
+                    item for item in listed if item["workspace_id"] == selected
                 )
                 return result(request_id, {
                     "content": [{"type": "text", "text": json.dumps(payload)}],
@@ -565,7 +603,7 @@ def create_hub_app(
     async def global_agent_stats(_request: Request) -> Response:
         totals: dict[str, dict[str, Any]] = {}
         workspaces: list[dict[str, Any]] = []
-        for workspace in runtimes.registry.list():
+        for workspace in await anyio.to_thread.run_sync(runtimes.registry.list):
             if not workspace.get("available", True):
                 workspaces.append({**workspace, "runtime": "unavailable"})
                 continue
@@ -583,26 +621,41 @@ def create_hub_app(
                 )
                 if status >= 400:
                     raise HubError(f"handler catalog failed ({status})")
-                handlers = payload.get("data", {}).get("handlers", ())
-                agents = [
-                    item for item in handlers
-                    if isinstance(item, Mapping) and str(item.get("name", "")).startswith("agent.")
-                ]
-                workspaces.append({**workspace, "runtime": "online", "agent_count": len(agents)})
+                agents = _agent_rows(payload)
+                # Summed into a local first. A failure part-way through used to
+                # leave its share already added to `totals` and the Workspace
+                # listed twice — once "online" from before the loop, once
+                # "error" from the handler — so the machine-wide numbers were
+                # wrong rather than merely short of one Workspace.
+                contribution: dict[str, dict[str, Any]] = {}
                 for item in agents:
-                    name = str(item["name"])
-                    total = totals.setdefault(name, {
-                        "name": name, "attempt_count": 0, "failed_count": 0,
-                        "workspaces": 0, "versions": [],
+                    name = str(item.get("name", ""))
+                    entry = contribution.setdefault(name, {
+                        "attempt_count": 0, "failed_count": 0, "versions": [],
                     })
-                    total["attempt_count"] += int(item.get("attempt_count", 0))
-                    total["failed_count"] += int(item.get("failed_count", 0))
-                    total["workspaces"] += 1
+                    entry["attempt_count"] += _count(item.get("attempt_count"))
+                    entry["failed_count"] += _count(item.get("failed_count"))
                     version = item.get("version")
-                    if isinstance(version, str) and version not in total["versions"]:
-                        total["versions"].append(version)
-            except (HubError, OSError, ValueError) as exc:
+                    if isinstance(version, str) and version not in entry["versions"]:
+                        entry["versions"].append(version)
+            except (HubError, OSError, TypeError, ValueError) as exc:
+                # `TypeError` too: a Runtime that answers `{"data": null}` or a
+                # null count is a Runtime with a problem, not a reason to lose
+                # the statistics of every other Workspace to a 500.
                 workspaces.append({**workspace, "runtime": "error", "error": str(exc)})
+                continue
+            workspaces.append({**workspace, "runtime": "online", "agent_count": len(agents)})
+            for name, entry in contribution.items():
+                total = totals.setdefault(name, {
+                    "name": name, "attempt_count": 0, "failed_count": 0,
+                    "workspaces": 0, "versions": [],
+                })
+                total["attempt_count"] += entry["attempt_count"]
+                total["failed_count"] += entry["failed_count"]
+                total["workspaces"] += 1
+                for version in entry["versions"]:
+                    if version not in total["versions"]:
+                        total["versions"].append(version)
         return JSONResponse({
             "agents": sorted(totals.values(), key=lambda item: item["name"]),
             "workspaces": workspaces,

@@ -104,6 +104,33 @@ def merge_workflow_library(source_path: Path | str, library_path: Path | str) ->
     return inserted
 
 
+def archived_in(connection, workflow_id: str) -> bool:
+    """Whether this id is retired, asked on a connection the caller already has.
+
+    The predicate belongs to this module — `delete` is what writes the row —
+    and it had been hand-copied into the draft service and the authoring job
+    service, each opening its own connection to ask. Three spellings of one
+    question is three places to keep in step; a workflow that stops counting
+    as deleted in only one of them is a Workflow that can be edited but not
+    published, or published under an id that is gone.
+    """
+
+    return connection.execute(
+        "SELECT 1 FROM archived_workflows WHERE workflow_id = ?", (workflow_id,),
+    ).fetchone() is not None
+
+
+def workflow_is_archived(library_path: Path | str, workflow_id: str) -> bool:
+    """The same question from a caller that holds a path rather than a store.
+
+    Constructing a `SQLiteWorkflowVersionStore` to ask would run the migration
+    ledger, which is not what a read on a hot path should cost.
+    """
+
+    with connect_workflow_database(Path(library_path), read_only=True) as connection:
+        return archived_in(connection, workflow_id)
+
+
 class SQLiteWorkflowVersionStore:
     def __init__(
         self,
@@ -263,10 +290,7 @@ class SQLiteWorkflowVersionStore:
         """
 
         with self._connect() as connection:
-            return connection.execute(
-                "SELECT 1 FROM archived_workflows WHERE workflow_id = ?",
-                (workflow_id,),
-            ).fetchone() is not None
+            return archived_in(connection, workflow_id)
 
     def delete(self, workflow_id: str, *, expected_latest_version: int) -> None:
         """Permanently retire an id while retaining versions for old runs."""

@@ -16,6 +16,7 @@ from ..authoring import (
 from ..persistence.authoring_output import SQLiteAuthoringOutputStore
 from ..persistence.control import audit as persist_audit
 from ..persistence.database import connect_workflow_database
+from ..persistence.workflow_versions import archived_in, workflow_is_archived
 
 
 ACTIVE = ("queued", "running")
@@ -42,6 +43,34 @@ class AuthoringJobConflict(ValueError):
     def __init__(self, code: str, job: Mapping[str, Any]) -> None:
         self.code, self.job = code, dict(job)
         super().__init__(code)
+
+
+def authoring_is_active(
+    path: Path | str, workflow_id: str, *, now: str | None = None,
+) -> bool:
+    """Whether a queued or running Job still names this Workflow.
+
+    A module function, not only a method, because the callers that must ask
+    are the two delete doors, and a Runtime wired without an authoring Agent
+    has no service for them to ask — while its database may still carry rows
+    from a configuration that had one. Deletion refusing to consult those rows
+    because the service is absent is how the guard came to exist on one door
+    and not the other.
+
+    A row past its deadline does not count. The service fails those the next
+    time it looks, and where there is no service to look, a stale row must not
+    retire an id for good.
+    """
+
+    moment = now or datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    with connect_workflow_database(Path(path), read_only=True) as db:
+        return db.execute(
+            "SELECT 1 FROM workflow_authoring_jobs WHERE workflow_id=?"
+            " AND status IN ('queued','running')"
+            " AND (deadline_at IS NULL OR deadline_at='' OR deadline_at>?)"
+            " LIMIT 1",
+            (workflow_id, moment),
+        ).fetchone() is not None
 
 
 class AuthoringJobService:
@@ -272,6 +301,17 @@ class AuthoringJobService:
             ).fetchone()
         return None if row is None else self._dto(row)
 
+    def any_active_for_workflow(self, workflow_id) -> bool:
+        """Whether anyone still has authoring in flight for this Workflow.
+
+        Not `active_for_workflow`, which is scoped to one actor because it
+        answers "what is *your* job doing". Retiring an id is not safer because
+        the job that would land on it belongs to somebody else.
+        """
+
+        self._expire_due()
+        return authoring_is_active(self.path, workflow_id, now=self._time(self.clock()))
+
     def create(
         self, *, actor, prompt, idempotency_key, workflow_id=None, mode="generate",
         display_language=None, agent=None,
@@ -351,20 +391,15 @@ class AuthoringJobService:
     def _ensure_workflow_editable(self, workflow_id: str, *, local_db=None) -> None:
         """Reject a retired id before an Agent or authoring row is started."""
 
-        if local_db is not None and self.workflow_path.resolve() == self.path.resolve():
-            archived = local_db.execute(
-                "SELECT 1 FROM archived_workflows WHERE workflow_id=?",
-                (workflow_id,),
-            ).fetchone()
-        else:
-            with connect_workflow_database(
-                self.workflow_path, read_only=True,
-            ) as definitions_db:
-                archived = definitions_db.execute(
-                    "SELECT 1 FROM archived_workflows WHERE workflow_id=?",
-                    (workflow_id,),
-                ).fetchone()
-        if archived is not None:
+        # The transaction already open is the same database often enough to be
+        # worth reusing; the predicate itself lives with the `delete` that
+        # writes the row, so neither branch spells the query out again.
+        archived = (
+            archived_in(local_db, workflow_id)
+            if local_db is not None and self.workflow_path.resolve() == self.path.resolve()
+            else workflow_is_archived(self.workflow_path, workflow_id)
+        )
+        if archived:
             raise ValueError(f"workflow was deleted: {workflow_id}")
 
     def cancel(self, job_id, *, actor):
