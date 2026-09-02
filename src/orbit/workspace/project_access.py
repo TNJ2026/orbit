@@ -20,6 +20,15 @@ Neither grant is confinement. Nothing here stops a CLI running inside a
 granted directory from writing files of its own; what both guarantee is that
 those writes land in a disposable copy — a throwaway git branch, or a plain
 directory nothing reads from again — never the developer's real working tree.
+
+Both grants are plain, lock-free dataclasses on purpose. `acquire()` for one
+ref and `sweep()` deciding another ref is dead can run concurrently in
+different *processes* — `--execution-workers` (nonzero by default) runs Agent
+Handlers in a worker pool, not the process the cleanup loop runs in — so an
+in-process lock could never make the two mutually exclusive; it would only
+make every grant instance unpicklable, and multiprocessing sends this exact
+object to each worker. `sweep()`'s grace period is what actually closes that
+gap: see its docstring.
 """
 
 from __future__ import annotations
@@ -29,8 +38,8 @@ import os
 from pathlib import Path
 import secrets
 import shutil
-import threading
-from typing import Callable, Iterable, Sequence
+import time
+from typing import Iterable, Sequence
 
 from .git import GitWorkspaceProvider, WorkspaceError, workspace_slug
 
@@ -45,6 +54,13 @@ DEFAULT_MAX_BYTES = 2 * 1024**3
 # empty just because 10 GiB is a small fraction of it.
 DEFAULT_MIN_FREE_BYTES = 10 * 1024**3
 DEFAULT_MIN_FREE_FRACTION = 0.10
+# How long `sweep()` leaves a not-live-looking directory alone before
+# trusting that. Generous on purpose: the actual gap it protects — between a
+# caller reading "what's live" and this reaching that one directory — is
+# milliseconds to low seconds even in the worst case, and the cleanup loop
+# itself never polls faster than every 5 minutes, so ten minutes of headroom
+# costs nothing real while making the race essentially impossible to hit.
+DEFAULT_MIN_AGE_SECONDS = 600.0
 
 
 class QuotaExceeded(RuntimeError):
@@ -61,9 +77,7 @@ class GitWorktreeGrant:
     """Whole-tree access to a git Workspace, via an isolated worktree."""
 
     provider: GitWorkspaceProvider
-    _lock: threading.RLock = field(
-        default_factory=threading.RLock, repr=False, compare=False,
-    )
+    min_age_seconds: float = DEFAULT_MIN_AGE_SECONDS
 
     def acquire(self, ref: str, *, files: Sequence[str] | None = None) -> Path:
         # `files` is accepted and ignored: a worktree already isolates the
@@ -72,20 +86,12 @@ class GitWorktreeGrant:
         # `files` matters to `FileAllowlistGrant`, the other implementation of
         # this same interface — a caller that does not know which one it is
         # talking to should never have to care.
-        with self._lock:
-            return self.provider.acquire(ref).path
+        return self.provider.acquire(ref).path
 
     def sweep(self, live_refs: Iterable[str]) -> tuple[str, ...]:
-        with self._lock:
-            return self.provider.sweep(frozenset(live_refs))
-
-    def sweep_live(
-        self, live_refs: Callable[[], Iterable[str]],
-    ) -> tuple[str, ...]:
-        """Resolve liveness and reclaim under the same lock as acquire()."""
-
-        with self._lock:
-            return self.provider.sweep(frozenset(live_refs()))
+        return self.provider.sweep(
+            frozenset(live_refs), min_age_seconds=self.min_age_seconds,
+        )
 
 
 @dataclass
@@ -99,61 +105,40 @@ class FileAllowlistGrant:
     max_bytes: int = DEFAULT_MAX_BYTES
     min_free_bytes: int = DEFAULT_MIN_FREE_BYTES
     min_free_fraction: float = DEFAULT_MIN_FREE_FRACTION
+    min_age_seconds: float = DEFAULT_MIN_AGE_SECONDS
     _root: Path = field(init=False, repr=False)
     _staging_root: Path = field(init=False, repr=False)
-    _markers_root: Path = field(init=False, repr=False)
-    _lock: threading.RLock = field(
-        default_factory=threading.RLock, repr=False, compare=False,
-    )
 
     def __post_init__(self) -> None:
         self.project_root = Path(self.project_root).resolve()
         self.state_dir = Path(self.state_dir)
         self._root = self.state_dir / "project-files"
         # A sibling of `_root`, not a child of it: `sweep()` only ever
-        # iterates `_root`, so a copy still being staged here is invisible to
-        # it — the same directory a still-executing node is reading from
-        # would otherwise look, to a name-based sweep, exactly like an
-        # abandoned one. Kept on the same filesystem as `_root` (both direct
-        # children of `state_dir`) so the rename below is atomic.
+        # iterates `_root` for reuse-checking, so a copy still being staged
+        # here never collides on a name with a finished destination. Kept on
+        # the same filesystem as `_root` (both direct children of
+        # `state_dir`) so the rename in `acquire()` below is atomic.
         self._staging_root = self.state_dir / "project-files-staging"
-        # Keep implementation metadata outside the directory handed to the
-        # Agent: an allowlist must not grow an undeclared marker file.
-        self._markers_root = self.state_dir / "project-files-complete"
 
     def _destination(self, ref: str) -> Path:
         return self._root / workspace_slug(ref)
 
-    def _marker(self, ref: str) -> Path:
-        return self._markers_root / workspace_slug(ref)
-
     def acquire(self, ref: str, *, files: Sequence[str] | None = None) -> Path:
-        with self._lock:
-            return self._acquire_locked(ref, files=files)
-
-    def _acquire_locked(
-        self, ref: str, *, files: Sequence[str] | None = None,
-    ) -> Path:
         if not files:
             raise WorkspaceError(
                 "FileAllowlistGrant.acquire requires a non-empty files allowlist"
             )
         destination = self._destination(ref)
-        marker = self._marker(ref)
         # Idempotent reattach, the same guarantee `GitWorkspaceProvider.acquire`
         # already gives: a retry of one node is meant to see what an earlier
-        # attempt left, not a freshly re-copied directory. A destination is
-        # reusable only when its out-of-band completion marker exists; older
-        # versions created this directory directly and could leave a partial
-        # copy behind after failure.
-        if destination.is_dir() and marker.is_file():
+        # attempt left, not a freshly re-copied directory. Safe to trust on
+        # sight: nothing below ever creates `destination` except by renaming
+        # a fully-populated staging directory onto it in one atomic step, so
+        # its existing at this path at all *is* "an earlier attempt finished
+        # copying everything it was asked to" — never a partial copy a failed
+        # attempt left behind.
+        if destination.exists() and any(destination.iterdir()):
             return destination
-
-        # Versions before the completion marker could leave a non-empty,
-        # partially copied destination behind. Never trust that legacy state.
-        if destination.exists():
-            shutil.rmtree(destination, ignore_errors=True)
-        marker.unlink(missing_ok=True)
 
         staging = self._staging_root / f"{workspace_slug(ref)}.{secrets.token_hex(8)}"
         try:
@@ -174,16 +159,15 @@ class FileAllowlistGrant:
             try:
                 os.replace(staging, destination)
             except OSError:
-                # A concurrent acquire() for the same ref finished first.
+                # A concurrent acquire() for the same ref finished first —
+                # in this process or another one; nothing here assumes which.
                 # Rename onto an existing non-empty directory always fails,
                 # so this is expected, not a real failure — reuse the winner
                 # and drop our own now-redundant copy.
-                if destination.is_dir() and marker.is_file():
+                if destination.exists() and any(destination.iterdir()):
                     shutil.rmtree(staging, ignore_errors=True)
                     return destination
                 raise
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.write_text("complete\n", encoding="utf-8")
         except QuotaExceeded:
             shutil.rmtree(staging, ignore_errors=True)
             raise
@@ -245,33 +229,44 @@ class FileAllowlistGrant:
             )
 
     def sweep(self, live_refs: Iterable[str]) -> tuple[str, ...]:
-        with self._lock:
-            return self._sweep_locked(live_refs)
+        """Reclaim a destination no longer live, and any abandoned staging copy.
 
-    def sweep_live(
-        self, live_refs: Callable[[], Iterable[str]],
-    ) -> tuple[str, ...]:
-        """Resolve liveness and reclaim under the same lock as acquire()."""
+        No lock: `acquire()` for a workspace this Runtime is about to consider
+        dead, and this call deciding that, can run in different *processes* —
+        `--execution-workers` (nonzero by default) runs Agent Handlers in a
+        worker pool, not the process the cleanup loop runs in, so a
+        `threading.Lock` here would exclude nothing it needed to. Age is what
+        actually closes the gap instead: `min_age_seconds` (a caller's
+        liveness snapshot is always taken slightly before this reaches any
+        one directory) is skipped over regardless of live_refs, live or not —
+        including a staging copy some other process might still be writing
+        into, which by construction is never in `live_refs` at all (it is
+        only ever a ref *destinations* are keyed by).
+        """
 
-        with self._lock:
-            return self._sweep_locked(live_refs())
-
-    def _sweep_locked(self, live_refs: Iterable[str]) -> tuple[str, ...]:
-        # With the acquire lock held, no staging directory can belong to a
-        # live copy in this Runtime. Anything here survived a killed process
-        # (or an earlier failed cleanup) and is safe to reclaim now.
+        now = time.time()
+        reclaimed: list[str] = []
         if self._staging_root.exists():
-            for child in self._staging_root.iterdir():
-                if child.is_dir():
-                    shutil.rmtree(child, ignore_errors=True)
+            for child in sorted(self._staging_root.iterdir()):
+                if not child.is_dir() or self._age(child, now) < self.min_age_seconds:
+                    continue
+                shutil.rmtree(child, ignore_errors=True)
         if not self._root.exists():
-            return ()
+            return tuple(reclaimed)
         live_slugs = {workspace_slug(ref) for ref in live_refs}
-        reclaimed = []
         for child in sorted(self._root.iterdir()):
             if child.name in live_slugs:
                 continue
+            if self._age(child, now) < self.min_age_seconds:
+                continue
             shutil.rmtree(child, ignore_errors=True)
-            (self._markers_root / child.name).unlink(missing_ok=True)
             reclaimed.append(child.name)
         return tuple(reclaimed)
+
+    @staticmethod
+    def _age(path: Path, now: float) -> float:
+        try:
+            return now - path.stat().st_mtime
+        except OSError:
+            # Gone already, or unreadable: nothing left to protect by waiting.
+            return float("inf")

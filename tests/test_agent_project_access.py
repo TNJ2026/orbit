@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -264,56 +265,53 @@ class FileAllowlistProjectAccessTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertTrue((second / "extra.txt").exists())
 
-    def test_a_legacy_nonempty_destination_without_a_marker_is_rebuilt(self) -> None:
+    def test_sweep_leaves_a_fresh_dead_looking_destination_alone(self) -> None:
+        """The race this grace period exists to close: a destination that
+        `sweep()`'s caller does not (yet) know is live must survive one pass
+        anyway, because it might only look dead due to a liveness snapshot
+        taken a moment before this ref actually became live."""
+
         grant = FileAllowlistGrant(self.root, self.state_dir)
-        destination = grant._destination("run-1:node-1")
-        destination.mkdir(parents=True)
-        (destination / "partial.txt").write_text("left by the old copier\n")
+        destination = grant.acquire("run-1:node-1", files=["a.txt"])
 
-        rebuilt = grant.acquire("run-1:node-1", files=["a.txt"])
+        grant.sweep(())  # nothing declared live — this is the fresh reuse case
 
-        self.assertEqual(["a.txt"], [item.name for item in rebuilt.iterdir()])
-        self.assertFalse((rebuilt / "partial.txt").exists())
+        self.assertTrue(destination.exists())
 
-    def test_sweep_reclaims_staging_left_by_a_killed_process(self) -> None:
+    def test_sweep_reclaims_a_destination_once_it_outlives_the_grace_period(self) -> None:
+        grant = FileAllowlistGrant(self.root, self.state_dir, min_age_seconds=0.05)
+        destination = grant.acquire("run-1:node-1", files=["a.txt"])
+        time.sleep(0.1)
+
+        grant.sweep(())
+
+        self.assertFalse(destination.exists())
+
+    def test_sweep_leaves_a_fresh_staging_copy_alone(self) -> None:
+        """The bug `ac131ff` introduced: unconditionally deleting everything
+        under the staging root would just as happily delete a copy another
+        process is mid-way through writing — staging entries never appear in
+        `live_refs` at all, so only age can tell the two apart."""
+
         grant = FileAllowlistGrant(self.root, self.state_dir)
+        in_progress = grant._staging_root / "some-other-process-mid-copy"
+        in_progress.mkdir(parents=True)
+        (in_progress / "partial.bin").write_bytes(b"still being written")
+
+        grant.sweep(())
+
+        self.assertTrue(in_progress.exists())
+
+    def test_sweep_reclaims_an_old_orphaned_staging_copy(self) -> None:
+        grant = FileAllowlistGrant(self.root, self.state_dir, min_age_seconds=0.05)
         orphan = grant._staging_root / "orphan"
         orphan.mkdir(parents=True)
         (orphan / "large.bin").write_bytes(b"orphaned")
+        time.sleep(0.1)
 
         grant.sweep(())
 
         self.assertFalse(orphan.exists())
-
-    def test_acquire_cannot_interleave_after_the_liveness_snapshot(self) -> None:
-        grant = FileAllowlistGrant(self.root, self.state_dir)
-        snapshot_taken = threading.Event()
-        allow_sweep = threading.Event()
-
-        def live_refs():
-            snapshot_taken.set()
-            self.assertTrue(allow_sweep.wait(timeout=2))
-            return frozenset()
-
-        sweeper = threading.Thread(target=lambda: grant.sweep_live(live_refs))
-        sweeper.start()
-        self.assertTrue(snapshot_taken.wait(timeout=2))
-
-        result = []
-        acquirer = threading.Thread(
-            target=lambda: result.append(
-                grant.acquire("run-1:node-1", files=["a.txt"])
-            )
-        )
-        acquirer.start()
-        # The acquire must wait until the sweep based on that snapshot is done.
-        self.assertEqual([], result)
-        allow_sweep.set()
-        sweeper.join(timeout=2)
-        acquirer.join(timeout=2)
-
-        self.assertEqual(1, len(result))
-        self.assertTrue((result[0] / "a.txt").exists())
 
     def test_files_matching_nothing_fails_outright_rather_than_an_empty_grant(self) -> None:
         grant = FileAllowlistGrant(self.root, self.state_dir)
@@ -406,6 +404,75 @@ class AcquireFailureNeverFallsBackTests(unittest.TestCase):
         self.assertEqual([], list(scratch.iterdir()))
 
 
+class MultiprocessCompatibilityTests(unittest.TestCase):
+    """Both grants must survive being handed to a worker process.
+
+    `--execution-workers` is nonzero by default, so Agent Handlers — and the
+    grant object `TrustedCliAgentClient.project_workspace` holds — run in a
+    separate worker process from the one the cleanup loop runs in
+    (`execution_worker.py`'s `_serve_worker`, started via
+    `multiprocessing.Process(args=(tuple(registrations), ...))`). On any
+    platform without `fork` (Windows, most prominently, but also anywhere
+    `multiprocessing`'s default moves to `spawn`/`forkserver`), that means
+    every field on a grant must be picklable — an unpicklable field such as a
+    `threading.Lock` does not just fail to synchronize across that process
+    boundary, it crashes the Runtime at startup the moment
+    `--agent-project-access` is combined with the default `--execution-workers`.
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+
+    def test_file_allowlist_grant_is_picklable(self) -> None:
+        import pickle
+
+        grant = FileAllowlistGrant("/tmp/project", "/tmp/state")
+        restored = pickle.loads(pickle.dumps(grant))
+        self.assertEqual(grant.project_root, restored.project_root)
+
+    def test_git_worktree_grant_is_picklable(self) -> None:
+        import pickle
+
+        provider = GitWorkspaceProvider("/tmp/project", "/tmp/state")
+        grant = GitWorktreeGrant(provider)
+        restored = pickle.loads(pickle.dumps(grant))
+        self.assertEqual(grant.provider.project_root, restored.provider.project_root)
+
+    def test_a_registered_agent_actually_starts_in_an_execution_worker(self) -> None:
+        """The end-to-end version of the two tests above: this is what
+        `orbit serve`'s default `--execution-workers 1` actually does at
+        startup — send every registration, project_workspace grant included,
+        to a real child process."""
+
+        import shutil as shutil_module
+
+        from orbit.web.builtin_handlers import agent_handlers
+        from orbit.workflow.langgraph_runtime.execution_worker import (
+            start_execution_worker,
+        )
+
+        executable = shutil_module.which("true") or "/usr/bin/true"
+        agent = DiscoveredAgent(
+            AgentCliSpec("claude", "claude", invocation=AgentInvocation(prompt_flag="-p")),
+            executable, "1.0.0",
+        )
+        grant = FileAllowlistGrant(self.temp.name, Path(self.temp.name) / "state")
+        registrations, _names = agent_handlers(
+            [agent], grant_capabilities=frozenset({"workspace.read.files"}),
+            project_workspace=grant,
+        )
+
+        registry, worker = start_execution_worker(
+            registrations, state_directory=Path(self.temp.name) / "worker-state",
+        )
+        try:
+            self.assertTrue(worker.alive)
+            self.assertIn("agent.claude", registry._entries)  # noqa: SLF001
+        finally:
+            worker.stop()
+
+
 class SweepTests(unittest.TestCase):
     """The cleanup loop's own primitive: reclaim what a settled run left."""
 
@@ -426,7 +493,9 @@ class SweepTests(unittest.TestCase):
             ("git", "commit", "-m", "init"), cwd=root, capture_output=True, check=True,
         )
         provider = GitWorkspaceProvider(root, Path(temp.name) / "state")
-        grant = GitWorktreeGrant(provider)
+        # min_age_seconds=0: this test is about the live/dead distinction,
+        # not the grace period — that has its own tests.
+        grant = GitWorktreeGrant(provider, min_age_seconds=0)
 
         dead = grant.acquire("dead-run:node-1")
         alive = grant.acquire("alive-run:node-1")
@@ -445,7 +514,9 @@ class SweepTests(unittest.TestCase):
         root = Path(temp.name) / "project"
         root.mkdir()
         (root / "a.txt").write_text("x\n")
-        grant = FileAllowlistGrant(root, Path(temp.name) / "state")
+        # min_age_seconds=0: this test is about the live/dead distinction,
+        # not the grace period — that has its own tests.
+        grant = FileAllowlistGrant(root, Path(temp.name) / "state", min_age_seconds=0)
 
         dead = grant.acquire("dead-run:node-1", files=["a.txt"])
         alive = grant.acquire("alive-run:node-1", files=["a.txt"])

@@ -278,23 +278,42 @@ class GitWorkspaceProvider:
             return ()
         return tuple(sorted(item.name for item in root.iterdir() if item.is_dir()))
 
-    def sweep(self, live_refs: set[str] | frozenset[str]) -> tuple[str, ...]:
+    def sweep(
+        self, live_refs: set[str] | frozenset[str], *, min_age_seconds: float = 0,
+    ) -> tuple[str, ...]:
         """Reclaim workspaces whose ref is no longer live.
 
         Takes the live set directly instead of querying a store: reclamation is
         a filesystem concern, and coupling it to engine tables is what made the
         legacy sweep untestable in isolation.  Returns the reclaimed slugs.
+
+        `min_age_seconds` skips anything younger than that, live or not. A
+        caller's "is this still live" snapshot and this call are never
+        atomic with whatever just called `acquire()` — a snapshot taken a
+        moment too early can miss a workspace that only became live after it
+        was read. A grace period comfortably wider than that gap makes
+        reclamation safe without a lock, and is the only version of this that
+        works when `acquire()` and `sweep()` run in different processes (the
+        default `orbit serve` shape once `--execution-workers` is nonzero):
+        a lock only ever excludes callers in the same process.
         """
 
         root = self._checked_root()
         if not root.exists() or not is_git_repo(self.project_root):
             return ()
         live_slugs = {workspace_slug(ref) for ref in live_refs}
+        now = time.time()
         reclaimed: list[str] = []
         for slug in self.list_workspaces():
             if slug in live_slugs:
                 continue
             path = root / slug
+            if min_age_seconds > 0:
+                try:
+                    if now - path.stat().st_mtime < min_age_seconds:
+                        continue
+                except OSError:
+                    pass
             for args in (
                 ("worktree", "remove", "--force", str(path)),
                 ("worktree", "prune"),

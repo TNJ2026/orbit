@@ -464,7 +464,7 @@ class CompositionTests(unittest.TestCase):
                 live_workspace_refs=lambda: frozenset({"run-1:node-1"}),
             ),
             project_workspace_grant=SimpleNamespace(
-                sweep_live=lambda resolve: calls.append(resolve()) or ("dead-slug",)
+                sweep=lambda live: calls.append(live) or ("dead-slug",)
             ),
         )
         did_work = composition._sweep_project_workspace_once()
