@@ -142,8 +142,16 @@ PYTHON
 # something else — or gone and come back as something else — is not ours to
 # signal, and a PID that no longer answers at all is already stopped.
 identity_now() {
-  ps -p "$1" -o lstart=,command= 2>/dev/null | tr -s '[:space:]' ' ' \
-    | sed -e 's/^ //' -e 's/ $//'
+  # A PID that is gone makes `ps` exit non-zero. That is an answer, not a
+  # failure — the process this run wanted to stop has stopped — but under
+  # `set -e` an unguarded one ends the script where it stands, which here is
+  # after the Hub has been told to quit and before anything starts it again.
+  # Reachable on the most ordinary path there is: a graceful stop finishing
+  # while the next PID is still being checked.
+  if ! answer="$(ps -p "$1" -o lstart=,command= 2>/dev/null)"; then
+    return 0
+  fi
+  printf '%s\n' "$answer" | tr -s '[:space:]' ' ' | sed -e 's/^ //' -e 's/ $//'
 }
 
 signal_if_unchanged() {

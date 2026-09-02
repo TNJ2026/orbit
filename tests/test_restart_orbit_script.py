@@ -68,7 +68,11 @@ class RestartOrbitScriptTests(unittest.TestCase):
             '&& [ "$calls" -ge "$ORBIT_TEST_PS_SWITCH" ]; then\n'
             '  table="$ORBIT_TEST_PS_AFTER"\n'
             "fi\n"
-            'grep "^$pid " "$table" | cut -d" " -f2- || true\n',
+            # Non-zero for a PID it has no row for, the way the real `ps`
+            # answers — a fake that always succeeds hides what `set -e` does
+            # with the failure.
+            'line=$(grep "^$pid " "$table") || exit 1\n'
+            'printf "%s\\n" "$line" | cut -d" " -f2-\n',
             encoding="utf-8",
         )
         ps_script.chmod(0o755)
@@ -196,6 +200,37 @@ class RestartOrbitScriptTests(unittest.TestCase):
             self.assertIsNone(
                 bystander.poll(), "the process that inherited the PID was signalled",
             )
+
+    def test_a_process_exiting_mid_run_does_not_end_the_restart(self) -> None:
+        """`ps` exits non-zero for a PID that is gone, and `set -e` reads that.
+
+        The graceful stop finishing between the check and the signal is the
+        ordinary path, not an edge: the assignment from that command
+        substitution failed, errexit ended the script where it stood — after
+        the Hub was told to quit and before anything started it again — and
+        the reported symptom was simply that Orbit did not come back.
+        """
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            environment = self.environment(
+                root, listed=[{"pid": 8001}], recorded=8000,
+                ps_answers={
+                    8000: "python -m orbit hub serve",
+                    8001: "python -m orbit serve --project-root /a",
+                },
+            )
+            # Both exit while the run is still working through them.
+            self.write_ps_table(root / "ps-after.txt", {})
+            environment["ORBIT_TEST_PS_SWITCH"] = "2"
+
+            result = subprocess.run(
+                ["bash", str(root / "restart-orbit.sh")], cwd=root, env=environment,
+                text=True, capture_output=True, check=False,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("started", result.stdout, "the Hub must still be started")
 
     def test_a_process_that_stops_cleanly_is_not_forced(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
