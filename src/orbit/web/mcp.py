@@ -199,12 +199,16 @@ def _summary(payload: Any) -> str:
 def _content(payload: Any, *, is_error: bool = False) -> dict[str, Any]:
     """Return modern structured content and the legacy JSON text together.
 
-    Both carry the whole payload, and a card-bound tool is no exception.
-    Summarising the text block there was tried and reverted: a host that
-    mounts the card prints the answer twice, which is what it was meant to
-    fix, but the model reads the same text block — and with the names gone
-    from a workflow listing it went and fetched each definition one at a
-    time, mounting a card for every one. Six cards is worse than one table.
+    Both carry the whole payload. The exception is named in `SUMMARISED_TOOLS`
+    and applies to one tool: shortening a card-bound tool's text block across
+    the board was tried and reverted, because the model reads that block too,
+    and with the names gone from a workflow listing it went and fetched each
+    definition one at a time, mounting a card for every one. Six cards is
+    worse than one table.
+
+    What is different for that one tool is that `inspect_workflows` exists —
+    the same catalogue, no card — so the summary can name somewhere to go.
+    Every other tool answers in full here, including the ones that draw a card.
     """
 
     return {

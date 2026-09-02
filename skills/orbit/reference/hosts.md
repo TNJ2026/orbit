@@ -109,13 +109,21 @@ calls. A tool that mounts a card per item will fill the transcript with them.
 
 And the text block a tool returns is read by the model, not only by the host.
 It is tempting to shorten it for a card-bound tool, since the host prints the
-card and the JSON underneath it and the answer arrives twice. Tried and
-reverted: with the names gone from a workflow listing the model fetched every
-definition one at a time, mounting a card for each. Six cards is worse than
-one table. If this is worth solving, solve it by offering a second tool that
-draws no card — the way `inspect_workflow_definition` stands beside
-`get_workflow_definition` — and let the wording of the two descriptions decide
-which one a question wants.
+card and the JSON underneath it and the answer arrives twice. Shortening them
+all was tried and reverted: with the names gone from a workflow listing the
+model fetched every definition one at a time, mounting a card for each. Six
+cards is worse than one table.
+
+What made it safe for one tool was offering a second that draws no card —
+`inspect_workflows` beside `list_workflows`, the way
+`inspect_workflow_definition` stands beside `get_workflow_definition` — and
+letting the wording of the two descriptions decide which one a question wants.
+With somewhere to send the model, `list_workflows` now answers with a count
+and a sentence naming `inspect_workflows`, and the card carries the catalogue.
+It is the only tool that does this. **So do not read a workflow catalogue out
+of `list_workflows`.** Call it when a person asked to see the list; call
+`inspect_workflows` when the answer is yours to work out — choosing one,
+filtering by readiness, or telling a host that drew no card what is there.
 
 **Another App.** The card performs the MCP Apps handshake itself, so a host
 that mounts it gets a working card rather than one stuck connecting. Hosts

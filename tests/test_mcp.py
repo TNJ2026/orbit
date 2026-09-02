@@ -95,12 +95,16 @@ class HandshakeTests(ApiTestCase):
         """One reading, two offers: look at this, or work something out.
 
         A host that mounts App cards prints the card *and* the JSON under it,
-        so a tool that draws a card answers twice. Shortening the text is not
-        the way out — the model reads it too, and with the names gone it goes
-        and fetches each workflow separately, mounting a card for every one.
-        The way out is to let the question choose: `list_workflows` is what a
-        person asked to see, `inspect_workflows` is what the model reads to
-        pick or filter, and only the first is bound to a resource.
+        so a tool that draws a card answers twice. Shortening every such text
+        block is not the way out — the model reads it too, and with the names
+        gone it goes and fetches each workflow separately, mounting a card for
+        every one. The way out is to let the question choose: `list_workflows`
+        is what a person asked to see, `inspect_workflows` is what the model
+        reads to pick or filter, and only the first is bound to a resource.
+
+        That pair is what makes the one summary in `SUMMARISED_TOOLS` safe: the
+        listing's text block can stand down because the reading it carried is
+        still offered, by name, one call away.
 
         The pair reads the same catalogue. Anything else would be two answers
         to one question, which is worse than two ways to ask it.

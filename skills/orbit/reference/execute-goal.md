@@ -16,15 +16,18 @@ resolved workflow identity are sent to `start_run`.
    `list_workflows` first, and do not call `get_workflow_definition` as part of
    execution: direct goal execution must not open the workflow-list or
    workflow-detail card.
-2. For an exact-name selector or no explicit selector, call `list_workflows`
-   with `ready_only=true`. Match the goal against names, descriptions,
-   declared inputs, and goal readiness. Use `inspect_workflow_definition` when
-   published steps are needed to distinguish plausible candidates, so selecting
-   a goal does not replace the list with a workflow-detail card. If the host
-   renders the workflow-list MCP App, consume its returned data internally and
-   do not duplicate its rows in a Markdown table or another list. State only
-   the selected workflow and the material reason for the selection before
-   starting it. Provide a textual candidate list only when the card was not
+2. For an exact-name selector or no explicit selector, call `inspect_workflows`
+   with `ready_only=true` and match the goal against names, descriptions,
+   declared inputs, and goal readiness. This is the read that returns the
+   catalogue as values and draws no card; `list_workflows` answers with a
+   count and a pointer here, because its card is what a person was shown. Call
+   `list_workflows` as well only when the request was also to *see* the list.
+   Use `inspect_workflow_definition` when published steps are needed to
+   distinguish plausible candidates, so selecting a goal does not replace the
+   list with a workflow-detail card. If the host rendered the workflow-list
+   MCP App, do not duplicate its rows in a Markdown table or another list.
+   State only the selected workflow and the material reason for the selection
+   before starting it. Provide a textual candidate list only when no card was
    rendered or when the user must choose between materially different matches.
 3. If one workflow clearly fits, use it. If several materially different
    workflows fit, present their relevant differences and ask the user to
