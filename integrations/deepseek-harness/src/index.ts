@@ -722,7 +722,7 @@ export class OrbitRemoteService extends TypertRemoteService {
       }))
       const workflows = this.catalog.list(scope.canonicalPath)
       const retired = await this.retiredWorkflowNames(
-        scope, sessionId, result.runs, workflows,
+        scope, sessionId, result.runs, workflows, force,
       )
       // A retained definition means the Workflow was deliberately retired and
       // the Run is still a real piece of History. No definition at all means
@@ -755,14 +755,21 @@ export class OrbitRemoteService extends TypertRemoteService {
    * Read once per id and remembered, negative answers included: a retired id
    * is never reissued, so neither answer can go out of date, and a poll that
    * runs every couple of seconds must not re-ask either one.
+   *
+   * `force` is the refresh button, and it clears what is held here as well.
+   * A negative is only as immutable as the database it was asked of: a
+   * Runtime pointed at the wrong one answers "not found" for every id, and
+   * those answers would then hide those Runs for the life of the Host.
    */
   private async retiredWorkflowNames(
     scope: WorkspaceRef, sessionId: string,
     runs: readonly RunDto[], listed: readonly WorkflowSummary[],
+    force = false,
   ): Promise<{ names: Record<string, string>; missing: Set<string> }> {
     const offered = new Set(listed.map(item => item.workflow_id))
     const retired = [...new Set(runs.map(run => run.workflow_id))]
       .filter(id => !offered.has(id))
+    if (force) for (const id of retired) this.retiredNames.delete(this.retiredKey(scope, id))
     await Promise.all(
       retired
         .filter(id => !this.retiredNames.has(this.retiredKey(scope, id)))
@@ -771,18 +778,26 @@ export class OrbitRemoteService extends TypertRemoteService {
             const definition = await this.gateway.call(
               scope, sessionId, 'inspect_workflow_definition', { workflow_id: id },
             ) as { name?: string }
-            this.retiredNames.set(this.retiredKey(scope, id), definition.name || null)
+            // `''`, not `null`: a definition that answered without a usable
+            // name is still a definition. Collapsing the two made a Workflow
+            // with an empty name indistinguishable from one that is not there,
+            // and the caller drops the second — so every Run of it vanished
+            // from the panel instead of falling back to showing its id.
+            this.retiredNames.set(this.retiredKey(scope, id), definition.name || '')
           } catch (reason) {
             const detail = reason instanceof Error ? reason.message : String(reason)
             if (/workflow (?:version )?not found/iu.test(detail)) {
-              // A genuine negative is immutable: retired ids are never reused.
+              // The definition is genuinely gone. Held until a refresh, which
+              // is also the gesture for "you are looking at the wrong answer".
               this.retiredNames.set(this.retiredKey(scope, id), null)
-              return
             }
-            // Transport, authentication and protocol failures say nothing about
-            // whether the definition exists. Leave them uncached so the next
-            // panel poll retries instead of printing the id until Host restart.
-            throw reason
+            // Anything else — transport, authentication, protocol — says
+            // nothing about whether the definition exists, so nothing is
+            // cached and the next poll asks again. Deliberately not rethrown:
+            // this runs inside `Promise.all` inside `getPanelState`, so one
+            // failed lookup used to reject the whole answer and blank the
+            // panel — runs, workflows, agents, authoring and steps — over a
+            // row that would otherwise just have shown its id.
           }
         }),
     )

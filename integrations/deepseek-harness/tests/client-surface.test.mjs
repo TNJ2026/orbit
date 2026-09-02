@@ -255,10 +255,32 @@ test('a Goal keeps the name of a Workflow that was deleted', async () => {
   // is never reissued, so a two-second poll must not re-ask either answer.
   assert.match(resolver, /filter\(id => !this\.retiredNames\.has\(/)
   assert.match(resolver, /workflow \(\?:version \)\?not found/)
-  assert.match(resolver, /throw reason/,
-    'temporary transport and authentication failures must remain retryable')
+  // A temporary failure must stay retryable *and* stay local to the row it is
+  // about. Rethrowing did the first and not the second: the lookups run inside
+  // `Promise.all` inside `getPanelState`, so one transport error rejected the
+  // whole answer and blanked the panel — runs, workflows, agents, authoring,
+  // steps — over a row that would otherwise have shown its id for one poll.
+  assert.doesNotMatch(resolver, /throw reason/,
+    'a failed lookup must not reject the answer the whole panel is drawn from')
+  const caught = resolver.slice(resolver.indexOf('} catch (reason)'))
+  assert.equal(
+    caught.slice(0, caught.indexOf('\n    )')).match(/retiredNames\.set/gu).length, 1,
+    'only the "not found" branch may be remembered',
+  )
   assert.match(host, /result\.runs\.filter\(run => !retired\.missing\.has\(run\.workflow_id\)\)/,
     'a truly orphaned Run must not be presented as a current Goal')
+  // Because that filter drops Runs, "no definition" and "a definition with no
+  // name" must not be the same cached value. `|| null` made them one, so a
+  // Workflow whose stored name is empty took its whole history off the panel
+  // instead of falling back to showing its id.
+  assert.match(resolver, /definition\.name \|\| ''/,
+    'an unnamed definition is still a definition')
+  // And a negative is only as immutable as the database it was asked of.
+  // Refresh — the gesture for "you are looking at the wrong answer" — clears
+  // them, so a Runtime that was pointed at the wrong database does not hide
+  // those Runs until the Host restarts.
+  assert.match(resolver, /if \(force\)[^\n]*retiredNames\.delete/,
+    'a refresh re-asks the negatives too')
   assert.match(host, /liveSteps\(scope, sessionId, runs\)/,
     'step polling must use the same visible Run set as the panel')
   // Merged under the catalog, never over it: an offered Workflow owns its name.

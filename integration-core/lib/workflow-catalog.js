@@ -43,10 +43,23 @@ export class WorkflowCatalog {
     list(canonicalPath) {
         return this.byWorkspace.get(canonicalPath)?.workflows ?? [];
     }
+    /**
+     * The entry for a workspace while it is still worth speaking for.
+     *
+     * The TTL is stated here and nowhere else. `stale` and `render` are the two
+     * questions asked about it — "should this be re-read" and "may this be put
+     * in front of the model" — and they were each spelling the comparison out,
+     * which is two places to edit and one poll doing the arithmetic twice.
+     */
+    fresh(canonicalPath) {
+        const entry = this.byWorkspace.get(canonicalPath);
+        if (entry === undefined || this.now() - entry.at > CATALOG_TTL_MS)
+            return undefined;
+        return entry;
+    }
     /** Whether a workspace's entry is missing or old enough to re-read. */
     stale(canonicalPath) {
-        const entry = this.byWorkspace.get(canonicalPath);
-        return entry === undefined || this.now() - entry.at > CATALOG_TTL_MS;
+        return this.fresh(canonicalPath) === undefined;
     }
     /**
      * The prompt contribution, or an empty string when there is nothing to say.
@@ -56,11 +69,11 @@ export class WorkflowCatalog {
      * the model nothing it could not infer from the absence.
      */
     render(canonicalPath) {
-        const entry = this.byWorkspace.get(canonicalPath);
         // A model-facing name is an offer to execute it. Once its verification has
         // expired, hide it until refresh succeeds; retaining an old panel snapshot
         // is useful to a person, but offering it to a tool-calling model is not.
-        if (entry === undefined || this.now() - entry.at > CATALOG_TTL_MS)
+        const entry = this.fresh(canonicalPath);
+        if (entry === undefined)
             return '';
         const ready = entry.workflows.filter(item => item.goal_readiness === 'ready');
         if (!ready.length)

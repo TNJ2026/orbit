@@ -455,6 +455,32 @@ class WorkflowLibraryResolutionTests(unittest.TestCase):
 
         self.assertEqual("/tmp/orbit-workspace", args.project_root)
 
+    def test_the_workflow_commands_can_name_the_workspace_serve_was_given(self) -> None:
+        """Otherwise the two resolve different databases and both succeed.
+
+        `serve` takes `--project-root`; `orbit workflow` had no way to say the
+        same thing, so it resolved from wherever it happened to be run. A
+        Workflow published from a terminal in one directory was then invisible
+        in the UI served from another — the split the shared resolver exists
+        to prevent, reintroduced through the command line.
+        """
+
+        from orbit.platform.projects import project_db_path
+
+        with tempfile.TemporaryDirectory() as directory:
+            expected = str(project_db_path(directory))
+            for command in (
+                ("workflow", "inventory"),
+                ("workflow", "publish", "flow.json", "--catalog", "c.json",
+                 "--expected-version", "0"),
+            ):
+                with self.subTest(command=command[1]):
+                    args = self.parse(*command, "--project-root", directory)
+                    self.assertEqual(directory, args.project_root)
+                    self.assertEqual(
+                        expected, self.resolved(*command, project_root=directory),
+                    )
+
     def test_an_explicit_database_is_self_contained_in_every_command(self) -> None:
         """No sibling file that only one command knows the name of."""
 

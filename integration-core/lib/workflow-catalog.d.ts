@@ -25,6 +25,15 @@ export declare class WorkflowCatalog {
      * answers the model, keeps the filter: there a name is an offer to run.
      */
     list(canonicalPath: string): readonly WorkflowSummary[];
+    /**
+     * The entry for a workspace while it is still worth speaking for.
+     *
+     * The TTL is stated here and nowhere else. `stale` and `render` are the two
+     * questions asked about it — "should this be re-read" and "may this be put
+     * in front of the model" — and they were each spelling the comparison out,
+     * which is two places to edit and one poll doing the arithmetic twice.
+     */
+    private fresh;
     /** Whether a workspace's entry is missing or old enough to re-read. */
     stale(canonicalPath: string): boolean;
     /**

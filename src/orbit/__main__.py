@@ -148,10 +148,13 @@ def _workflow_inventory(args, machine_output: bool) -> None:
     safe to run against a live database.
     """
 
-    path = Path(_workflow_db_path(args.db))
+    path = Path(_workflow_db_path(
+        args.db, project_root=getattr(args, "project_root", None),
+    ))
     if not path.exists():
         raise SystemExit(
-            f"no runtime database at {path}; run `orbit serve` once, or pass --db"
+            f"no runtime database at {path}; run `orbit serve` once, or name the "
+            "Workspace with --project-root (or the file with --db)"
         )
     buckets = _goal_readiness_buckets(path)
     report = {
@@ -195,7 +198,9 @@ def _workflow_command(args) -> None:
         store = None
         if args.workflow_action == "publish":
             store = SQLiteWorkflowVersionStore(
-                _workflow_db_path(args.db)
+                _workflow_db_path(
+                    args.db, project_root=getattr(args, "project_root", None),
+                )
             )
         service = WorkflowDefinitionService(catalogs, store)
         if args.workflow_action == "validate":
@@ -942,6 +947,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     inventory.add_argument("--db", default=None, help="SQLite database path")
+    # Without this the command resolved a Workspace from wherever it was run,
+    # while `serve` had been pointed somewhere with `--project-root`. Both
+    # succeeded, against different databases: a Workflow published from a
+    # terminal was then invisible in the UI on the same machine.
+    inventory.add_argument(
+        "--project-root", default=None,
+        help=(
+            "Workspace whose Runtime database to use "
+            "(default: resolved from the current directory)"
+        ),
+    )
     inventory.add_argument(
         "--json", action="store_true", help="Emit stable machine-readable JSON"
     )
@@ -959,6 +975,13 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--output", default="-", help="Canonical IR output path (default: stdout)")
         if action == "publish":
             command.add_argument("--db", default=None, help="SQLite database path")
+            command.add_argument(
+                "--project-root", default=None,
+        help=(
+            "Workspace whose Runtime database to use "
+            "(default: resolved from the current directory)"
+        ),
+            )
             command.add_argument("--expected-version", type=int, required=True)
             command.add_argument("--actor", default="local-cli")
     return parser
