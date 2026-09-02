@@ -1569,6 +1569,34 @@ class LangGraphWorkflowService:
             for node_id in self._latest_state(run_id).get("execution_order", ())
         )
 
+    def live_workspace_refs(self) -> frozenset[str]:
+        """Every `run_id:node_id` pair a still-open run could hold a lease on.
+
+        Exists for the project-access cleanup loop (`web/app.py`), which reaps
+        on-disk git worktrees and file-allowlist copies for runs that have
+        settled. No `limit`, unlike `list_runs`: the live set is bounded by
+        how many runs are actually in flight, not by how many have ever
+        existed, so paging it would only risk missing one still in progress —
+        the one case that must never happen, since it is what protects an
+        active run's directory from being reclaimed out from under it.
+        """
+
+        placeholders = ",".join("?" for _ in self.PRUNABLE_STATUSES)
+        with self._connect() as connection:
+            run_ids = [
+                str(row["run_id"])
+                for row in connection.execute(
+                    "SELECT run_id FROM langgraph_runs"
+                    f" WHERE status NOT IN ({placeholders})",
+                    self.PRUNABLE_STATUSES,
+                )
+            ]
+        return frozenset(
+            f"{run_id}:{node_id}"
+            for run_id in run_ids
+            for node_id in self._executed_nodes(run_id)
+        )
+
     def _attempt_facts(self, run_id: str) -> dict[str, dict[str, Any]]:
         """Per-node outcome and timing, for the nodes that keep an attempt.
 

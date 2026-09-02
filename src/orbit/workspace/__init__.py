@@ -11,7 +11,13 @@ from .git import (
     WorkspaceLease,
     WorkspaceUnavailable,
     git_available,
+    has_commits,
     is_git_repo,
+)
+from .project_access import (
+    FileAllowlistGrant,
+    GitWorktreeGrant,
+    QuotaExceeded,
 )
 
 __all__ = [
@@ -20,5 +26,9 @@ __all__ = [
     "WorkspaceLease",
     "WorkspaceUnavailable",
     "git_available",
+    "has_commits",
     "is_git_repo",
+    "FileAllowlistGrant",
+    "GitWorktreeGrant",
+    "QuotaExceeded",
 ]

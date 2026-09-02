@@ -406,6 +406,14 @@ def _agent_adapter(
                 # work. Nodes in one run hand files to each other; attempts of
                 # one node must land in the same directory.
                 run_id=context.run_id,
+                # Which node is asking. A granted workspace is scoped per node
+                # as well as per run — two `agent.*` nodes in the same run do
+                # not share one project checkout.
+                node_id=context.node_id,
+                # The resolved `workspace_access` policy config, or None. Only
+                # `TrustedCliAgentClient` reads this; every other Handler
+                # ignores it exactly like it already ignores `node_id`.
+                workspace_access=context.workspace_access,
                 deadline=deadline,
                 process_deadline=deadline,
                 input=inputs,
@@ -725,6 +733,7 @@ def trusted_handlers(
                 manifest.fingerprint,
                 _transform,
                 retry_safe=True,
+                capabilities=frozenset(manifest.capabilities),
                 legacy_manifest_fingerprint=manifest.legacy_fingerprint,
             ))
         elif (
@@ -746,6 +755,7 @@ def trusted_handlers(
                 supported_transports=frozenset({
                     "inline", "artifact_ref", "secret_ref",
                 }),
+                capabilities=frozenset(manifest.capabilities),
                 finish_run=finish_run,
                 cancel_attempts=cancel_attempts,
                 legacy_manifest_fingerprint=manifest.legacy_fingerprint,
@@ -769,6 +779,7 @@ def trusted_handlers(
                 retry_safe=(
                     manifest.execution_safety is ExecutionSafety.REPLAY_SAFE
                 ),
+                capabilities=frozenset(manifest.capabilities),
                 finish_run=finish_run,
                 cancel_attempts=cancel_attempts,
                 legacy_manifest_fingerprint=manifest.legacy_fingerprint,

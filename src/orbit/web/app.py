@@ -146,6 +146,7 @@ class RuntimeComposition:
         workflow_db_path: Path | str | None = None,
         langgraph_service: Any = None,
         run_retention_days: int | None = None,
+        project_workspace_grant: Any = None,
     ) -> None:
         self.db_path = Path(db_path)
         self.workflow_db_path = Path(workflow_db_path or db_path)
@@ -162,6 +163,11 @@ class RuntimeComposition:
         # their history because a default said so is worse than a database
         # they can see the size of on the Ops page.
         self.run_retention_days = run_retention_days
+        # The grant `--agent-project-access` built (a `GitWorktreeGrant` or a
+        # `FileAllowlistGrant`), or `None` when the switch is off. Only used to
+        # drive the cleanup loop below — the grant itself was already handed
+        # to the Agent client that acquires from it.
+        self.project_workspace_grant = project_workspace_grant
 
         # A file carrying legacy tables is refused before anything is wired:
         # continuing would mean serving a database whose semantics are half
@@ -230,7 +236,29 @@ class RuntimeComposition:
                 "revision-recovery", revision_recovery.run_once,
                 max(self.poll_seconds, 5.0),
             ))
+        if self.project_workspace_grant is not None and callable(
+            getattr(self.langgraph_service, "live_workspace_refs", None)
+        ):
+            loops.append(BackgroundLoop(
+                "agent-project-access-cleanup", self._sweep_project_workspace_once,
+                max(self.poll_seconds, 300.0),
+            ))
         return loops
+
+    def _sweep_project_workspace_once(self) -> bool:
+        """Reclaim a `--agent-project-access` grant's worktree/copy once its run has settled.
+
+        A run in one of `PRUNABLE_STATUSES` cannot resume, so nothing can ever
+        acquire its workspace again — that is what makes reclaiming it safe.
+        `live_workspace_refs()` is the same "still open" set `run-retention`
+        would eventually delete the run rows for, just without waiting for
+        `run_retention_days` to pass: an unfinished run's directory would be
+        wrong to keep charging disk for merely because its row is kept longer.
+        """
+
+        live_refs = self.langgraph_service.live_workspace_refs()
+        reclaimed = self.project_workspace_grant.sweep(live_refs)
+        return bool(reclaimed)
 
     def _prune_once(self) -> bool:
         """Forget runs that ended longer ago than the operator keeps them."""
@@ -424,6 +452,11 @@ def create_app(
     delegation_queue: Any = None,
     execution_workers: int = 0,
     serve_mcp: bool = True,
+    workspace_path: Path | str | None = None,
+    agent_project_access: bool = False,
+    agent_project_access_max_bytes: int | None = None,
+    agent_project_access_min_free_bytes: int | None = None,
+    agent_project_access_min_free_fraction: float | None = None,
 ) -> Starlette:
     """Build the Runtime application.
 
@@ -446,6 +479,10 @@ def create_app(
         {} if workflow_generators is None else workflow_generators
     )
     registrations = list(handlers)
+    # Populated only when `discover_agents` and `agent_project_access` are both
+    # true; stays `None` otherwise so the composition below always has a
+    # value to pass, and the cleanup loop it drives simply never registers.
+    project_workspace: Any = None
     if discover_agents:
         from ..workflow.catalogs.agent_discovery import (
             catalog_entries, discover_agent_clis_cached,
@@ -467,10 +504,77 @@ def create_app(
             if agent_workspace_root is not None
             else Path(db_path).expanduser().absolute().parent / "agent-workspaces"
         )
+        # Opt-in on purpose: this is the only switch that lets an Agent CLI
+        # see real project files, so it is never the default. Off, this block
+        # never runs and every Agent is exactly as isolated as it always was.
+        grant_capabilities: frozenset[str] = frozenset()
+        project_workspace = None
+        if agent_project_access:
+            from ..platform.projects import project_state_dir
+            from ..workspace import (
+                FileAllowlistGrant, GitWorkspaceProvider, GitWorktreeGrant,
+                git_available, has_commits, is_git_repo,
+            )
+
+            project_root = (
+                Path(workspace_path).expanduser().resolve()
+                if workspace_path is not None
+                else Path.cwd()
+            )
+            state_dir = project_state_dir(project_root)
+            # `is_git_repo()` itself shells out to git, so asking it first
+            # would answer "no" whenever git is simply missing — silently
+            # routing a real git project onto the weaker file-allowlist copy
+            # instead of refusing, exactly the downgrade this feature exists
+            # to forbid. A plain filesystem check answers "does this project
+            # want git isolation" without needing git installed to ask it.
+            looks_like_a_git_project = (project_root / ".git").exists()
+            if looks_like_a_git_project:
+                # A git repository gets the stronger guarantee — a disposable
+                # worktree, never the working tree itself — or nothing. Quietly
+                # handing it the weaker file-allowlist copy instead because git
+                # itself is unusable would be exactly the silent downgrade this
+                # feature exists to refuse.
+                if not git_available():
+                    raise ValueError(
+                        f"--agent-project-access requires git, but it is not "
+                        f"installed (project root {project_root} is a git "
+                        "repository)"
+                    )
+                if not is_git_repo(project_root):
+                    raise ValueError(
+                        f"--agent-project-access found {project_root}/.git but "
+                        "git could not read it as a repository"
+                    )
+                if not has_commits(project_root):
+                    raise ValueError(
+                        f"--agent-project-access requires a commit to branch "
+                        f"a workspace from, but {project_root} has none yet"
+                    )
+                project_workspace = GitWorktreeGrant(
+                    GitWorkspaceProvider(project_root, state_dir)
+                )
+                grant_capabilities = frozenset({"workspace.read"})
+            else:
+                quota_kwargs: dict[str, Any] = {}
+                if agent_project_access_max_bytes is not None:
+                    quota_kwargs["max_bytes"] = agent_project_access_max_bytes
+                if agent_project_access_min_free_bytes is not None:
+                    quota_kwargs["min_free_bytes"] = agent_project_access_min_free_bytes
+                if agent_project_access_min_free_fraction is not None:
+                    quota_kwargs["min_free_fraction"] = (
+                        agent_project_access_min_free_fraction
+                    )
+                project_workspace = FileAllowlistGrant(
+                    project_root, state_dir, **quota_kwargs
+                )
+                grant_capabilities = frozenset({"workspace.read.files"})
         agent_registrations, _names = agent_handlers(
             invokable_agents,
             allowed_capabilities=agent_capabilities,
             workspace_root=workspace_root,
+            grant_capabilities=grant_capabilities,
+            project_workspace=project_workspace,
         )
         registrations.extend(agent_registrations)
 
@@ -608,6 +712,7 @@ def create_app(
         workflow_db_path=workflow_db_path,
         langgraph_service=langgraph_service,
         run_retention_days=run_retention_days,
+        project_workspace_grant=project_workspace,
     )
     if composition.workflow_db_path != composition.db_path:
         from ..workflow.persistence.workflow_versions import merge_workflow_library
@@ -861,7 +966,13 @@ def create_app(
         if getattr(generator, "command", None)
     }
 
-    operational_config = {"poll_seconds": poll_seconds}
+    operational_config = {
+        "poll_seconds": poll_seconds,
+        "workspace_path": (
+            None if workspace_path is None
+            else str(Path(workspace_path).expanduser().resolve())
+        ),
+    }
     # One AuthoringJobService for the whole process. It owns in-flight jobs —
     # their cancel scopes, their deadline timers, and the recovery that
     # restarts queued work at startup — so a second instance would run every

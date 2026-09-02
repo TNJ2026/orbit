@@ -419,6 +419,58 @@ class CompositionTests(unittest.TestCase):
         finally:
             self.assertEqual([], composition.stop())
 
+    def test_a_project_workspace_grant_brings_its_cleanup_loop(self) -> None:
+        """`--agent-project-access` off (the default) leaves this at `None`
+        and nothing here ever registers; on, it reclaims what settled runs
+        left, without waiting for `run_retention_days` to also be set."""
+
+        composition = RuntimeComposition(
+            self.db, handlers=[transform_registration()], schemas=SCHEMAS,
+            langgraph_service=SimpleNamespace(
+                recover_due=lambda limit: (), live_workspace_refs=lambda: frozenset(),
+            ),
+            project_workspace_grant=SimpleNamespace(sweep=lambda live: ()),
+        )
+        composition.start()
+        try:
+            self.assertIn(
+                "agent-project-access-cleanup",
+                [loop.name for loop in composition.loops],
+            )
+        finally:
+            self.assertEqual([], composition.stop())
+
+    def test_no_cleanup_loop_without_a_grant(self) -> None:
+        composition = RuntimeComposition(
+            self.db, handlers=[transform_registration()], schemas=SCHEMAS,
+            langgraph_service=SimpleNamespace(
+                recover_due=lambda limit: (), live_workspace_refs=lambda: frozenset(),
+            ),
+        )
+        composition.start()
+        try:
+            self.assertNotIn(
+                "agent-project-access-cleanup",
+                [loop.name for loop in composition.loops],
+            )
+        finally:
+            self.assertEqual([], composition.stop())
+
+    def test_sweep_once_passes_the_live_set_straight_through(self) -> None:
+        calls = []
+        composition = RuntimeComposition(
+            self.db, handlers=[transform_registration()], schemas=SCHEMAS,
+            langgraph_service=SimpleNamespace(
+                live_workspace_refs=lambda: frozenset({"run-1:node-1"}),
+            ),
+            project_workspace_grant=SimpleNamespace(
+                sweep=lambda live: calls.append(live) or ("dead-slug",)
+            ),
+        )
+        did_work = composition._sweep_project_workspace_once()
+        self.assertTrue(did_work)
+        self.assertEqual([frozenset({"run-1:node-1"})], calls)
+
 
 class HealthEndpointTests(unittest.TestCase):
     def setUp(self) -> None:

@@ -175,8 +175,8 @@ def workflow(nodes, edges, *, entry, terminals, result, policies=()) -> Workflow
     )
 
 
-def binding(name, invoke) -> BoundHandler:
-    return BoundHandler(name, "1.0.0", FINGERPRINT, invoke)
+def binding(name, invoke, *, capabilities=frozenset()) -> BoundHandler:
+    return BoundHandler(name, "1.0.0", FINGERPRINT, invoke, capabilities=capabilities)
 
 
 class LangGraphWorkflowCompilerValidationTests(unittest.TestCase):
@@ -479,6 +479,162 @@ class LangGraphWorkflowCompilerValidationTests(unittest.TestCase):
         self.assertEqual("error", result["node_routes"]["action"])
         self.assertEqual(["action", "failed"], result["execution_order"])
         self.assertEqual("rejected:x", result["result"])
+
+
+class WorkspaceAccessCompilerTests(unittest.TestCase):
+    """Compile-time gate for `workspace_access`, mirroring the retry-safety
+    check right above: a node that declares the policy must be bound to a
+    Handler this deployment actually granted workspace capability to, and a
+    node that never declares it is completely unaffected."""
+
+    def _ir(self, *, config):
+        action = node("action", inputs=("value",), outputs=("value",))
+        action = IRNode(
+            action.id, action.kind, action.inputs, action.outputs, action.handler,
+            action.config, ("access",), action.extension, action.route_mode,
+        )
+        base = workflow(
+            (action,), (), entry=("action",), terminals=("action",),
+            result=("action", "value"),
+        )
+        return WorkflowIR(
+            base.ir_version, base.workflow_id, base.name, base.description,
+            base.labels, base.inputs, base.outputs, base.nodes, base.edges,
+            base.entry, base.terminals,
+            (IRPolicy("access", "workspace_access", config),),
+            base.extensions, base.indexes, base.result,
+        )
+
+    def test_no_capability_at_all_is_rejected(self) -> None:
+        ir = self._ir(config={"mode": "read_only"})
+        with self.assertRaisesRegex(
+            ValueError, "requires a Handler granted workspace access",
+        ):
+            compile_workflow(
+                ir,
+                LangGraphHandlerRegistry([
+                    binding("action", lambda values, config, context: values)
+                ]),
+            )
+
+    def test_git_capability_needs_no_files(self) -> None:
+        ir = self._ir(config={"mode": "read_only"})
+        result = compile_workflow(
+            ir,
+            LangGraphHandlerRegistry([
+                binding(
+                    "action", lambda values, config, context: values,
+                    capabilities=frozenset({"workspace.read"}),
+                )
+            ]),
+        ).invoke({"value": 7})
+        self.assertEqual(7, result["result"])
+
+    def test_file_allowlist_capability_without_files_is_rejected(self) -> None:
+        ir = self._ir(config={"mode": "read_only"})
+        with self.assertRaisesRegex(
+            ValueError, "requires config.files on this deployment",
+        ):
+            compile_workflow(
+                ir,
+                LangGraphHandlerRegistry([
+                    binding(
+                        "action", lambda values, config, context: values,
+                        capabilities=frozenset({"workspace.read.files"}),
+                    )
+                ]),
+            )
+
+    def test_file_allowlist_capability_with_files_is_accepted(self) -> None:
+        ir = self._ir(config={"mode": "read_only", "files": ["a.txt"]})
+        result = compile_workflow(
+            ir,
+            LangGraphHandlerRegistry([
+                binding(
+                    "action", lambda values, config, context: values,
+                    capabilities=frozenset({"workspace.read.files"}),
+                )
+            ]),
+        ).invoke({"value": 7})
+        self.assertEqual(7, result["result"])
+
+    def test_multiple_workspace_access_policies_on_one_node_are_rejected(self) -> None:
+        action = node("action", inputs=("value",), outputs=("value",))
+        action = IRNode(
+            action.id, action.kind, action.inputs, action.outputs, action.handler,
+            action.config, ("a", "b"), action.extension, action.route_mode,
+        )
+        base = workflow(
+            (action,), (), entry=("action",), terminals=("action",),
+            result=("action", "value"),
+        )
+        ir = WorkflowIR(
+            base.ir_version, base.workflow_id, base.name, base.description,
+            base.labels, base.inputs, base.outputs, base.nodes, base.edges,
+            base.entry, base.terminals,
+            (
+                IRPolicy("a", "workspace_access", {"mode": "read_only"}),
+                IRPolicy("b", "workspace_access", {"mode": "read_only"}),
+            ),
+            base.extensions, base.indexes, base.result,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, "declares multiple workspace_access policies",
+        ):
+            compile_workflow(
+                ir,
+                LangGraphHandlerRegistry([
+                    binding(
+                        "action", lambda values, config, context: values,
+                        capabilities=frozenset({"workspace.read"}),
+                    )
+                ]),
+            )
+
+    def test_the_resolved_config_reaches_the_handler_as_workspace_access(self) -> None:
+        seen = {}
+
+        def invoke(values, config, context):
+            seen["workspace_access"] = context.workspace_access
+            return values
+
+        ir = self._ir(config={"mode": "read_only", "files": ["a.txt"]})
+        compile_workflow(
+            ir,
+            LangGraphHandlerRegistry([
+                binding(
+                    "action", invoke,
+                    capabilities=frozenset({"workspace.read.files"}),
+                )
+            ]),
+        ).invoke({"value": 7})
+
+        self.assertEqual(
+            {"mode": "read_only", "files": ["a.txt"]}, seen["workspace_access"],
+        )
+
+    def test_a_node_without_the_policy_is_unaffected(self) -> None:
+        """No `workspace_access` policy at all: behaviour is untouched, even
+        on a Handler with no workspace capability whatsoever."""
+
+        seen = {}
+
+        def invoke(values, config, context):
+            seen["workspace_access"] = context.workspace_access
+            return values
+
+        action = node("action", inputs=("value",), outputs=("value",))
+        ir = workflow(
+            (action,), (), entry=("action",), terminals=("action",),
+            result=("action", "value"),
+        )
+        result = compile_workflow(
+            ir, LangGraphHandlerRegistry([binding("action", invoke)]),
+        ).invoke({"value": 7})
+
+        self.assertEqual(7, result["result"])
+        self.assertIsNone(seen["workspace_access"])
 
 
 class LangGraphArtifactStoreTests(unittest.TestCase):

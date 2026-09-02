@@ -62,6 +62,8 @@ def agent_handlers(
     allowed_capabilities: Sequence[str] | None = None,
     timeout_seconds: int = 1800,
     workspace_root: Any = None,
+    grant_capabilities: frozenset[str] = frozenset(),
+    project_workspace: Any = None,
 ) -> tuple[Sequence[HandlerRegistration], tuple[str, ...]]:
     """Turn discovered agent CLIs into registrations, or nothing.
 
@@ -73,12 +75,20 @@ def agent_handlers(
     The command is owned by the client's constructor, built here from the
     executable discovery resolved and the argv the allowlist committed to. No
     workflow, plan or planner can contribute an argument to it.
+
+    `grant_capabilities` and `project_workspace` travel together: the former
+    is what makes the manifest compiler-visible as eligible for a
+    `workspace_access` policy, the latter is what the client actually acquires
+    a directory from when a node asks. `--agent-project-access` off (the
+    default) leaves both at their empty defaults and every agent registers and
+    runs exactly as before the feature existed.
     """
 
     registrations: list[HandlerRegistration] = []
     names: list[str] = []
     for agent, manifest in registrable_agents(
-        agents, allowed_capabilities=allowed_capabilities
+        agents, allowed_capabilities=allowed_capabilities,
+        grant_capabilities=grant_capabilities,
     ):
         registrations.append(
             HandlerRegistration(
@@ -86,6 +96,7 @@ def agent_handlers(
                 AgentHandler(agent_client(
                     agent, timeout_seconds=timeout_seconds,
                     workspace_root=workspace_root,
+                    project_workspace=project_workspace,
                 )),
                 f"{manifest.name}@{manifest.version}",
             )
@@ -94,7 +105,10 @@ def agent_handlers(
     return tuple(registrations), tuple(names)
 
 
-def agent_client(agent: Any, *, timeout_seconds: int = 1800, workspace_root: Any = None):
+def agent_client(
+    agent: Any, *, timeout_seconds: int = 1800, workspace_root: Any = None,
+    project_workspace: Any = None,
+):
     """The adapter a discovered CLI is invoked through.
 
     A CLI that speaks Orbit's JSON protocol needs no adapter; none of the ones
@@ -105,7 +119,7 @@ def agent_client(agent: Any, *, timeout_seconds: int = 1800, workspace_root: Any
     if invocation is None:
         return TrustedCliAgentClient(
             (agent.executable_path,), timeout_seconds=timeout_seconds,
-            workspace_root=workspace_root,
+            workspace_root=workspace_root, project_workspace=project_workspace,
         )
     return TrustedPromptCliAgentClient(
         (agent.executable_path, *invocation.args),
@@ -114,6 +128,7 @@ def agent_client(agent: Any, *, timeout_seconds: int = 1800, workspace_root: Any
         process_timeout_flag=invocation.process_timeout_flag,
         timeout_seconds=timeout_seconds,
         workspace_root=workspace_root,
+        project_workspace=project_workspace,
     )
 
 

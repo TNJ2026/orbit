@@ -142,6 +142,17 @@ class AuthoringServiceTests(unittest.TestCase):
         # The draft the caller previews is exactly what will be published.
         self.assertEqual("generated", json.loads(outcome.source)["metadata"]["id"])
 
+    def test_the_prompt_never_offers_workspace_access_as_a_policy_kind(self) -> None:
+        """`workspace_access` grants a node real filesystem access, so it is
+        written by a person editing DSL or the publish API, never by a
+        generating Agent. If this ever starts appearing here, a model could
+        start writing it into workflows it authors — which is exactly the
+        one policy kind that must stay opt-in on both sides."""
+
+        model = ScriptedModel([json.dumps(valid_document())])
+        service(model).generate("请把审批流程画出来")
+        self.assertNotIn("workspace_access", model.prompts[0])
+
     def test_prompt_carries_catalog_facts_and_marks_the_instruction_as_data(self) -> None:
         model = ScriptedModel([json.dumps(valid_document())])
         service(model).generate("请把审批流程画出来")

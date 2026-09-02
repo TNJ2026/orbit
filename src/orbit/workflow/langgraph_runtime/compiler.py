@@ -71,6 +71,12 @@ class LangGraphExecutionContext:
     input_ports: tuple[Mapping[str, Any], ...] = ()
     output_ports: tuple[Mapping[str, Any], ...] = ()
     actor: str = "system:langgraph"
+    # The resolved `workspace_access` policy's own `config`, or None. Carried
+    # here rather than as a bare mode string because a per-file grant needs
+    # this node's own `files` list too — the same object the compile-time
+    # cross-check already read out of `ir.policies`, handed down instead of
+    # re-derived.
+    workspace_access: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -102,6 +108,12 @@ class BoundHandler:
     cancel_run: Callable[[str], bool] | None = None
     supported_transports: frozenset[str] = frozenset({"inline"})
     retry_safe: bool = False
+    # The manifest's own `capabilities`, carried onto the compiled binding so
+    # a policy cross-check (`workspace_access` needs `workspace.read`, the way
+    # `retry` needs `retry_safe`) can ask the same object it already asks
+    # about transports and retry-safety, instead of reaching back through the
+    # registry for the manifest a second time.
+    capabilities: frozenset[str] = frozenset()
     # Appended after the original public fields so embedders that construct a
     # BoundHandler positionally keep the meaning of every existing argument.
     finish_run: Callable[[str], None] | None = None
@@ -964,6 +976,7 @@ def compile_workflow(
                 policy for policy in ir.policies
                 if policy.kind not in {
                     "route", "retry", "join", "loop", "rework", "completion",
+                    "workspace_access",
                 }
                 or (
                     policy.kind == "join"
@@ -1120,6 +1133,35 @@ def compile_workflow(
             raise LangGraphCompileError(
                 f"join node {node.id!r} requires exactly one join policy"
             )
+        workspace_policies = tuple(
+            policy for policy in ir.policies
+            if policy.id in node.policies and policy.kind == "workspace_access"
+        )
+        if len(workspace_policies) > 1:
+            raise LangGraphCompileError(
+                f"node {node.id!r} declares multiple workspace_access policies"
+            )
+        if workspace_policies:
+            # Which of the two capability strings the operator's flag granted
+            # says which shape of workspace this deployment hands out — a
+            # whole worktree (git) needs no file list, a per-file copy
+            # (anything else) cannot be carried out without one. Reading it
+            # off the same `bound` binding `retry_safe`/`supported_transports`
+            # already come from avoids threading a second, deployment-kind
+            # parameter through every `compile_workflow` call site.
+            granted = bound[node.id].capabilities if node.id in bound else frozenset()
+            if "workspace.read" in granted:
+                pass
+            elif "workspace.read.files" in granted:
+                if not workspace_policies[0].config.get("files"):
+                    raise LangGraphCompileError(
+                        f"node {node.id!r} workspace_access policy requires "
+                        "config.files on this deployment"
+                    )
+            else:
+                raise LangGraphCompileError(
+                    f"node {node.id!r} requires a Handler granted workspace access"
+                )
         for direction, ports in (
             (("input", node.inputs), ("output", node.outputs))
             if supported is not None else ()
@@ -1189,6 +1231,10 @@ def compile_workflow(
                 policy for policy in ir.policies
                 if policy.id in current.policies and policy.kind == "retry"
             ), None)
+            workspace_policy = next((
+                policy for policy in ir.policies
+                if policy.id in current.policies and policy.kind == "workspace_access"
+            ), None)
             if implementation is None:
                 if current.kind == "human":
                     resumed = interrupt({
@@ -1229,6 +1275,10 @@ def compile_workflow(
                         str(config.get("configurable", {}).get(
                             "actor", "system:langgraph"
                         )),
+                        workspace_access=(
+                            to_primitive(workspace_policy.config)
+                            if workspace_policy is not None else None
+                        ),
                     )
                 try:
                     raw = implementation.invoke(

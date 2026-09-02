@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 import re
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -639,13 +640,46 @@ def analyze_dsl(
             )
 
     policy_by_id = {item["id"]: item for item in policies}
-    supported_policy_kinds = {"route", "join", "retry", "rework", "loop", "completion"}
+    supported_policy_kinds = {
+        "route", "join", "retry", "rework", "loop", "completion", "workspace_access",
+    }
     for index, policy in enumerate(policies):
         kind = policy["kind"]
         config = policy["config"]
         path = ("policies", index)
         if kind not in supported_policy_kinds:
             diagnostics.append(_diagnostic(document, "DSL_POLICY_INVALID", f"unsupported policy kind {kind!r}", path + ("kind",)))
+            continue
+        if kind == "workspace_access":
+            # Deliberately left out of the DSL-generation prompt's own list of
+            # kinds — this one grants a node real filesystem access, so it is
+            # written by a person editing DSL or the publish API, never by a
+            # generating Agent. Shape only, here: whether this Runtime can
+            # actually satisfy a `files` allowlist is a fact about the
+            # deployment, checked where the deployment is known, not here.
+            mode = config.get("mode")
+            if mode != "read_only":
+                diagnostics.append(_diagnostic(
+                    document, "DSL_POLICY_INVALID",
+                    "workspace_access policy requires mode 'read_only'",
+                    path + ("config", "mode"),
+                ))
+            files = config.get("files")
+            if files is not None:
+                invalid = (
+                    not isinstance(files, list)
+                    or not files
+                    or not all(isinstance(item, str) and item.strip() for item in files)
+                    or any(".." in Path(item).parts for item in files if isinstance(item, str))
+                    or any(Path(item).is_absolute() for item in files if isinstance(item, str))
+                )
+                if invalid:
+                    diagnostics.append(_diagnostic(
+                        document, "DSL_POLICY_INVALID",
+                        "workspace_access files must be a non-empty list of "
+                        "relative paths with no '..' segment",
+                        path + ("config", "files"),
+                    ))
             continue
         positive_fields = {
             "retry": ("max_attempts",), "rework": ("max_generations",),

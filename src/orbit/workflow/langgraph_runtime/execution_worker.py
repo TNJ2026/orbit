@@ -48,6 +48,7 @@ def _serve_worker(
             "legacy_manifest_fingerprint": item.legacy_manifest_fingerprint,
             "supported_transports": tuple(item.supported_transports),
             "retry_safe": item.retry_safe,
+            "capabilities": tuple(item.capabilities),
         }
         for item in registry._entries.values()  # noqa: SLF001
     ]
@@ -279,6 +280,7 @@ def start_execution_worker(
             cancel_run=lambda run_id, call=rpc: bool(call("cancel_run", run_id=run_id)["result"]),
             supported_transports=frozenset(facts["supported_transports"]),
             retry_safe=bool(facts["retry_safe"]),
+            capabilities=frozenset(facts.get("capabilities", ())),
             finish_run=lambda run_id, call=rpc: call("finish_run", run_id=run_id),
             cancel_attempts=lambda run_id, attempts, call=rpc: bool(call(
                 "cancel_attempts", run_id=run_id, attempt_ids=tuple(attempts),
@@ -333,6 +335,7 @@ def start_execution_worker_pool(
             cancel_run=lambda run_id, rpc=call: bool(rpc("cancel_run", run_id=run_id)["result"]),
             supported_transports=original.supported_transports,
             retry_safe=original.retry_safe,
+            capabilities=original.capabilities,
             finish_run=lambda run_id, rpc=call: rpc("finish_run", run_id=run_id),
             cancel_attempts=lambda run_id, attempts, rpc=call: bool(rpc(
                 "cancel_attempts", run_id=run_id, attempt_ids=tuple(attempts),

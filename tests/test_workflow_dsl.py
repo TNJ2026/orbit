@@ -1060,3 +1060,106 @@ class UnsatisfiableJoinTests(unittest.TestCase):
 
         compiled = self.compile(self.document(route_mode="parallel"))
         self.assertEqual("workflow:split", compiled.ir.workflow_id)
+
+
+class WorkspaceAccessPolicyTests(unittest.TestCase):
+    """`workspace_access` is shape-checked here; whether a deployment can
+    actually satisfy it is a fact about the Runtime, checked at compile time
+    instead (`test_workflow_langgraph_runtime.py`)."""
+
+    def setUp(self) -> None:
+        self.schemas = InMemorySchemaCatalog(
+            {"example://request/1.0": {"type": "object"}}
+        )
+        self.handlers = InMemoryHandlerCatalog([
+            HandlerManifest(
+                name="agent.opencode", version="1.0.0", node_kinds=("action",),
+                inputs={"prompt": "example://request/1.0"},
+                outputs={"result": "example://request/1.0"},
+                config_schema={"type": "object", "additionalProperties": False},
+                execution_safety=ExecutionSafety.UNKNOWN_ON_LEASE_LOSS,
+                resource_profile=ResourceProfile(0, 0, 0, 60, 0, "free"),
+                result_schema_id="example://request/1.0",
+            )
+        ])
+
+    def document(self, config: dict) -> dict:
+        return {
+            "dsl_version": "1.3",
+            "metadata": {"id": "review", "name": "Review"},
+            "nodes": [
+                {
+                    "id": "review", "kind": "action",
+                    "inputs": [{"id": "prompt", "schema_id": "example://request/1.0"}],
+                    "outputs": [{"id": "result", "schema_id": "example://request/1.0"}],
+                    "handler": {"name": "agent.opencode", "version": "1.0.0"},
+                    "policies": ["access"],
+                },
+                {
+                    "id": "done", "kind": "terminal",
+                    "inputs": [{"id": "result", "schema_id": "example://request/1.0"}],
+                },
+            ],
+            "edges": [
+                {"id": "e", "from": {"node": "review", "port": "result"},
+                 "to": {"node": "done", "port": "result"}},
+            ],
+            "entry": ["review"], "terminals": ["done"],
+            "result": {"node": "review", "port": "result"},
+            "policies": [{"id": "access", "kind": "workspace_access", "config": config}],
+        }
+
+    def analyze(self, config: dict):
+        document = parse_dsl(json.dumps(self.document(config)), source_format="json")
+        validate_dsl_structure(document)
+        return analyze_dsl(document, self.handlers, self.schemas)
+
+    def test_read_only_with_no_files_is_accepted(self) -> None:
+        analysis = self.analyze({"mode": "read_only"})
+        self.assertEqual(("done",), analysis.outgoing["review"])
+
+    def test_read_only_with_a_files_allowlist_is_accepted(self) -> None:
+        analysis = self.analyze({
+            "mode": "read_only", "files": ["README.md", "docs/**/*.md"],
+        })
+        self.assertEqual(("done",), analysis.outgoing["review"])
+
+    def test_a_missing_mode_is_refused(self) -> None:
+        with self.assertRaises(DiagnosticError) as caught:
+            self.analyze({})
+        found = [
+            item for item in caught.exception.diagnostics
+            if item.code == "DSL_POLICY_INVALID"
+        ]
+        self.assertTrue(found)
+        self.assertIn("read_only", found[0].message)
+
+    def test_read_write_is_not_yet_supported(self) -> None:
+        with self.assertRaises(DiagnosticError) as caught:
+            self.analyze({"mode": "read_write"})
+        codes = {item.code for item in caught.exception.diagnostics}
+        self.assertIn("DSL_POLICY_INVALID", codes)
+
+    def test_an_empty_files_list_is_refused(self) -> None:
+        with self.assertRaises(DiagnosticError) as caught:
+            self.analyze({"mode": "read_only", "files": []})
+        codes = {item.code for item in caught.exception.diagnostics}
+        self.assertIn("DSL_POLICY_INVALID", codes)
+
+    def test_a_parent_traversal_in_files_is_refused(self) -> None:
+        with self.assertRaises(DiagnosticError) as caught:
+            self.analyze({"mode": "read_only", "files": ["../secrets.txt"]})
+        codes = {item.code for item in caught.exception.diagnostics}
+        self.assertIn("DSL_POLICY_INVALID", codes)
+
+    def test_an_absolute_path_in_files_is_refused(self) -> None:
+        with self.assertRaises(DiagnosticError) as caught:
+            self.analyze({"mode": "read_only", "files": ["/etc/passwd"]})
+        codes = {item.code for item in caught.exception.diagnostics}
+        self.assertIn("DSL_POLICY_INVALID", codes)
+
+    def test_a_non_string_entry_in_files_is_refused(self) -> None:
+        with self.assertRaises(DiagnosticError) as caught:
+            self.analyze({"mode": "read_only", "files": [123]})
+        codes = {item.code for item in caught.exception.diagnostics}
+        self.assertIn("DSL_POLICY_INVALID", codes)

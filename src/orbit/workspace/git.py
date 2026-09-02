@@ -70,6 +70,24 @@ def is_git_repo(root: Path | str) -> bool:
         return False
 
 
+def has_commits(root: Path | str) -> bool:
+    """Whether HEAD resolves to a real commit — a fresh `git init` does not.
+
+    A caller deciding *up front*, once, whether this project can ever grow a
+    worktree — `acquire()` already answers the same question per call (via
+    `_base_ref`, `WorkspaceUnavailable` if this is false), but a Runtime
+    startup preflight wants it before committing to the feature at all, not
+    on the first Run that reaches a node needing one.
+    """
+
+    try:
+        return _git(
+            Path(root), "rev-parse", "--verify", "-q", "HEAD", timeout=10
+        ).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def workspace_slug(workspace_ref: str) -> str:
     """Filesystem-safe, collision-resistant slug for an arbitrary ref.
 

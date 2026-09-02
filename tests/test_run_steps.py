@@ -955,6 +955,20 @@ class RetentionTests(unittest.TestCase):
         self.engine.prune(before="2999-01-01")
         self.assertEqual("unknown", self.engine.get(run.run_id).status)
 
+    def test_a_finished_run_carries_no_live_workspace_refs(self) -> None:
+        """Prunable the moment it settles: nothing can ever acquire its
+        workspace grant again, so the cleanup loop may reclaim it without
+        waiting for `run_retention_days` to also delete the row."""
+
+        self.finished("old")
+        self.assertEqual(frozenset(), self.engine.live_workspace_refs())
+
+    def test_a_waiting_run_keeps_its_executed_nodes_live(self) -> None:
+        run = self.waiting("live")
+        refs = self.engine.live_workspace_refs()
+        self.assertTrue(refs)
+        self.assertTrue(all(ref.startswith(f"{run.run_id}:") for ref in refs))
+
     def test_a_run_that_ended_recently_is_kept(self) -> None:
         self.finished("recent")
         self.assertEqual(0, self.engine.prune(before="2000-01-01")["runs"])

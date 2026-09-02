@@ -19,6 +19,7 @@ from .platform.cutover import (
 from .platform.projects import (
     project_db_path,
     project_state_dir,
+    public_workflow_db_path,
     resolve_project_root,
     upsert_project,
 )
@@ -29,18 +30,20 @@ def _workflow_db_path(
     *,
     project_root: Path | str | None = None,
 ) -> str:
-    """Return this Workspace's published-Workflow database.
+    """Return the host-wide published-Workflow database.
 
-    Published definitions are executable state: their Handler bindings and
-    versions belong to the Runtime that validated them.  Reusable, host-wide
-    source belongs in the Hub's WorkflowTemplateStore instead.  Keeping the
-    two categories separate prevents one Workspace's catalog from leaking into
-    another while still allowing an explicit template instantiation there.
+    Workflows are authored once and visible from every Workspace. Runtime
+    state remains per Workspace; only immutable definitions and their catalog
+    are shared. An explicit database still gives tests and embedders a fully
+    self-contained deployment.
     """
 
     if explicit:
         return explicit
-    return _runtime_db_path(None, project_root=project_root)
+    # Resolve first so callers still get the normal project cutover gate even
+    # though definitions themselves no longer live in that project's DB.
+    _runtime_db_path(None, project_root=project_root)
+    return str(public_workflow_db_path())
 
 
 def _runtime_db_path(
@@ -498,6 +501,12 @@ def _serve(args) -> None:
             mcp_tool_profile=args.mcp_tool_profile,
             execution_workers=args.execution_workers,
             serve_mcp=False,
+            workspace_path=project_root,
+            agent_project_access=args.agent_project_access,
+            agent_project_access_max_bytes=args.agent_project_access_max_bytes,
+            agent_project_access_min_free_bytes=(
+                args.agent_project_access_min_free_bytes
+            ),
         )
     except MixedSchemaError as exc:
         ownership.release()
@@ -645,6 +654,7 @@ def _mcp(args) -> None:
             langgraph_state_directory=Path(db_path).parent,
             mcp_tool_profile=args.mcp_tool_profile,
             delegation_queue=delegation_queue,
+            workspace_path=project_root,
         )
     except Exception:
         ownership.release()
@@ -788,6 +798,36 @@ def build_parser() -> argparse.ArgumentParser:
             "Register the trusted git and verify tools. Workflows may then run "
             "reviewed commands inside a git worktree; they still cannot supply "
             "a command of their own."
+        ),
+    )
+    serve_cmd.add_argument(
+        "--agent-project-access",
+        action="store_true",
+        help=(
+            "Let a workflow node that declares a workspace_access policy see "
+            "real project files instead of an empty scratch directory. Opt-in "
+            "on purpose: this is the only switch that lets a workflow's Agent "
+            "read the project it runs in, so it is never the default. A git "
+            "repository is delivered as a disposable worktree; anything else "
+            "is delivered as a copy of only the files a node names."
+        ),
+    )
+    serve_cmd.add_argument(
+        "--agent-project-access-max-bytes",
+        type=int, default=None, metavar="BYTES",
+        help=(
+            "Cap on how much a single non-git workspace_access grant may copy "
+            "(default: 2 GiB). Ignored for a git project root, which is "
+            "delivered as a worktree instead of a copy."
+        ),
+    )
+    serve_cmd.add_argument(
+        "--agent-project-access-min-free-bytes",
+        type=int, default=None, metavar="BYTES",
+        help=(
+            "Refuse a non-git workspace_access grant that would leave less "
+            "than this much disk free (default: 10 GiB, or 10%% of the "
+            "volume, whichever is larger)."
         ),
     )
     serve_cmd.add_argument(

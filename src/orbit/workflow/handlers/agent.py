@@ -26,6 +26,10 @@ from ..domain.handlers import (
     RecoveryDisposition, RecoveryResult, UnknownExternalResultError,
 )
 from ..domain.serialization import to_primitive
+from ...workspace import (
+    FileAllowlistGrant, GitWorktreeGrant, QuotaExceeded, WorkspaceError,
+    WorkspaceUnavailable,
+)
 
 
 # The single output port every discovered Agent's manifest declares. The
@@ -131,6 +135,7 @@ class TrustedCliAgentClient:
         kill_grace_seconds=AGENT_KILL_GRACE_SECONDS, max_output_bytes=1_048_576,
         environment: Mapping[str, str] | None = None,
         workspace_root: Path | str | None = None,
+        project_workspace: GitWorktreeGrant | FileAllowlistGrant | None = None,
     ) -> None:
         if not command or any(not item for item in command):
             raise ValueError("trusted CLI command is required")
@@ -158,6 +163,13 @@ class TrustedCliAgentClient:
             None if workspace_root is None
             else Path(workspace_root).expanduser().absolute()
         )
+        # The other way a node can get a working directory: not the scratch
+        # dir above, but a grant of real project files, requested by a node's
+        # own `workspace_access` policy and only ever non-None when this
+        # Runtime was started with `--agent-project-access`. `None` here is
+        # what keeps every node that never asked for this running exactly as
+        # it did before the feature existed.
+        self.project_workspace = project_workspace
         # Reader threads this client could not get back. Never reset: it is a
         # cumulative account of leaked capacity, which is what makes the leak
         # visible to whoever reads the metric.
@@ -318,14 +330,55 @@ class TrustedCliAgentClient:
         each other through files, and a fresh directory for every attempt
         would lose what the step before it wrote. A retry of one node is meant
         to see what its predecessors left.
+
+        A node whose `workspace_access` policy was granted skips this scratch
+        directory entirely and gets real project files instead — see below.
         """
 
+        granted = getattr(context.request, "workspace_access", None)
+        if granted is not None:
+            return self._project_workspace(context, granted)
         if self.workspace_root is None:
             return None
         run_id = str(getattr(context.request, "run_id", "") or "shared")
         workspace = self.workspace_root / _safe_name(run_id)
         workspace.mkdir(parents=True, exist_ok=True)
         return workspace
+
+    def _project_workspace(self, context, granted: Mapping[str, Any]) -> Path:
+        """Real project files for a node whose `workspace_access` policy fired.
+
+        No fallback, in either direction: not to the scratch directory above
+        (a node that asked for its project would silently get an empty one
+        again — the exact bug this whole mechanism exists to end), and not to
+        the Runtime's real working tree (the other accident `_workspace`'s own
+        isolation exists to prevent). Every failure here is this attempt's
+        failure, reported as such.
+        """
+
+        if self.project_workspace is None:
+            # The compiler is supposed to have refused to bind a node with
+            # this policy to a Handler lacking workspace capability, which
+            # means this branch should be unreachable in practice. It is kept
+            # as a last-resort backstop, not a substitute for that check.
+            raise HandlerValidationError(
+                "node requires workspace access but this Runtime was not "
+                "started with --agent-project-access"
+            )
+        run_id = str(getattr(context.request, "run_id", "") or "shared")
+        node_id = str(getattr(context.request, "node_id", "") or "shared")
+        try:
+            return self.project_workspace.acquire(
+                f"{run_id}:{node_id}", files=granted.get("files"),
+            )
+        except (WorkspaceError, WorkspaceUnavailable, QuotaExceeded) as exc:
+            # A real runtime failure — disk pressure, a permission change, a
+            # quota this request exceeded, a lock this attempt never won —
+            # not another way of saying "not authorized". It must fail this
+            # attempt outright, never fall through to the scratch-dir branch.
+            raise HandlerValidationError(
+                f"workspace access could not be provisioned: {exc}"
+            ) from exc
 
     def _attempt_timeout(self, context) -> float:
         """How long *this* attempt may run, not how long any attempt may run.
