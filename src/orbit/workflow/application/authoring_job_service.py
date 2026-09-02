@@ -305,6 +305,8 @@ class AuthoringJobService:
             if replay is not None:
                 db.commit()
                 return self._dto(replay)
+            if job_type != "generate":
+                self._ensure_workflow_editable(str(workflow_id), local_db=db)
             if job_type == "generate":
                 active = db.execute(
                     "SELECT * FROM workflow_authoring_jobs WHERE actor=?"
@@ -345,6 +347,25 @@ class AuthoringJobService:
             )
         Thread(target=self._execute, args=(job_id,), daemon=True).start()
         return self.get(job_id, actor=actor)
+
+    def _ensure_workflow_editable(self, workflow_id: str, *, local_db=None) -> None:
+        """Reject a retired id before an Agent or authoring row is started."""
+
+        if local_db is not None and self.workflow_path.resolve() == self.path.resolve():
+            archived = local_db.execute(
+                "SELECT 1 FROM archived_workflows WHERE workflow_id=?",
+                (workflow_id,),
+            ).fetchone()
+        else:
+            with connect_workflow_database(
+                self.workflow_path, read_only=True,
+            ) as definitions_db:
+                archived = definitions_db.execute(
+                    "SELECT 1 FROM archived_workflows WHERE workflow_id=?",
+                    (workflow_id,),
+                ).fetchone()
+        if archived is not None:
+            raise ValueError(f"workflow was deleted: {workflow_id}")
 
     def cancel(self, job_id, *, actor):
         with connect_workflow_database(self.path) as db:
@@ -417,6 +438,10 @@ class AuthoringJobService:
                     )
                     latest = 0
                 else:
+                    # Re-check on recovery and immediately before the Agent call.
+                    # Once a job row exists, deletion normally refuses it as
+                    # active; this also closes the check/insert and restart gaps.
+                    self._ensure_workflow_editable(str(row["workflow_id"]))
                     with connect_workflow_database(
                         self.workflow_path, read_only=True,
                     ) as db:

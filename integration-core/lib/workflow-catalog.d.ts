@@ -34,6 +34,6 @@ export declare class WorkflowCatalog {
      * says "no Workflows are known" costs the same tokens every turn and tells
      * the model nothing it could not infer from the absence.
      */
-    render(): string;
+    render(canonicalPath: string): string;
 }
 //# sourceMappingURL=workflow-catalog.d.ts.map

@@ -225,12 +225,16 @@ let OrbitRemoteService = (() => {
                 // After the tool guidance it belongs with: this says which Workflows the
                 // tools above can be pointed at.
                 order: 190,
-                text: () => {
-                    for (const workspace of this.bridgedWorkspaces.values()) {
-                        if (this.catalog.stale(workspace.canonicalPath))
-                            this.refreshCatalog(workspace);
-                    }
-                    return this.catalog.render();
+                text: context => {
+                    const sessionId = context.agent === undefined
+                        ? undefined : String(context.agent.session.id);
+                    const workspace = sessionId === undefined
+                        ? undefined : this.bridgedWorkspaces.get(sessionId);
+                    if (workspace === undefined)
+                        return '';
+                    if (this.catalog.stale(workspace.canonicalPath))
+                        this.refreshCatalog(workspace);
+                    return this.catalog.render(workspace.canonicalPath);
                 },
             }), 'orbit: runnable Workflows in the model context');
         }
@@ -522,7 +526,11 @@ let OrbitRemoteService = (() => {
             // Session for its diagnostics. Keeping the entry would grow this map by one
             // for every Session the Host ever opened.
             this.bridgeDiagnostics.delete(sessionId);
+            const workspace = this.bridgedWorkspaces.get(sessionId);
             this.bridgedWorkspaces.delete(sessionId);
+            if (workspace !== undefined
+                && ![...this.bridgedWorkspaces.values()].some(item => item.canonicalPath === workspace.canonicalPath))
+                this.catalog.forget(workspace.canonicalPath);
             this.authoringWaiters.get(sessionId)?.abort();
             this.authoringWaiters.delete(sessionId);
         }
@@ -769,14 +777,21 @@ let OrbitRemoteService = (() => {
                     ...(attemptCounts?.get(agent.name) ?? {}),
                 }));
                 const workflows = this.catalog.list(scope.canonicalPath);
+                const retired = await this.retiredWorkflowNames(scope, sessionId, result.runs, workflows);
+                // A retained definition means the Workflow was deliberately retired and
+                // the Run is still a real piece of History. No definition at all means
+                // the row is orphaned (for example, from an old or replaced database),
+                // and presenting its stale `running` flag as a current Goal invents work
+                // the Runtime can no longer inspect or operate.
+                const runs = result.runs.filter(run => !retired.missing.has(run.workflow_id));
                 return {
-                    runs: result.runs,
+                    runs,
                     uiUrl: await this.gateway.uiUrl(scope),
                     workflows,
                     agents,
-                    retiredWorkflowNames: await this.retiredWorkflowNames(scope, sessionId, result.runs, workflows),
+                    retiredWorkflowNames: retired.names,
                     authoring: authoring.jobs,
-                    steps: await this.liveSteps(scope, sessionId, result.runs),
+                    steps: await this.liveSteps(scope, sessionId, runs),
                 };
             }
             finally {
@@ -808,19 +823,29 @@ let OrbitRemoteService = (() => {
                     const definition = await this.gateway.call(scope, sessionId, 'inspect_workflow_definition', { workflow_id: id });
                     this.retiredNames.set(this.retiredKey(scope, id), definition.name || null);
                 }
-                catch {
-                    // An id even the store cannot answer for. Held as unanswerable so
-                    // the row falls back to the id it has always shown, once.
-                    this.retiredNames.set(this.retiredKey(scope, id), null);
+                catch (reason) {
+                    const detail = reason instanceof Error ? reason.message : String(reason);
+                    if (/workflow (?:version )?not found/iu.test(detail)) {
+                        // A genuine negative is immutable: retired ids are never reused.
+                        this.retiredNames.set(this.retiredKey(scope, id), null);
+                        return;
+                    }
+                    // Transport, authentication and protocol failures say nothing about
+                    // whether the definition exists. Leave them uncached so the next
+                    // panel poll retries instead of printing the id until Host restart.
+                    throw reason;
                 }
             }));
             const names = {};
+            const missing = new Set();
             for (const id of retired) {
                 const held = this.retiredNames.get(this.retiredKey(scope, id));
                 if (held)
                     names[id] = held;
+                else if (held === null)
+                    missing.add(id);
             }
-            return names;
+            return { names, missing };
         }
         retiredKey(scope, workflowId) {
             return `${scope.canonicalPath}\n${workflowId}`;

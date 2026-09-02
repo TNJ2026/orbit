@@ -93,7 +93,7 @@ class WorkspaceRegistry:
             if isinstance(key, str) and isinstance(value, str)
         }
 
-    def list(self) -> list[dict[str, str]]:
+    def list(self) -> list[dict[str, Any]]:
         default_id, default_root = self.register(default_workspace(), create=True)
         entries = self._read()
         return [
@@ -102,6 +102,11 @@ class WorkspaceRegistry:
                 "name": Path(value).name,
                 "path": value,
                 "kind": "default" if identifier == default_id else "registered",
+                # Registration is durable configuration, not proof that a
+                # removable volume, checkout or directory still exists. Keep
+                # the entry so it can become available again, but never present
+                # it as a usable selection without saying which state it is in.
+                "available": Path(value).expanduser().is_dir(),
             }
             for identifier, value in sorted(entries.items(), key=lambda item: item[1])
         ]
@@ -121,7 +126,9 @@ class WorkspaceRegistry:
                 raise HubError(
                     f"workspace name must match exactly one registered workspace: {name}"
                 )
-            return matches[0]["workspace_id"]
+            identifier = str(matches[0]["workspace_id"])
+            self.resolve(identifier)
+            return identifier
         raise HubError("workspace_id, path, or name is required")
 
 
@@ -385,9 +392,10 @@ def create_hub_app(
             name = params.get("name", "")
             arguments = params.get("arguments") or {}
             if name == "list_workspaces":
+                workspaces = runtimes.registry.list()
                 return result(request_id, {
-                    "content": [{"type": "text", "text": json.dumps({"workspaces": runtimes.registry.list()})}],
-                    "structuredContent": {"workspaces": runtimes.registry.list()},
+                    "content": [{"type": "text", "text": json.dumps({"workspaces": workspaces})}],
+                    "structuredContent": {"workspaces": workspaces},
                     "isError": False,
                 })
             if name == "select_workspace":

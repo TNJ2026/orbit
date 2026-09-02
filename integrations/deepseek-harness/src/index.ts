@@ -6,6 +6,7 @@ import { OrbitToolBridge } from './orbit-tools.js'
 import type { Session, SessionStore } from '@deepseek-ai/dsh-session'
 import type { WorkspaceRegistry } from '@deepseek-ai/dsh-workspace'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
+import type { AssembleContext } from '@deepseek-ai/dsh-system-prompt'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -128,7 +129,7 @@ export class OrbitRemoteService extends TypertRemoteService {
    */
   private tellTheModelWhatCanRun(ctx: Context): void {
     const systemPrompt = ctx.get('systemPrompt') as unknown as {
-      context(entry: { name: string; order: number; text: () => string }): () => void
+      context(entry: { name: string; order: number; text: (context: AssembleContext) => string }): () => void
     } | undefined
     if (!systemPrompt) return
     ctx.effect(() => systemPrompt.context({
@@ -136,11 +137,14 @@ export class OrbitRemoteService extends TypertRemoteService {
       // After the tool guidance it belongs with: this says which Workflows the
       // tools above can be pointed at.
       order: 190,
-      text: () => {
-        for (const workspace of this.bridgedWorkspaces.values()) {
-          if (this.catalog.stale(workspace.canonicalPath)) this.refreshCatalog(workspace)
-        }
-        return this.catalog.render()
+      text: context => {
+        const sessionId = context.agent === undefined
+          ? undefined : String(context.agent.session.id)
+        const workspace = sessionId === undefined
+          ? undefined : this.bridgedWorkspaces.get(sessionId)
+        if (workspace === undefined) return ''
+        if (this.catalog.stale(workspace.canonicalPath)) this.refreshCatalog(workspace)
+        return this.catalog.render(workspace.canonicalPath)
       },
     }), 'orbit: runnable Workflows in the model context')
   }
@@ -433,7 +437,14 @@ export class OrbitRemoteService extends TypertRemoteService {
     // Session for its diagnostics. Keeping the entry would grow this map by one
     // for every Session the Host ever opened.
     this.bridgeDiagnostics.delete(sessionId)
+    const workspace = this.bridgedWorkspaces.get(sessionId)
     this.bridgedWorkspaces.delete(sessionId)
+    if (
+      workspace !== undefined
+      && ![...this.bridgedWorkspaces.values()].some(
+        item => item.canonicalPath === workspace.canonicalPath,
+      )
+    ) this.catalog.forget(workspace.canonicalPath)
     this.authoringWaiters.get(sessionId)?.abort()
     this.authoringWaiters.delete(sessionId)
   }
@@ -686,16 +697,23 @@ export class OrbitRemoteService extends TypertRemoteService {
         ...(attemptCounts?.get(agent.name) ?? {}),
       }))
       const workflows = this.catalog.list(scope.canonicalPath)
+      const retired = await this.retiredWorkflowNames(
+        scope, sessionId, result.runs, workflows,
+      )
+      // A retained definition means the Workflow was deliberately retired and
+      // the Run is still a real piece of History. No definition at all means
+      // the row is orphaned (for example, from an old or replaced database),
+      // and presenting its stale `running` flag as a current Goal invents work
+      // the Runtime can no longer inspect or operate.
+      const runs = result.runs.filter(run => !retired.missing.has(run.workflow_id))
       return {
-        runs: result.runs,
+        runs,
         uiUrl: await this.gateway.uiUrl(scope),
         workflows,
         agents,
-        retiredWorkflowNames: await this.retiredWorkflowNames(
-          scope, sessionId, result.runs, workflows,
-        ),
+        retiredWorkflowNames: retired.names,
         authoring: authoring.jobs,
-        steps: await this.liveSteps(scope, sessionId, result.runs),
+        steps: await this.liveSteps(scope, sessionId, runs),
       }
     } finally { await release() }
   }
@@ -717,7 +735,7 @@ export class OrbitRemoteService extends TypertRemoteService {
   private async retiredWorkflowNames(
     scope: WorkspaceRef, sessionId: string,
     runs: readonly RunDto[], listed: readonly WorkflowSummary[],
-  ): Promise<Record<string, string>> {
+  ): Promise<{ names: Record<string, string>; missing: Set<string> }> {
     const offered = new Set(listed.map(item => item.workflow_id))
     const retired = [...new Set(runs.map(run => run.workflow_id))]
       .filter(id => !offered.has(id))
@@ -730,19 +748,28 @@ export class OrbitRemoteService extends TypertRemoteService {
               scope, sessionId, 'inspect_workflow_definition', { workflow_id: id },
             ) as { name?: string }
             this.retiredNames.set(this.retiredKey(scope, id), definition.name || null)
-          } catch {
-            // An id even the store cannot answer for. Held as unanswerable so
-            // the row falls back to the id it has always shown, once.
-            this.retiredNames.set(this.retiredKey(scope, id), null)
+          } catch (reason) {
+            const detail = reason instanceof Error ? reason.message : String(reason)
+            if (/workflow (?:version )?not found/iu.test(detail)) {
+              // A genuine negative is immutable: retired ids are never reused.
+              this.retiredNames.set(this.retiredKey(scope, id), null)
+              return
+            }
+            // Transport, authentication and protocol failures say nothing about
+            // whether the definition exists. Leave them uncached so the next
+            // panel poll retries instead of printing the id until Host restart.
+            throw reason
           }
         }),
     )
     const names: Record<string, string> = {}
+    const missing = new Set<string>()
     for (const id of retired) {
       const held = this.retiredNames.get(this.retiredKey(scope, id))
       if (held) names[id] = held
+      else if (held === null) missing.add(id)
     }
-    return names
+    return { names, missing }
   }
 
   private retiredKey(scope: WorkspaceRef, workflowId: string): string {

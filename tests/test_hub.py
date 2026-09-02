@@ -59,6 +59,31 @@ class WorkspaceRegistryTests(unittest.TestCase):
 
             self.assertFalse(missing.exists())
 
+    def test_a_deleted_workspace_stays_registered_but_is_not_selectable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = root / "project"
+            workspace.mkdir()
+            registry = WorkspaceRegistry(root / "workspaces.json")
+            identifier, _ = registry.register(workspace)
+            workspace.rmdir()
+
+            with mock.patch.dict(
+                "os.environ", {"ORBIT_DEFAULT_WORKSPACE": str(root / "default")},
+                clear=False,
+            ):
+                listed = next(
+                    item for item in registry.list()
+                    if item["workspace_id"] == identifier
+                )
+                self.assertFalse(listed["available"])
+                with self.assertRaisesRegex(HubError, "workspace is unavailable"):
+                    registry.select(name="project")
+
+            self.assertEqual(str(workspace.resolve()), listed["path"])
+            with self.assertRaisesRegex(HubError, "workspace is unavailable"):
+                registry.resolve(identifier)
+
     def test_workspace_urls_are_namespaced(self) -> None:
         self.assertEqual(
             {
@@ -272,6 +297,31 @@ class HubHttpTests(unittest.TestCase):
         self.assertEqual(24, app.state.forward_limiter.total_tokens)
         with self.assertRaisesRegex(ValueError, "must be positive"):
             create_hub_app(self.Manager(), forward_concurrency=0)
+
+    def test_list_workspaces_reports_unavailable_registrations(self) -> None:
+        manager = self.Manager()
+
+        class Registry:
+            calls = 0
+
+            def list(self):
+                self.calls += 1
+                return [{
+                    "workspace_id": "missing", "name": "Missing",
+                    "path": "/projects/missing", "kind": "registered",
+                    "available": False,
+                }]
+
+        manager.registry = Registry()
+        with AsgiHarness(create_hub_app(manager)) as client:
+            response = client.request("POST", "/mcp", body={
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "list_workspaces", "arguments": {}},
+            })
+
+        payload = response.json()["result"]
+        self.assertFalse(payload["structuredContent"]["workspaces"][0]["available"])
+        self.assertEqual(1, manager.registry.calls)
 
     def test_a_session_can_select_a_workspace_by_readable_name(self) -> None:
         manager = self.Manager()

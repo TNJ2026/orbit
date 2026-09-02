@@ -171,6 +171,30 @@ def _failure(request_id: Any, code: int, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 
+# One tool, deliberately, and not the six that draw a card. Shortening the
+# text block for all of them at once is what went wrong the first time: the
+# model reads that block too, and with the names gone from a listing it went
+# and fetched every definition separately, mounting a card for each. What has
+# changed since is `inspect_workflows` — a documented way to get the same
+# catalogue with nothing drawn — so the summary can name it and the model has
+# somewhere to go. Whether it actually goes there is the thing being watched;
+# until that is known, this stays at one tool.
+SUMMARISED_TOOLS = {"list_workflows"}
+
+
+def _summary(payload: Any) -> str:
+    """What the card is showing, in a sentence, and where the values are."""
+
+    count = len(payload.get("workflows", [])) if isinstance(payload, Mapping) else 0
+    return json.dumps({
+        "shown_in_card": count,
+        "note": (
+            "The workflows are drawn in the card beside this. Call "
+            "`inspect_workflows` for the same catalogue as values."
+        ),
+    }, ensure_ascii=False)
+
+
 def _content(payload: Any, *, is_error: bool = False) -> dict[str, Any]:
     """Return modern structured content and the legacy JSON text together.
 
@@ -1477,6 +1501,14 @@ def build_mcp_dispatcher(
             ))
         except PermissionError as exc:
             return _failure(request_id, NOT_AUTHORIZED, str(exc))
+        if name in SUMMARISED_TOOLS:
+            # The card carries the answer; the text block would carry it a
+            # second time and the host prints both.
+            return _result(request_id, {
+                "content": [{"type": "text", "text": _summary(payload)}],
+                "structuredContent": payload,
+                "isError": False,
+            })
         return _result(request_id, _content(payload))
 
     return dispatch

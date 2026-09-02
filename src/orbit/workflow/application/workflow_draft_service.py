@@ -303,6 +303,7 @@ class WorkflowDraftApplicationService:
         self, workflow_id: str, *, base_version: int | None, actor: str,
         now: datetime,
     ) -> DraftRecord:
+        self._ensure_workflow_editable(workflow_id)
         with connect_workflow_database(self.path) as db:
             db.execute("BEGIN IMMEDIATE")
             active = db.execute(
@@ -1032,11 +1033,23 @@ class WorkflowDraftApplicationService:
         if row is None or row["actor"] != actor:
             raise DraftNotFoundError(f"draft not found: {draft_id}")
         record = _record(row)
+        self._ensure_workflow_editable(record.workflow_id)
         if record.status != "active":
             raise DraftNotFoundError(f"draft is {record.status}: {draft_id}")
         if record.revision != expected_revision:
             raise DraftVersionConflictError(expected_revision, record.revision)
         return record
+
+    def _ensure_workflow_editable(self, workflow_id: str) -> None:
+        """A retained definition is readable by Runs, never an edit target."""
+
+        with connect_workflow_database(self.workflow_path, read_only=True) as db:
+            archived = db.execute(
+                "SELECT 1 FROM archived_workflows WHERE workflow_id=?",
+                (workflow_id,),
+            ).fetchone()
+        if archived is not None:
+            raise ValueError(f"workflow was deleted: {workflow_id}")
 
     def _finish_publish(
         self, draft_id: EntityId, expected_revision: int,

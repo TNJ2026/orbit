@@ -100,6 +100,20 @@ class DraftTestCase(unittest.TestCase):
 
 
 class DraftLifecycleTests(DraftTestCase):
+    def test_a_deleted_workflow_cannot_create_or_resume_a_draft(self) -> None:
+        draft = self.draft()
+        self.definitions.delete_workflow(
+            "workflow:draftable", expected_latest_version=1,
+        )
+
+        with self.assertRaisesRegex(ValueError, "workflow was deleted"):
+            self.draft()
+        with self.assertRaisesRegex(ValueError, "workflow was deleted"):
+            self.service.save(
+                EntityId.parse(draft.draft_id), draft.source_text,
+                expected_revision=draft.revision, actor="author", now=NOW,
+            )
+
     def test_create_seeds_from_the_published_source_and_resume_returns_it(self) -> None:
         first = self.draft()
         self.assertEqual("active", first.status)

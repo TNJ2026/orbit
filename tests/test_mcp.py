@@ -139,6 +139,45 @@ class HandshakeTests(ApiTestCase):
                 ),
             )
 
+    def test_the_card_bound_listing_does_not_repeat_itself_as_text(self) -> None:
+        """The card is the answer; the text beside it says so and stands down.
+
+        A host that mounts App cards prints the card and the JSON under it.
+        This is the second attempt at not answering twice — the first cut the
+        text on every card-bound tool at once and the model, which reads that
+        block, went and fetched each workflow separately. What is different
+        now is that `inspect_workflows` exists and the summary names it, so
+        there is somewhere to go for the values.
+
+        One tool for now. Whether the model takes that route is being watched
+        before this is offered to the other five.
+        """
+
+        with AsgiHarness(self.app) as client:
+            carded = tool(client, "list_workflows", {}, actor="reader")["result"]
+            plain = tool(client, "inspect_workflows", {}, actor="reader")["result"]
+
+            # The data is untouched, and it is the same data.
+            self.assertEqual(plain["structuredContent"], carded["structuredContent"])
+
+            # Length first, so turning the summary off reads as "the text is
+            # the payload again" rather than as a KeyError further down.
+            text = carded["content"][0]["text"]
+            self.assertLess(len(text), 300, f"text block is not a summary: {text[:80]}")
+            summary = json.loads(text)
+            self.assertEqual(
+                len(carded["structuredContent"]["workflows"]),
+                summary["shown_in_card"],
+            )
+            self.assertIn("inspect_workflows", summary["note"])
+
+            # The twin still answers in full: it draws nothing, so there is
+            # nothing beside it to repeat.
+            self.assertEqual(
+                plain["structuredContent"],
+                json.loads(plain["content"][0]["text"]),
+            )
+
     def test_resource_templates_are_an_empty_list_not_an_error(self) -> None:
         """Declaring `resources` is a promise to answer how they are addressed.
 

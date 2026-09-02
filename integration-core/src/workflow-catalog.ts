@@ -67,23 +67,21 @@ export class WorkflowCatalog {
    * says "no Workflows are known" costs the same tokens every turn and tells
    * the model nothing it could not infer from the absence.
    */
-  render(): string {
-    const parts: string[] = []
-    for (const [path, entry] of [...this.byWorkspace].sort()) {
-      const ready = entry.workflows.filter(item => item.goal_readiness === 'ready')
-      if (!ready.length) continue
-      const shown = ready.slice(0, CATALOG_LIMIT).map(line)
-      const omitted = ready.length - shown.length
-      parts.push([
-        `Orbit Workflows ready in ${path}:`,
-        ...shown,
-        ...(omitted > 0 ? [`- …and ${String(omitted)} more; call orbit_list_workflows for the rest.`] : []),
-      ].join('\n'))
-    }
-    if (!parts.length) return ''
+  render(canonicalPath: string): string {
+    const entry = this.byWorkspace.get(canonicalPath)
+    // A model-facing name is an offer to execute it. Once its verification has
+    // expired, hide it until refresh succeeds; retaining an old panel snapshot
+    // is useful to a person, but offering it to a tool-calling model is not.
+    if (entry === undefined || this.now() - entry.at > CATALOG_TTL_MS) return ''
+    const ready = entry.workflows.filter(item => item.goal_readiness === 'ready')
+    if (!ready.length) return ''
+    const shown = ready.slice(0, CATALOG_LIMIT).map(line)
+    const omitted = ready.length - shown.length
     return [
-      ...parts,
+      `Orbit Workflows ready in ${canonicalPath}:`,
+      ...shown,
+      ...(omitted > 0 ? [`- …and ${String(omitted)} more; call orbit_list_workflows for the rest.`] : []),
       'Start one with orbit_start_run. Progress appears in the Orbit panel.',
-    ].join('\n\n')
+    ].join('\n')
   }
 }

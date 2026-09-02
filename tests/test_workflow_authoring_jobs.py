@@ -254,6 +254,24 @@ class ModificationJobTests(AuthoringJobTestCase):
             workflow_id="workflow:research", mode=mode,
         )
 
+    def test_a_deleted_workflow_is_refused_before_starting_an_agent_job(self) -> None:
+        self.publish()
+        self.definitions.delete_workflow(
+            "workflow:research", expected_latest_version=1,
+        )
+        jobs = self.service()
+
+        with self.assertRaisesRegex(ValueError, "workflow was deleted"):
+            self.modify(jobs)
+
+        with connect_workflow_database(self.path, read_only=True) as connection:
+            self.assertEqual(
+                0,
+                connection.execute(
+                    "SELECT COUNT(*) FROM workflow_authoring_jobs"
+                ).fetchone()[0],
+            )
+
     def test_the_agents_own_summary_is_used_when_every_step_checks_out(self) -> None:
         self.publish()
         self.answer = json.dumps({

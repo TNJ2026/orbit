@@ -254,6 +254,13 @@ test('a Goal keeps the name of a Workflow that was deleted', async () => {
   // Asked once per id and remembered, negative answers included: a retired id
   // is never reissued, so a two-second poll must not re-ask either answer.
   assert.match(resolver, /filter\(id => !this\.retiredNames\.has\(/)
+  assert.match(resolver, /workflow \(\?:version \)\?not found/)
+  assert.match(resolver, /throw reason/,
+    'temporary transport and authentication failures must remain retryable')
+  assert.match(host, /result\.runs\.filter\(run => !retired\.missing\.has\(run\.workflow_id\)\)/,
+    'a truly orphaned Run must not be presented as a current Goal')
+  assert.match(host, /liveSteps\(scope, sessionId, runs\)/,
+    'step polling must use the same visible Run set as the panel')
   // Merged under the catalog, never over it: an offered Workflow owns its name.
   const merge = code.slice(
     code.indexOf('const workflowNames = new Map'), code.indexOf('const next = orderRows'),
@@ -262,6 +269,30 @@ test('a Goal keeps the name of a Workflow that was deleted', async () => {
     merge.indexOf('retiredWorkflowNames') < merge.indexOf('state.workflows'),
     'the catalog is written last so it wins the ids it shares',
   )
+})
+
+test('the model sees only the Workflow catalog routed by its own Session', async () => {
+  const host = await readFile(join(here, '..', 'src', 'index.ts'), 'utf8')
+  const contribution = host.slice(
+    host.indexOf('private tellTheModelWhatCanRun('),
+    host.indexOf('private watchAuthoring('),
+  )
+  assert.match(contribution, /context\.agent/,
+    'prompt assembly must derive identity from the Agent being assembled')
+  assert.match(contribution, /this\.bridgedWorkspaces\.get\(sessionId\)/,
+    'that Session must select exactly one routed Workspace')
+  assert.match(contribution, /this\.catalog\.render\(workspace\.canonicalPath\)/)
+  assert.doesNotMatch(contribution, /this\.catalog\.render\(\)/,
+    'a Host-global catalog would leak other Session Workspaces')
+
+  const teardown = host.slice(
+    host.indexOf('private stopSessionBridge('),
+    host.indexOf('private async bindSessionWorkspace('),
+  )
+  assert.match(teardown, /this\.catalog\.forget\(workspace\.canonicalPath\)/,
+    'the last Session leaving a Workspace must invalidate its remembered catalog')
+  assert.match(teardown, /this\.bridgedWorkspaces\.values\(\)/,
+    'one Session must not evict a catalog another Session still uses')
 })
 
 test('a page with nothing on it still says something', () => {
