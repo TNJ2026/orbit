@@ -110,6 +110,17 @@ class RestartOrbitScriptTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    @staticmethod
+    def reap_process(process: subprocess.Popen) -> None:
+        """Stop a live test child and always collect its exit status."""
+
+        if process.poll() is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+        process.wait()
+
     def run_dry(self, environment, root: Path):
         return subprocess.run(
             ["bash", str(root / "restart-orbit.sh"), "--dry-run"],
@@ -172,7 +183,7 @@ class RestartOrbitScriptTests(unittest.TestCase):
         # A real process standing in for whoever got the number next, so an
         # existence check passes and only the identity check can save it.
         bystander = subprocess.Popen(["sleep", "30"])
-        self.addCleanup(bystander.kill)
+        self.addCleanup(self.reap_process, bystander)
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
