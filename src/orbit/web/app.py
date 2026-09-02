@@ -516,11 +516,21 @@ def create_app(
                 git_available, has_commits, is_git_repo,
             )
 
-            project_root = (
-                Path(workspace_path).expanduser().resolve()
-                if workspace_path is not None
-                else Path.cwd()
-            )
+            if workspace_path is None:
+                # No silent fallback to wherever this process happens to have
+                # been started from — that directory is this Runtime's own
+                # working directory (its source checkout, a service
+                # manager's cwd, anything), not necessarily the Workspace an
+                # operator meant to grant. `orbit serve` always resolves and
+                # passes one; an embedder that turns this switch on without
+                # also naming a `workspace_path` gets a startup error instead
+                # of a guess.
+                raise ValueError(
+                    "--agent-project-access requires workspace_path to be set "
+                    "explicitly; it never defaults to the Runtime's own "
+                    "working directory"
+                )
+            project_root = Path(workspace_path).expanduser().resolve()
             state_dir = project_state_dir(project_root)
             # `is_git_repo()` itself shells out to git, so asking it first
             # would answer "no" whenever git is simply missing — silently

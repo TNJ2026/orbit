@@ -25,7 +25,9 @@ directory nothing reads from again — never the developer's real working tree.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
+import secrets
 import shutil
 from typing import Iterable, Sequence
 
@@ -84,11 +86,19 @@ class FileAllowlistGrant:
     min_free_bytes: int = DEFAULT_MIN_FREE_BYTES
     min_free_fraction: float = DEFAULT_MIN_FREE_FRACTION
     _root: Path = field(init=False, repr=False)
+    _staging_root: Path = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.project_root = Path(self.project_root).resolve()
         self.state_dir = Path(self.state_dir)
         self._root = self.state_dir / "project-files"
+        # A sibling of `_root`, not a child of it: `sweep()` only ever
+        # iterates `_root`, so a copy still being staged here is invisible to
+        # it — the same directory a still-executing node is reading from
+        # would otherwise look, to a name-based sweep, exactly like an
+        # abandoned one. Kept on the same filesystem as `_root` (both direct
+        # children of `state_dir`) so the rename below is atomic.
+        self._staging_root = self.state_dir / "project-files-staging"
 
     def _destination(self, ref: str) -> Path:
         return self._root / workspace_slug(ref)
@@ -101,25 +111,50 @@ class FileAllowlistGrant:
         destination = self._destination(ref)
         # Idempotent reattach, the same guarantee `GitWorkspaceProvider.acquire`
         # already gives: a retry of one node is meant to see what an earlier
-        # attempt left, not a freshly re-copied — and possibly now
-        # inconsistent — directory.
+        # attempt left, not a freshly re-copied directory. Safe to trust on
+        # sight: nothing below ever creates `destination` except by renaming
+        # a fully-populated staging directory onto it in one atomic step, so
+        # its existing at this path at all *is* "an earlier attempt finished
+        # copying everything it was asked to" — never a partial copy a failed
+        # attempt left behind.
         if destination.exists() and any(destination.iterdir()):
             return destination
 
+        staging = self._staging_root / f"{workspace_slug(ref)}.{secrets.token_hex(8)}"
         try:
             matches = self._resolve(files)
+            if not matches:
+                raise WorkspaceError(
+                    f"workspace access for {ref!r} matched no files under "
+                    f"{self.project_root} for {list(files)!r}"
+                )
             total_bytes = sum(size for _source, _relative, size in matches)
             self._check_quota(total_bytes, ref)
-            destination.mkdir(parents=True, exist_ok=True)
+            staging.mkdir(parents=True, exist_ok=True)
             for source, relative, _size in matches:
-                target = destination / relative
+                target = staging / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, target)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.replace(staging, destination)
+            except OSError:
+                # A concurrent acquire() for the same ref finished first.
+                # Rename onto an existing non-empty directory always fails,
+                # so this is expected, not a real failure — reuse the winner
+                # and drop our own now-redundant copy.
+                if destination.exists() and any(destination.iterdir()):
+                    shutil.rmtree(staging, ignore_errors=True)
+                    return destination
+                raise
         except QuotaExceeded:
+            shutil.rmtree(staging, ignore_errors=True)
             raise
         except WorkspaceError:
+            shutil.rmtree(staging, ignore_errors=True)
             raise
         except OSError as exc:
+            shutil.rmtree(staging, ignore_errors=True)
             raise WorkspaceError(
                 f"could not provision workspace access for {ref!r}: {exc}"
             ) from exc

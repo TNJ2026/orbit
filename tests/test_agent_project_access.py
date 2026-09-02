@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -263,6 +264,68 @@ class FileAllowlistProjectAccessTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertTrue((second / "extra.txt").exists())
 
+    def test_files_matching_nothing_fails_outright_rather_than_an_empty_grant(self) -> None:
+        grant = FileAllowlistGrant(self.root, self.state_dir)
+        with self.assertRaises(WorkspaceError):
+            grant.acquire("run-1:node-1", files=["nope-*.md"])
+
+    def test_a_copy_that_fails_partway_never_looks_complete_on_retry(self) -> None:
+        """The bug this pins: a destination that only exists because a copy
+        got partway through must never be mistaken, on the next attempt, for
+        one that finished — that would hand the Agent an incomplete or stale
+        view of exactly the files it was told it would get."""
+
+        (self.root / "b.txt").write_text("also visible\n")
+        grant = FileAllowlistGrant(self.root, self.state_dir)
+
+        real_copy2 = shutil.copy2
+        calls = {"count": 0}
+
+        def flaky_copy2(source, target, *args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 2:
+                raise OSError("disk went away mid-copy")
+            return real_copy2(source, target, *args, **kwargs)
+
+        with patch("shutil.copy2", side_effect=flaky_copy2):
+            with self.assertRaises(WorkspaceError):
+                grant.acquire("run-1:node-1", files=["a.txt", "b.txt"])
+
+        # The failed attempt must not have left a directory a retry would
+        # mistake for a completed one.
+        destination = grant._destination("run-1:node-1")
+        self.assertFalse(destination.exists())
+
+        # A clean retry, without the injected failure, succeeds completely.
+        result = grant.acquire("run-1:node-1", files=["a.txt", "b.txt"])
+        self.assertEqual(
+            ["a.txt", "b.txt"],
+            sorted(p.name for p in result.iterdir()),
+        )
+
+    def test_concurrent_acquire_of_the_same_ref_never_corrupts_the_destination(self) -> None:
+        grant = FileAllowlistGrant(self.root, self.state_dir)
+        results: list[Path] = []
+        errors: list[BaseException] = []
+
+        def run() -> None:
+            try:
+                results.append(grant.acquire("run-1:node-1", files=["a.txt"]))
+            except BaseException as exc:  # noqa: BLE001 - surfaced below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=run) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual([], errors)
+        self.assertEqual(8, len(results))
+        self.assertEqual(1, len(set(results)))
+        destination = results[0]
+        self.assertEqual(["a.txt"], [p.name for p in destination.iterdir()])
+
 
 class AcquireFailureNeverFallsBackTests(unittest.TestCase):
     """A grant that is configured but fails at acquire time still must not
@@ -431,6 +494,25 @@ class CreateAppGitDetectionTests(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             self.build_app(root)
         self.assertIn("commit", str(caught.exception))
+
+    def test_a_missing_workspace_path_refuses_startup_rather_than_using_cwd(self) -> None:
+        """An embedder that flips the switch on without also naming a
+        Workspace must not have it silently default to wherever this
+        process happens to have been started from."""
+
+        from orbit.web.app import create_app
+        from orbit.web.builtin_handlers import BUILTIN_SCHEMAS
+
+        with patch(
+            "orbit.workflow.catalogs.agent_discovery.discover_agent_clis_cached",
+            return_value=(self.agent,),
+        ):
+            with self.assertRaises(ValueError) as caught:
+                create_app(
+                    self.db, schemas=BUILTIN_SCHEMAS, discover_agents=True,
+                    agent_project_access=True,
+                )
+        self.assertIn("workspace_path", str(caught.exception))
 
 
 if __name__ == "__main__":

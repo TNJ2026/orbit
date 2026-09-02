@@ -1579,6 +1579,17 @@ class LangGraphWorkflowService:
         existed, so paging it would only risk missing one still in progress —
         the one case that must never happen, since it is what protects an
         active run's directory from being reclaimed out from under it.
+
+        Read from `langgraph_handler_attempts`, not `execution_order`:
+        `journal.claim()` (`wiring.py`) inserts a `status='started'` row
+        *before* the Handler runs, and it stays non-terminal until
+        `journal.settle()` runs *after* — the row spans exactly the window a
+        workspace grant can be acquired and used. `execution_order`, by
+        contrast, is only appended once the node's whole step function
+        returns, which is *after* the Handler has already finished; a sweep
+        reading only that would see a long-running Agent node as never having
+        started at all, and could reclaim the workspace out from under the
+        process still writing to it.
         """
 
         placeholders = ",".join("?" for _ in self.PRUNABLE_STATUSES)
@@ -1591,10 +1602,16 @@ class LangGraphWorkflowService:
                     self.PRUNABLE_STATUSES,
                 )
             ]
+            if not run_ids:
+                return frozenset()
+            run_placeholders = ",".join("?" for _ in run_ids)
+            attempted = connection.execute(
+                "SELECT DISTINCT run_id, node_id FROM langgraph_handler_attempts"
+                f" WHERE run_id IN ({run_placeholders})",
+                run_ids,
+            ).fetchall()
         return frozenset(
-            f"{run_id}:{node_id}"
-            for run_id in run_ids
-            for node_id in self._executed_nodes(run_id)
+            f"{row['run_id']}:{row['node_id']}" for row in attempted
         )
 
     def _attempt_facts(self, run_id: str) -> dict[str, dict[str, Any]]:

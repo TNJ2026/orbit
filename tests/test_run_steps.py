@@ -963,11 +963,34 @@ class RetentionTests(unittest.TestCase):
         self.finished("old")
         self.assertEqual(frozenset(), self.engine.live_workspace_refs())
 
-    def test_a_waiting_run_keeps_its_executed_nodes_live(self) -> None:
+    def test_a_node_mid_execution_is_live_before_it_ever_settles(self) -> None:
+        """The race this method exists to close.
+
+        `execution_order` is only appended once a node's whole step function
+        returns — *after* its Handler has already run. A long-running Agent
+        node has claimed its attempt, and could already have acquired a
+        workspace grant, well before that point; a sweep reading only
+        `execution_order` would see it as never having started, and could
+        reclaim the workspace out from under the process still using it.
+        `langgraph_handler_attempts` is claimed *before* the Handler runs and
+        stays non-terminal (`status='started'`) until it settles, so it spans
+        exactly the window a grant can be held.
+        """
+
         run = self.waiting("live")
-        refs = self.engine.live_workspace_refs()
-        self.assertTrue(refs)
-        self.assertTrue(all(ref.startswith(f"{run.run_id}:") for ref in refs))
+        with self.engine._connect() as connection:
+            connection.execute(
+                "INSERT INTO langgraph_handler_attempts"
+                "(attempt_id,run_id,node_id,status,updated_at,handler_name)"
+                " VALUES (?,?,?,'started',?,?)",
+                ("attempt-mid-flight", run.run_id, "in_flight_node",
+                 "2026-01-01T00:00:00Z", "agent.claude"),
+            )
+            connection.commit()
+
+        self.assertIn(
+            f"{run.run_id}:in_flight_node", self.engine.live_workspace_refs(),
+        )
 
     def test_a_run_that_ended_recently_is_kept(self) -> None:
         self.finished("recent")
