@@ -468,10 +468,17 @@ def create_hub_app(
     async def ready(_request: Request) -> Response:
         return JSONResponse({"status": "ready", "service": "orbit-hub"})
 
+    # The template store takes a machine-wide file lock, and a lock with no
+    # timeout is not something to hold the event loop on: a second Hub, an
+    # `orbit hub register`, or a home directory on a network mount would park
+    # every other request this process is routing — `/mcp`, `/health/ready`,
+    # every workspace proxy — behind one JSON file. Same treatment as
+    # `runtimes.ensure` and `_runtime_json` below.
     async def template_catalog(request: Request) -> Response:
         if request.method == "GET":
             try:
-                return JSONResponse({"templates": templates.list()})
+                listed = await anyio.to_thread.run_sync(templates.list)
+                return JSONResponse({"templates": listed})
             except WorkflowTemplateStorageError as exc:
                 return JSONResponse({"error": str(exc)}, status_code=503)
         try:
@@ -479,12 +486,12 @@ def create_hub_app(
             idempotency_key = request.headers.get("idempotency-key", "").strip()
             if not idempotency_key:
                 raise WorkflowTemplateError("idempotency-key header is required")
-            item = templates.put(
+            item = await anyio.to_thread.run_sync(lambda: templates.put(
                 name=str(body.get("name", "")), source=str(body.get("source", "")),
                 source_format=str(body.get("source_format", "json")),
                 expected_version=body.get("expected_version"),
                 idempotency_key=idempotency_key,
-            )
+            ))
         except WorkflowTemplateStorageError as exc:
             return JSONResponse({"error": str(exc)}, status_code=503)
         except (ValueError, WorkflowTemplateError) as exc:
@@ -502,17 +509,19 @@ def create_hub_app(
                 expected_version = body.get("expected_version")
                 if not isinstance(expected_version, int) or isinstance(expected_version, bool):
                     raise WorkflowTemplateError("expected_version must be an integer")
-                deleted = templates.delete(
+                deleted = await anyio.to_thread.run_sync(lambda: templates.delete(
                     template_id, expected_version=expected_version,
                     idempotency_key=idempotency_key,
-                )
+                ))
             except WorkflowTemplateStorageError as exc:
                 return JSONResponse({"error": str(exc)}, status_code=503)
             except (ValueError, WorkflowTemplateError) as exc:
                 return JSONResponse({"error": str(exc)}, status_code=400)
             return JSONResponse({"template_id": template_id, "deleted": deleted})
         try:
-            return JSONResponse(templates.get(template_id))
+            return JSONResponse(
+                await anyio.to_thread.run_sync(templates.get, template_id)
+            )
         except WorkflowTemplateStorageError as exc:
             return JSONResponse({"error": str(exc)}, status_code=503)
         except WorkflowTemplateError as exc:
@@ -531,7 +540,7 @@ def create_hub_app(
                 raise WorkflowTemplateError(
                     "expected_latest_version must be a non-negative integer"
                 )
-            item = templates.get(template_id)
+            item = await anyio.to_thread.run_sync(templates.get, template_id)
             base = await anyio.to_thread.run_sync(runtimes.ensure, identifier)
             status, result_payload = await anyio.to_thread.run_sync(
                 lambda: _runtime_json(

@@ -1,21 +1,20 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
-import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 
 from orbit.global_control import (
-    WorkflowTemplateError, WorkflowTemplateStore,
-    import_legacy_workflow_library,
+    WorkflowTemplateError, WorkflowTemplateStorageError, WorkflowTemplateStore,
 )
 
 
 SOURCE = json.dumps({
     "dsl_version": "1.0",
-    "metadata": {"id": "workflow:shared", "name": "Shared"},
+    "metadata": {"id": "shared", "name": "Shared"},
     "nodes": [], "edges": [],
 })
 
@@ -44,6 +43,61 @@ class WorkflowTemplateStoreTests(unittest.TestCase):
             ).put(name="Plain", source=source)
         self.assertEqual("workflow:plain-id", item["workflow_id"])
 
+    def test_an_already_prefixed_id_is_refused_rather_than_stored(self) -> None:
+        """A template nobody can instantiate is worse than a rejected write.
+
+        `metadata.id` is a bare DSL identifier and the compiler is what puts
+        `workflow:` in front of it; the schema pattern forbids the colon. A
+        source that arrives already prefixed therefore cannot compile anywhere,
+        so storing it only defers the refusal to whoever tries to use it.
+        """
+
+        source = json.dumps({
+            "dsl_version": "1.0",
+            "metadata": {"id": "workflow:already", "name": "Already"},
+            "nodes": [], "edges": [],
+        })
+        with tempfile.TemporaryDirectory() as root:
+            store = WorkflowTemplateStore(Path(root) / "templates.json")
+            with self.assertRaisesRegex(WorkflowTemplateError, "metadata.id"):
+                store.put(name="Already", source=source)
+            self.assertEqual([], store.list())
+
+    @unittest.skipIf(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        "root is not refused by file permissions",
+    )
+    def test_a_catalog_that_cannot_be_written_is_storage_news(self) -> None:
+        """The adapters answer 503 to this; a raw OSError became a traceback.
+
+        Same reading as a catalog that cannot be parsed: the request was fine,
+        the durable state is not available, and nothing was overwritten.
+        """
+
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root) / "global"
+            store = WorkflowTemplateStore(home / "templates.json")
+            store.put(name="Shared", source=SOURCE)
+            os.chmod(home, 0o500)
+            try:
+                with self.assertRaises(WorkflowTemplateStorageError):
+                    store.put(name="Second", source=SOURCE, idempotency_key="second")
+            finally:
+                os.chmod(home, 0o700)
+
+    def test_reading_an_empty_catalog_leaves_the_disk_alone(self) -> None:
+        """A read is a read. It used to create the directory and a lock file."""
+
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root) / "global"
+            store = WorkflowTemplateStore(home / "templates.json")
+
+            self.assertEqual([], store.list())
+            with self.assertRaises(WorkflowTemplateError):
+                store.get("template:nothing")
+
+            self.assertFalse(home.exists(), f"a read created {home}")
+
     def test_invalid_source_never_enters_the_global_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             store = WorkflowTemplateStore(Path(root) / "templates.json")
@@ -65,7 +119,7 @@ class WorkflowTemplateStoreTests(unittest.TestCase):
             path = Path(root) / "templates.json"
             sources = [json.dumps({
                 "dsl_version": "1.0",
-                "metadata": {"id": f"workflow:item-{index}", "name": str(index)},
+                "metadata": {"id": f"item-{index}", "name": str(index)},
                 "nodes": [], "edges": [],
             }) for index in range(12)]
             with ThreadPoolExecutor(max_workers=6) as pool:
@@ -120,39 +174,6 @@ class WorkflowTemplateStoreTests(unittest.TestCase):
                 item["template_id"], expected_version=1,
                 idempotency_key="delete-1",
             ))
-
-    def test_legacy_published_source_becomes_one_idempotent_template(self) -> None:
-        with tempfile.TemporaryDirectory() as root:
-            library = Path(root) / "library.db"
-            connection = sqlite3.connect(library)
-            connection.executescript("""
-                CREATE TABLE workflow_definitions(
-                    workflow_id TEXT PRIMARY KEY, name TEXT
-                );
-                CREATE TABLE workflow_versions(
-                    workflow_id TEXT, version INTEGER, definition_hash TEXT,
-                    source_format TEXT, source_text TEXT
-                );
-                CREATE TABLE archived_workflows(workflow_id TEXT PRIMARY KEY);
-            """)
-            connection.execute(
-                "INSERT INTO workflow_definitions VALUES (?, ?)",
-                ("workflow:shared", "Shared"),
-            )
-            connection.execute(
-                "INSERT INTO workflow_versions VALUES (?, ?, ?, ?, ?)",
-                ("workflow:shared", 1, "sha256:legacy", "json", SOURCE),
-            )
-            connection.execute(
-                "INSERT INTO archived_workflows VALUES (?)", ("workflow:shared",),
-            )
-            connection.commit()
-            connection.close()
-            store = WorkflowTemplateStore(Path(root) / "templates.json")
-
-            self.assertEqual(1, import_legacy_workflow_library(library, store))
-            self.assertEqual(0, import_legacy_workflow_library(library, store))
-            self.assertEqual("workflow:shared", store.list()[0]["workflow_id"])
 
 
 if __name__ == "__main__":

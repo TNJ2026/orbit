@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sqlite3
-from typing import Callable, Sequence
+from typing import Callable
 
 from ..domain.definitions import CompiledWorkflow, WorkflowIR
 from ..domain.ir_schema import workflow_ir_from_primitive
@@ -102,112 +102,6 @@ def merge_workflow_library(source_path: Path | str, library_path: Path | str) ->
             inserted += 1
         library.commit()
     return inserted
-
-
-def restore_referenced_workflow_versions(
-    destination_path: Path | str, run_db_path: Path | str,
-    source_paths: Sequence[Path | str],
-) -> int:
-    """Restore only immutable versions named by this Workspace's existing Runs.
-
-    Old host-wide libraries are not copied wholesale: that would recreate the
-    cross-Workspace catalog leak. Restored definitions are archived in the
-    destination so historical Runs can inspect/resume them but new Runs cannot
-    start until a source template is explicitly instantiated in this Workspace.
-    """
-
-    destination_path, run_db_path = Path(destination_path), Path(run_db_path)
-    if not run_db_path.exists():
-        return 0
-    try:
-        with sqlite3.connect(f"file:{run_db_path}?mode=ro", uri=True) as runs:
-            references = {
-                (str(row[0]), int(row[1])) for row in runs.execute(
-                    "SELECT DISTINCT workflow_id,workflow_version FROM langgraph_runs"
-                )
-            }
-    except sqlite3.Error:
-        return 0
-    if not references:
-        return 0
-
-    SQLiteWorkflowVersionStore(destination_path)
-    candidates: dict[tuple[str, int], list[tuple[dict, dict]]] = {}
-    for source_path in source_paths:
-        source_path = Path(source_path).expanduser()
-        if not source_path.exists() or source_path.resolve() == destination_path.resolve():
-            continue
-        try:
-            with connect_workflow_database(source_path, read_only=True) as source:
-                for workflow_id, version in references:
-                    row = source.execute(
-                        "SELECT * FROM workflow_versions WHERE workflow_id=? AND version=?",
-                        (workflow_id, version),
-                    ).fetchone()
-                    definition = source.execute(
-                        "SELECT * FROM workflow_definitions WHERE workflow_id=?",
-                        (workflow_id,),
-                    ).fetchone()
-                    if row is not None and definition is not None:
-                        candidates.setdefault((workflow_id, version), []).append(
-                            (dict(definition), dict(row))
-                        )
-        except sqlite3.Error:
-            continue
-
-    columns = (
-        "workflow_id", "version", "definition_hash", "dsl_version", "ir_version",
-        "compiler_version", "canonical_ir_json", "source_format", "source_text",
-        "catalog_fingerprint", "created_at", "created_by",
-    )
-    restored = 0
-    with connect_workflow_database(destination_path) as destination:
-        destination.execute("BEGIN IMMEDIATE")
-        for reference in sorted(references):
-            workflow_id, version = reference
-            existing = destination.execute(
-                "SELECT definition_hash FROM workflow_versions"
-                " WHERE workflow_id=? AND version=?", reference,
-            ).fetchone()
-            matches = candidates.get(reference, [])
-            hashes = {row[1]["definition_hash"] for row in matches}
-            if existing is not None:
-                if hashes and existing[0] not in hashes:
-                    raise ValueError(
-                        f"legacy Workflow version conflicts with Workspace state: "
-                        f"{workflow_id}@{version}"
-                    )
-                continue
-            if not matches:
-                continue
-            if len(hashes) != 1:
-                raise ValueError(
-                    f"ambiguous legacy Workflow version: {workflow_id}@{version}"
-                )
-            definition, row = matches[0]
-            definition_existed = destination.execute(
-                "SELECT 1 FROM workflow_definitions WHERE workflow_id=?", (workflow_id,),
-            ).fetchone() is not None
-            destination.execute(
-                "INSERT INTO workflow_definitions(workflow_id,name,created_at,created_by)"
-                " VALUES (?,?,?,?) ON CONFLICT(workflow_id) DO NOTHING",
-                tuple(definition[key] for key in (
-                    "workflow_id", "name", "created_at", "created_by",
-                )),
-            )
-            destination.execute(
-                f"INSERT INTO workflow_versions({','.join(columns)})"
-                f" VALUES ({','.join('?' for _ in columns)})",
-                tuple(row[key] for key in columns),
-            )
-            if not definition_existed:
-                destination.execute(
-                    "INSERT OR IGNORE INTO archived_workflows(workflow_id,archived_at)"
-                    " VALUES (?,?)", (workflow_id, datetime.now(timezone.utc).isoformat()),
-                )
-            restored += 1
-        destination.commit()
-    return restored
 
 
 class SQLiteWorkflowVersionStore:

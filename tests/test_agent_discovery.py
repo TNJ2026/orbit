@@ -27,6 +27,7 @@ from orbit.workflow.domain.durable_execution import ExecutionSafety
 
 # A spec is registrable only once it carries a probed invocation.
 CLAUDE = AgentCliSpec("claude", "claude", invocation=AgentInvocation(prompt_flag="-p"))
+HERMES = next(spec for spec in TRUSTED_AGENT_CLIS if spec.name == "hermes")
 
 
 def fake_which(installed):
@@ -192,6 +193,94 @@ class DiscoveryTests(unittest.TestCase):
                 )
 
         self.assertEqual(2, len(calls), "a failed probe has its own short fixed TTL")
+
+    def test_a_row_dated_in_the_future_is_re_probed_rather_than_pinned(self) -> None:
+        """A clock that ran backwards must not freeze an entry forever.
+
+        The age of a row written while the clock was ahead is negative, and a
+        negative age satisfies any TTL. For a failed probe that pinned the
+        Agent out of the registry until wall-clock time caught up — the same
+        never-expiring cache this file was rewritten to end, reached through a
+        different door.
+        """
+
+        calls = []
+
+        def runner(argv, **_kwargs):
+            calls.append(argv)
+            return SimpleNamespace(returncode=1, stdout="", stderr="timeout")
+
+        with tempfile.TemporaryDirectory() as root:
+            cache = Path(root) / "agents.json"
+            discover_agent_clis_cached(
+                (CLAUDE,), cache_path=cache, which=fake_which({"claude"}),
+                runner=runner, now=lambda: 5_000,
+            )
+            # The correction lands: every stored `probed_at` is now in the future.
+            discover_agent_clis_cached(
+                (CLAUDE,), cache_path=cache, which=fake_which({"claude"}),
+                runner=runner, now=lambda: 100,
+            )
+
+        self.assertEqual(2, len(calls))
+
+    def test_zero_max_age_re_probes_a_failure_too(self) -> None:
+        """The short failure TTL is a floor on staleness, not a floor on it.
+
+        A caller passing `max_age_seconds=0` is saying "ask now" — usually
+        because a CLI was just installed or repaired. Serving the failure that
+        predates the repair is the one answer that cannot be right.
+        """
+
+        calls = []
+
+        def runner(argv, **_kwargs):
+            calls.append(argv)
+            return SimpleNamespace(returncode=1, stdout="", stderr="not yet")
+
+        with tempfile.TemporaryDirectory() as root:
+            cache = Path(root) / "agents.json"
+            discover_agent_clis_cached(
+                (CLAUDE,), cache_path=cache, which=fake_which({"claude"}),
+                runner=runner, now=lambda: 100,
+            )
+            discover_agent_clis_cached(
+                (CLAUDE,), cache_path=cache, which=fake_which({"claude"}),
+                runner=runner, now=lambda: 101, max_age_seconds=0,
+            )
+
+        self.assertEqual(2, len(calls))
+
+    def test_one_version_probe_answers_for_every_profile_of_a_cli(self) -> None:
+        """The profiles differ in name and invocation, never in the question.
+
+        Each carries the same `version_args`, so probing per profile ran the
+        identical command once per directory under ~/.hermes/profiles — with
+        the full probe timeout available to each — every time the cache missed.
+        """
+
+        calls = []
+
+        def runner(argv, **_kwargs):
+            calls.append(argv)
+            return SimpleNamespace(returncode=0, stdout="hermes 0.20.0", stderr="")
+
+        with tempfile.TemporaryDirectory() as root:
+            profiles = Path(root) / "profiles"
+            for name in ("developer", "manager", "researcher"):
+                (profiles / name).mkdir(parents=True)
+            found = discover_agent_clis_cached(
+                (HERMES,), cache_path=Path(root) / "agents.json",
+                which=fake_which({"hermes"}), runner=runner,
+                profile_root=profiles, now=lambda: 100,
+            )
+
+        self.assertEqual(1, len(calls), f"one question, asked once: {calls}")
+        self.assertEqual(
+            {"hermes", "hermes-developer", "hermes-manager", "hermes-researcher"},
+            {item.spec.name for item in found},
+        )
+        self.assertEqual({"0.20.0"}, {item.version for item in found})
 
     def test_cache_hit_preserves_the_original_probe_time(self) -> None:
         with tempfile.TemporaryDirectory() as root:

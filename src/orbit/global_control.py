@@ -7,13 +7,13 @@ from contextlib import contextmanager
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
-import sqlite3
 import threading
 import uuid
 from typing import Any, Mapping
 
-import yaml
+from .workflow.dsl.schema import ID_PATTERN
 
 
 DEFAULT_GLOBAL_ROOT = Path.home() / ".orbit" / "global"
@@ -28,24 +28,65 @@ def _process_lock(path: Path) -> threading.RLock:
 
 
 @contextmanager
-def _exclusive_file_lock(path: Path):
-    """Serialize a machine-wide JSON transaction across threads and processes."""
+def _file_lock(path: Path, *, shared: bool = False):
+    """Serialize a machine-wide JSON transaction across threads and processes.
+
+    A reader takes the shared side, and takes nothing at all when the lock file
+    does not exist yet. Reads never mutate: `_write` swaps the document in with
+    `Path.replace`, so a reader sees the whole of one version or the whole of
+    the previous one, never a torn document. What the lock is for is the
+    read-modify-write in `put` and `delete`, where two processes each read the
+    same catalog and each write back their own addition, and one is lost.
+
+    Failing to *take* the lock is a storage failure like any other rather than
+    a traceback: a read-only home directory used to escape as a raw OSError,
+    past the 503 the adapters raise `WorkflowTemplateStorageError` for, and
+    Windows abandons a contended lock after ten seconds instead of waiting.
+    Only acquisition is translated — an OSError from the work done under the
+    lock is that work's to report, and saying "cannot lock" about a full disk
+    would send the reader to the wrong place.
+    """
 
     lock_path = path.with_suffix(path.suffix + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    if shared and not lock_path.exists():
+        # Nobody can be holding a transaction open, and reading creates
+        # nothing: `WorkflowTemplateStore().list()` on a machine that has never
+        # published used to leave a directory and a lock file behind it.
+        yield
+        return
+
+    def _refuse(exc: OSError) -> WorkflowTemplateStorageError:
+        return WorkflowTemplateStorageError(
+            f"cannot lock Workflow template catalog: {exc}"
+        )
+
     with _process_lock(lock_path):
-        handle = lock_path.open("a+b")
         try:
-            handle.seek(0, 2)
-            if handle.tell() == 0:
-                handle.write(b"0"); handle.flush()
-            handle.seek(0)
-            if os.name == "nt":
-                import msvcrt
-                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            if not shared:
+                lock_path.parent.mkdir(parents=True, exist_ok=True)
+            handle = lock_path.open("rb" if shared else "a+b")
+        except OSError as exc:
+            raise _refuse(exc) from exc
+        try:
+            try:
+                if not shared:
+                    handle.seek(0, 2)
+                    if handle.tell() == 0:
+                        handle.write(b"0"); handle.flush()
+                    handle.seek(0)
+                if os.name == "nt":
+                    # `msvcrt.locking` has no shared mode, so on Windows a
+                    # reader still waits behind writers. Kept where there is no
+                    # alternative rather than on every path.
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(
+                        handle.fileno(), fcntl.LOCK_SH if shared else fcntl.LOCK_EX,
+                    )
+            except OSError as exc:
+                raise _refuse(exc) from exc
             yield
         finally:
             try:
@@ -75,12 +116,12 @@ class WorkflowTemplateStore:
         self.path = Path(path or DEFAULT_GLOBAL_ROOT / "workflow-templates.json").expanduser()
 
     def list(self) -> list[dict[str, Any]]:
-        with _exclusive_file_lock(self.path):
+        with _file_lock(self.path, shared=True):
             values, _receipts = self._read_state_unlocked()
         return sorted(values.values(), key=lambda item: (item["name"], item["template_id"]))
 
     def get(self, template_id: str) -> dict[str, Any]:
-        with _exclusive_file_lock(self.path):
+        with _file_lock(self.path, shared=True):
             item = self._read_state_unlocked()[0].get(template_id)
         if item is None:
             raise WorkflowTemplateError(f"unknown Workflow template: {template_id}")
@@ -105,15 +146,23 @@ class WorkflowTemplateStore:
         if not isinstance(workflow_id, str) or not workflow_id.strip():
             raise WorkflowTemplateError("template source must declare metadata.id")
         workflow_id = workflow_id.strip()
-        if not workflow_id.startswith("workflow:"):
-            workflow_id = f"workflow:{workflow_id}"
+        # The DSL's own rule, imported rather than restated: `metadata.id` is a
+        # bare identifier and the compiler is what prefixes it. A source that
+        # arrives already prefixed cannot be compiled — the pattern forbids the
+        # colon — so accepting one only stores a template that every attempt to
+        # instantiate will reject, which is a worse answer than refusing it here.
+        if not re.match(ID_PATTERN, workflow_id):
+            raise WorkflowTemplateError(
+                f"template metadata.id must match {ID_PATTERN}: {workflow_id}"
+            )
+        workflow_id = f"workflow:{workflow_id}"
         canonical = json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         request_hash = "sha256:" + hashlib.sha256(json.dumps({
             "name": name.strip(), "source": source,
             "source_format": source_format, "expected_version": expected_version,
         }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         now = datetime.now(timezone.utc).isoformat()
-        with _exclusive_file_lock(self.path):
+        with _file_lock(self.path):
             values, receipts = self._read_state_unlocked()
             if idempotency_key:
                 receipt = receipts.get(idempotency_key)
@@ -153,7 +202,7 @@ class WorkflowTemplateStore:
         request_hash = "sha256:" + hashlib.sha256(json.dumps({
             "template_id": template_id, "expected_version": expected_version,
         }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        with _exclusive_file_lock(self.path):
+        with _file_lock(self.path):
             values, receipts = self._read_state_unlocked()
             if idempotency_key:
                 receipt = receipts.get(idempotency_key)
@@ -215,66 +264,18 @@ class WorkflowTemplateStore:
         self, values: Mapping[str, Mapping[str, Any]],
         receipts: Mapping[str, Mapping[str, Any]],
     ) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(f".{uuid.uuid4().hex}.tmp")
-        temporary.write_text(json.dumps({
+        document = json.dumps({
             "schema_version": 1, "templates": values, "receipts": receipts,
-        }, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        temporary.replace(self.path)
-
-
-def import_legacy_workflow_library(
-    library_path: Path | str, store: WorkflowTemplateStore,
-) -> int:
-    """Turn old host-wide published sources into templates without deleting them.
-
-    Canonical IR is deliberately not reverse-compiled. Definitions that never
-    retained author source remain in the read-only legacy database for manual
-    recovery; only source that can be recompiled by a target Runtime is shared.
-    """
-
-    path = Path(library_path).expanduser()
-    if not path.exists():
-        return 0
-    try:
-        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        connection.row_factory = sqlite3.Row
-        rows = connection.execute("""
-            SELECT d.name, v.workflow_id, v.definition_hash,
-                   v.source_format, v.source_text
-            FROM workflow_versions v
-            JOIN workflow_definitions d ON d.workflow_id=v.workflow_id
-            JOIN (
-                SELECT workflow_id, MAX(version) AS version
-                FROM workflow_versions GROUP BY workflow_id
-            ) latest ON latest.workflow_id=v.workflow_id AND latest.version=v.version
-            WHERE v.source_text IS NOT NULL
-            ORDER BY v.workflow_id
-        """).fetchall()
-        connection.close()
-    except sqlite3.Error as exc:
-        raise WorkflowTemplateStorageError(
-            f"cannot read legacy Workflow library {path}: {exc}"
-        ) from exc
-
-    imported = 0
-    for row in rows:
-        source = str(row["source_text"])
+        }, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        # A catalog that cannot be written is the same kind of news as one that
+        # cannot be read, and the adapters answer 503 to it. Left raw, a
+        # read-only home directory reached the caller as a traceback instead.
         try:
-            document = (
-                json.loads(source) if row["source_format"] in {"json", "ui"}
-                else yaml.safe_load(source)
-            )
-            normalized = json.dumps(document, ensure_ascii=False)
-            before = len(store.list())
-            store.put(
-                name=str(row["name"]), source=normalized,
-                expected_version=0,
-                idempotency_key=f"legacy-library:{row['definition_hash']}",
-            )
-            imported += int(len(store.list()) > before)
-        except WorkflowTemplateStorageError:
-            raise
-        except (ValueError, TypeError, WorkflowTemplateError, yaml.YAMLError):
-            continue
-    return imported
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_suffix(f".{uuid.uuid4().hex}.tmp")
+            temporary.write_text(document, encoding="utf-8")
+            temporary.replace(self.path)
+        except OSError as exc:
+            raise WorkflowTemplateStorageError(
+                f"cannot write Workflow template catalog: {exc}"
+            ) from exc

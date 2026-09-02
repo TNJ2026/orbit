@@ -1029,26 +1029,9 @@ def main() -> None:
             identifier, _ = WorkspaceRegistry().register(args.workspace)
             print(json.dumps(workspace_urls(identifier), sort_keys=True))
             return
-        from .global_control import (
-            WorkflowTemplateStore, import_legacy_workflow_library,
-        )
-        from .platform.projects import (
-            public_workflow_db_path, retired_workflow_library_path,
-        )
+        from .global_control import WorkflowTemplateStore
 
         templates = WorkflowTemplateStore()
-        imported = sum(
-            import_legacy_workflow_library(path, templates)
-            for path in (
-                public_workflow_db_path(), retired_workflow_library_path(),
-            )
-        )
-        if imported:
-            print(
-                f"workflow templates: imported {imported} source(s) from the "
-                "legacy host-wide library",
-                flush=True,
-            )
         uvicorn.run(
             create_hub_app(template_store=templates),
             host=args.host, port=args.port, log_level="info",

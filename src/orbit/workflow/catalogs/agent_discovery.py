@@ -280,6 +280,41 @@ def _probe_version(
     return match.group(1) if match else None
 
 
+def _installed_candidates(
+    specs: Sequence[AgentCliSpec],
+    which: Callable[[str], str | None],
+    profile_root: Path | None,
+):
+    """Every trusted CLI this PATH offers, with its profiles already expanded.
+
+    Shared so that "what is installed here" has one answer. The two discovery
+    entry points differ in how they get a version — one always probes, one
+    consults a machine-wide cache first — and nothing else; when they each
+    walked PATH themselves the two walks drifted apart, and the cached one
+    silently started probing once per Hermes profile.
+
+    `identity` is what a cache keys on: a path is not evidence that the file
+    behind it is the one that was probed. It is None when the executable
+    cannot be stat'd, which the caller reads as "do not trust a cached row".
+    """
+
+    hermes_profiles = profile_root or (Path.home() / ".hermes" / "profiles")
+    for base_spec in specs:
+        resolved = which(base_spec.executable)
+        if not resolved:
+            continue
+        executable = str(Path(resolved))
+        try:
+            stat = Path(executable).stat()
+            identity = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+        except OSError:
+            identity = None
+        candidates = (base_spec,)
+        if base_spec.name == "hermes":
+            candidates += _hermes_profile_specs(base_spec, hermes_profiles)
+        yield executable, identity, candidates
+
+
 def discover_agent_clis(
     specs: Sequence[AgentCliSpec] = TRUSTED_AGENT_CLIS,
     *,
@@ -295,18 +330,14 @@ def discover_agent_clis(
     one agent per profile under ``~/.hermes/profiles``.
     """
 
-    hermes_profiles = profile_root or (Path.home() / ".hermes" / "profiles")
     found: list[DiscoveredAgent] = []
-    for spec in specs:
-        resolved = which(spec.executable)
-        if not resolved:
-            continue
-        version = _probe_version(resolved, spec, runner)
-        path = str(Path(resolved))
-        found.append(DiscoveredAgent(spec, path, version))
-        if spec.name == "hermes":
-            for profile_spec in _hermes_profile_specs(spec, hermes_profiles):
-                found.append(DiscoveredAgent(profile_spec, path, version))
+    for executable, _identity, candidates in _installed_candidates(
+        specs, which, profile_root,
+    ):
+        # One probe per executable: the profiles of a CLI differ in name and
+        # invocation, never in `version_args`.
+        version = _probe_version(executable, candidates[0], runner)
+        found.extend(DiscoveredAgent(spec, executable, version) for spec in candidates)
     return tuple(found)
 
 
@@ -357,34 +388,48 @@ def discover_agent_clis_cached(
     except (OSError, ValueError, TypeError):
         pass
 
-    hermes_profiles = profile_root or (Path.home() / ".hermes" / "profiles")
     found: list[DiscoveredAgent] = []
     cache_rows: list[dict[str, object]] = []
     observed_at = clock()
-    for base_spec in specs:
-        resolved = which(base_spec.executable)
-        if not resolved:
-            continue
-        executable = str(Path(resolved))
-        try:
-            stat = Path(executable).stat()
-            identity = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
-        except OSError:
-            identity = None
-        candidates = (base_spec,)
-        if base_spec.name == "hermes":
-            candidates += _hermes_profile_specs(base_spec, hermes_profiles)
+    for executable, identity, candidates in _installed_candidates(
+        specs, which, profile_root,
+    ):
+        # A probe runs `[executable, *spec.version_args]` and nothing else, and
+        # a profile spec rewrites only the name and the invocation — so every
+        # profile of one CLI asks the identical question. Twenty Hermes
+        # profiles meant twenty-one identical `hermes --version` runs on any
+        # start that missed the cache, each able to spend the full probe
+        # timeout. Asked once per distinct command, as `discover_agent_clis`
+        # has always done.
+        probed_versions: dict[tuple[str, ...], str | None] = {}
         for spec in candidates:
             key = (spec.name, executable, identity)
             prior = cached.get(key)
+            # A failed probe is cached too — one timeout under load must not be
+            # re-paid on every start — but for much less time than a successful
+            # one, and never for longer than the caller agreed to tolerate:
+            # `max_age_seconds=0` means "ask now", including about an Agent
+            # that was missing a moment ago.
             ttl = (
-                AGENT_DISCOVERY_FAILURE_CACHE_SECONDS
+                min(max_age_seconds, AGENT_DISCOVERY_FAILURE_CACHE_SECONDS)
                 if prior is not None and prior[0] is None else max_age_seconds
             )
-            if prior is not None and observed_at - prior[1] <= ttl:
+            # The lower bound is not decoration. A row written while the clock
+            # was ahead — an NTP correction, a resumed VM, a home directory
+            # shared with a host that disagrees — has a negative age, which
+            # satisfies any TTL and pins that entry until wall-clock time
+            # catches up. For a `version=None` row that leaves an Agent
+            # unregistered for as long as the skew lasts, which is the
+            # never-expiring failure this cache was rewritten to end.
+            age = None if prior is None else observed_at - prior[1]
+            if prior is not None and age is not None and 0 <= age <= ttl:
                 version, probed_at = prior
             else:
-                version = _probe_version(executable, spec, runner)
+                if spec.version_args not in probed_versions:
+                    probed_versions[spec.version_args] = _probe_version(
+                        executable, spec, runner,
+                    )
+                version = probed_versions[spec.version_args]
                 probed_at = observed_at
             found.append(DiscoveredAgent(spec, executable, version))
             cache_rows.append({

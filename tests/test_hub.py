@@ -402,7 +402,7 @@ class HubGlobalControlTests(unittest.TestCase):
     def test_template_is_global_then_published_by_target_runtime(self) -> None:
         source = json.dumps({
             "dsl_version": "1.0",
-            "metadata": {"id": "workflow:shared", "name": "Shared"},
+            "metadata": {"id": "shared", "name": "Shared"},
             "nodes": [], "edges": [],
         })
         manager = self.Manager()
@@ -455,7 +455,7 @@ class HubGlobalControlTests(unittest.TestCase):
     def test_global_template_writes_require_concurrency_controls(self) -> None:
         source = json.dumps({
             "dsl_version": "1.0",
-            "metadata": {"id": "workflow:shared", "name": "Shared"},
+            "metadata": {"id": "shared", "name": "Shared"},
             "nodes": [], "edges": [],
         })
         with tempfile.TemporaryDirectory() as temporary, AsgiHarness(create_hub_app(
@@ -493,7 +493,7 @@ class HubGlobalControlTests(unittest.TestCase):
                         "name": "x", "expected_version": 0,
                         "source": json.dumps({
                             "dsl_version": "1.0",
-                            "metadata": {"id": "workflow:x", "name": "x"},
+                            "metadata": {"id": "x", "name": "x"},
                             "nodes": [], "edges": [],
                         }),
                     },
