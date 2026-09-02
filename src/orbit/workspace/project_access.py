@@ -29,7 +29,8 @@ import os
 from pathlib import Path
 import secrets
 import shutil
-from typing import Iterable, Sequence
+import threading
+from typing import Callable, Iterable, Sequence
 
 from .git import GitWorkspaceProvider, WorkspaceError, workspace_slug
 
@@ -60,6 +61,9 @@ class GitWorktreeGrant:
     """Whole-tree access to a git Workspace, via an isolated worktree."""
 
     provider: GitWorkspaceProvider
+    _lock: threading.RLock = field(
+        default_factory=threading.RLock, repr=False, compare=False,
+    )
 
     def acquire(self, ref: str, *, files: Sequence[str] | None = None) -> Path:
         # `files` is accepted and ignored: a worktree already isolates the
@@ -68,10 +72,20 @@ class GitWorktreeGrant:
         # `files` matters to `FileAllowlistGrant`, the other implementation of
         # this same interface — a caller that does not know which one it is
         # talking to should never have to care.
-        return self.provider.acquire(ref).path
+        with self._lock:
+            return self.provider.acquire(ref).path
 
     def sweep(self, live_refs: Iterable[str]) -> tuple[str, ...]:
-        return self.provider.sweep(frozenset(live_refs))
+        with self._lock:
+            return self.provider.sweep(frozenset(live_refs))
+
+    def sweep_live(
+        self, live_refs: Callable[[], Iterable[str]],
+    ) -> tuple[str, ...]:
+        """Resolve liveness and reclaim under the same lock as acquire()."""
+
+        with self._lock:
+            return self.provider.sweep(frozenset(live_refs()))
 
 
 @dataclass
@@ -87,6 +101,10 @@ class FileAllowlistGrant:
     min_free_fraction: float = DEFAULT_MIN_FREE_FRACTION
     _root: Path = field(init=False, repr=False)
     _staging_root: Path = field(init=False, repr=False)
+    _markers_root: Path = field(init=False, repr=False)
+    _lock: threading.RLock = field(
+        default_factory=threading.RLock, repr=False, compare=False,
+    )
 
     def __post_init__(self) -> None:
         self.project_root = Path(self.project_root).resolve()
@@ -99,26 +117,43 @@ class FileAllowlistGrant:
         # abandoned one. Kept on the same filesystem as `_root` (both direct
         # children of `state_dir`) so the rename below is atomic.
         self._staging_root = self.state_dir / "project-files-staging"
+        # Keep implementation metadata outside the directory handed to the
+        # Agent: an allowlist must not grow an undeclared marker file.
+        self._markers_root = self.state_dir / "project-files-complete"
 
     def _destination(self, ref: str) -> Path:
         return self._root / workspace_slug(ref)
 
+    def _marker(self, ref: str) -> Path:
+        return self._markers_root / workspace_slug(ref)
+
     def acquire(self, ref: str, *, files: Sequence[str] | None = None) -> Path:
+        with self._lock:
+            return self._acquire_locked(ref, files=files)
+
+    def _acquire_locked(
+        self, ref: str, *, files: Sequence[str] | None = None,
+    ) -> Path:
         if not files:
             raise WorkspaceError(
                 "FileAllowlistGrant.acquire requires a non-empty files allowlist"
             )
         destination = self._destination(ref)
+        marker = self._marker(ref)
         # Idempotent reattach, the same guarantee `GitWorkspaceProvider.acquire`
         # already gives: a retry of one node is meant to see what an earlier
-        # attempt left, not a freshly re-copied directory. Safe to trust on
-        # sight: nothing below ever creates `destination` except by renaming
-        # a fully-populated staging directory onto it in one atomic step, so
-        # its existing at this path at all *is* "an earlier attempt finished
-        # copying everything it was asked to" — never a partial copy a failed
-        # attempt left behind.
-        if destination.exists() and any(destination.iterdir()):
+        # attempt left, not a freshly re-copied directory. A destination is
+        # reusable only when its out-of-band completion marker exists; older
+        # versions created this directory directly and could leave a partial
+        # copy behind after failure.
+        if destination.is_dir() and marker.is_file():
             return destination
+
+        # Versions before the completion marker could leave a non-empty,
+        # partially copied destination behind. Never trust that legacy state.
+        if destination.exists():
+            shutil.rmtree(destination, ignore_errors=True)
+        marker.unlink(missing_ok=True)
 
         staging = self._staging_root / f"{workspace_slug(ref)}.{secrets.token_hex(8)}"
         try:
@@ -143,10 +178,12 @@ class FileAllowlistGrant:
                 # Rename onto an existing non-empty directory always fails,
                 # so this is expected, not a real failure — reuse the winner
                 # and drop our own now-redundant copy.
-                if destination.exists() and any(destination.iterdir()):
+                if destination.is_dir() and marker.is_file():
                     shutil.rmtree(staging, ignore_errors=True)
                     return destination
                 raise
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text("complete\n", encoding="utf-8")
         except QuotaExceeded:
             shutil.rmtree(staging, ignore_errors=True)
             raise
@@ -208,6 +245,25 @@ class FileAllowlistGrant:
             )
 
     def sweep(self, live_refs: Iterable[str]) -> tuple[str, ...]:
+        with self._lock:
+            return self._sweep_locked(live_refs)
+
+    def sweep_live(
+        self, live_refs: Callable[[], Iterable[str]],
+    ) -> tuple[str, ...]:
+        """Resolve liveness and reclaim under the same lock as acquire()."""
+
+        with self._lock:
+            return self._sweep_locked(live_refs())
+
+    def _sweep_locked(self, live_refs: Iterable[str]) -> tuple[str, ...]:
+        # With the acquire lock held, no staging directory can belong to a
+        # live copy in this Runtime. Anything here survived a killed process
+        # (or an earlier failed cleanup) and is safe to reclaim now.
+        if self._staging_root.exists():
+            for child in self._staging_root.iterdir():
+                if child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
         if not self._root.exists():
             return ()
         live_slugs = {workspace_slug(ref) for ref in live_refs}
@@ -216,5 +272,6 @@ class FileAllowlistGrant:
             if child.name in live_slugs:
                 continue
             shutil.rmtree(child, ignore_errors=True)
+            (self._markers_root / child.name).unlink(missing_ok=True)
             reclaimed.append(child.name)
         return tuple(reclaimed)

@@ -256,8 +256,12 @@ class RuntimeComposition:
         wrong to keep charging disk for merely because its row is kept longer.
         """
 
-        live_refs = self.langgraph_service.live_workspace_refs()
-        reclaimed = self.project_workspace_grant.sweep(live_refs)
+        # The grant resolves this callback while holding the same lock used by
+        # acquire(). This closes the gap where a node could claim and create a
+        # workspace after a stale liveness snapshot but before reclamation.
+        reclaimed = self.project_workspace_grant.sweep_live(
+            self.langgraph_service.live_workspace_refs,
+        )
         return bool(reclaimed)
 
     def _prune_once(self) -> bool:

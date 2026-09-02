@@ -264,6 +264,57 @@ class FileAllowlistProjectAccessTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertTrue((second / "extra.txt").exists())
 
+    def test_a_legacy_nonempty_destination_without_a_marker_is_rebuilt(self) -> None:
+        grant = FileAllowlistGrant(self.root, self.state_dir)
+        destination = grant._destination("run-1:node-1")
+        destination.mkdir(parents=True)
+        (destination / "partial.txt").write_text("left by the old copier\n")
+
+        rebuilt = grant.acquire("run-1:node-1", files=["a.txt"])
+
+        self.assertEqual(["a.txt"], [item.name for item in rebuilt.iterdir()])
+        self.assertFalse((rebuilt / "partial.txt").exists())
+
+    def test_sweep_reclaims_staging_left_by_a_killed_process(self) -> None:
+        grant = FileAllowlistGrant(self.root, self.state_dir)
+        orphan = grant._staging_root / "orphan"
+        orphan.mkdir(parents=True)
+        (orphan / "large.bin").write_bytes(b"orphaned")
+
+        grant.sweep(())
+
+        self.assertFalse(orphan.exists())
+
+    def test_acquire_cannot_interleave_after_the_liveness_snapshot(self) -> None:
+        grant = FileAllowlistGrant(self.root, self.state_dir)
+        snapshot_taken = threading.Event()
+        allow_sweep = threading.Event()
+
+        def live_refs():
+            snapshot_taken.set()
+            self.assertTrue(allow_sweep.wait(timeout=2))
+            return frozenset()
+
+        sweeper = threading.Thread(target=lambda: grant.sweep_live(live_refs))
+        sweeper.start()
+        self.assertTrue(snapshot_taken.wait(timeout=2))
+
+        result = []
+        acquirer = threading.Thread(
+            target=lambda: result.append(
+                grant.acquire("run-1:node-1", files=["a.txt"])
+            )
+        )
+        acquirer.start()
+        # The acquire must wait until the sweep based on that snapshot is done.
+        self.assertEqual([], result)
+        allow_sweep.set()
+        sweeper.join(timeout=2)
+        acquirer.join(timeout=2)
+
+        self.assertEqual(1, len(result))
+        self.assertTrue((result[0] / "a.txt").exists())
+
     def test_files_matching_nothing_fails_outright_rather_than_an_empty_grant(self) -> None:
         grant = FileAllowlistGrant(self.root, self.state_dir)
         with self.assertRaises(WorkspaceError):
