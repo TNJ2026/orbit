@@ -1335,6 +1335,79 @@ class StdioTransportTests(ApiTestCase):
         self.assertEqual(-32001, responses[0]["error"]["code"])
 
 
+class HubDoorIdentityTests(unittest.TestCase):
+    """The Session that acted is recorded, whichever door it came through.
+
+    A Runtime the Hub launched serves `serve_mcp=False`, so the Hub reaches it
+    at `/internal/v1/agent-tools` and forwards the actor header there. While
+    only `/mcp` accepted that header, every call routed through the Hub
+    resolved to the single loopback operator: one name on every Run, every
+    cancellation and every authoring job in a Hub-managed Workspace.
+    """
+
+    def setUp(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from orbit.web.app import create_app
+        from orbit.web.local_identity import (
+            local_authorizer, loopback_scoped_mcp_authenticator,
+        )
+        from tests.test_api_v1 import SCHEMAS, transform_registration
+        from tests.test_web_composition import publish_linear_workflow
+
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self.temp.cleanup)
+        self.state = Path(self.temp.name) / "langgraph"
+        db = Path(self.temp.name) / "runtime.db"
+        self.app = create_app(
+            db,
+            handlers=[transform_registration()], schemas=SCHEMAS,
+            poll_seconds=0.02,
+            # The production pair, which is the point of this test.
+            authenticator=lambda request: loopback_scoped_mcp_authenticator(
+                request, trusted_prefix="harness:session:",
+            ),
+            authorizer=local_authorizer(trusted_prefix="harness:session:"),
+            single_goal_mode=False,
+            langgraph_state_directory=self.state,
+        )
+        publish_linear_workflow(db)
+
+    def call(self, client, name, arguments, *, actor):
+        return client.request(
+            "POST", "/internal/v1/agent-tools", actor=actor,
+            body={"operation": "call", "name": name, "arguments": arguments},
+        ).json()
+
+    def owners(self) -> set[str]:
+        import sqlite3
+
+        with sqlite3.connect(self.state / "langgraph-runs.sqlite3") as runs:
+            return {row[0] for row in runs.execute(
+                "SELECT DISTINCT owner_actor FROM langgraph_runs"
+            )}
+
+    def test_a_run_started_through_the_hub_door_belongs_to_its_session(self) -> None:
+        session = "harness:session:abc-123"
+        with AsgiHarness(self.app) as client:
+            answer = self.call(client, "start_run", {
+                "workflow_id": "workflow:linear", "input": {"value": 0},
+                "idempotency_key": "through-the-hub",
+            }, actor=session)
+
+        self.assertNotIn("protocol_error", answer, answer)
+        self.assertEqual({session}, self.owners())
+
+    def test_that_door_still_refuses_a_name_outside_the_prefix(self) -> None:
+        with AsgiHarness(self.app) as client:
+            answer = self.call(client, "list_runs", {}, actor="attacker")
+
+        # No identity at all, so no scopes: the tool is refused rather than
+        # served under the loopback operator's name.
+        self.assertIn("protocol_error", answer, answer)
+
+
 class McpSessionRegistryTests(unittest.TestCase):
     """Presence is observed, never declared: silent clients age out."""
 

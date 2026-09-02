@@ -28,6 +28,13 @@ LOCAL_SCOPES: tuple[str, ...] = (
 )
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 SCOPED_ACTOR_HEADER = "x-orbit-actor"
+# Where a Session-scoped actor may arrive. `/mcp` is the MCP transport served
+# directly; `/internal/v1/agent-tools` is the same tool backend reached through
+# the Hub, which forwards the header it was handed. They are one surface with
+# two doors, and `orbit serve` under a Hub mounts only the second — so naming
+# just `/mcp` here meant the header was never read at all. Nothing else is on
+# this list: the browser UI and `/api/v1` are the one loopback operator.
+SCOPED_ACTOR_PATHS = frozenset({"/mcp", "/internal/v1/agent-tools"})
 
 
 def loopback_authenticator(request: Request) -> str | None:
@@ -45,12 +52,12 @@ def loopback_scoped_mcp_authenticator(
     Orbit's local deployment already treats every loopback process as the one
     operator.  The header refines that operator into Session slots; it grants
     no scopes a loopback caller did not already have.  It is accepted only on
-    `/mcp`, only under the configured prefix, and with the same bounded actor
-    alphabet as the stdio transport.
+    the MCP doors in `SCOPED_ACTOR_PATHS`, only under the configured prefix,
+    and with the same bounded actor alphabet as the stdio transport.
     """
 
     actor = loopback_authenticator(request)
-    if actor is None or request.url.path != "/mcp":
+    if actor is None or request.url.path not in SCOPED_ACTOR_PATHS:
         return actor
     candidate = request.headers.get(SCOPED_ACTOR_HEADER)
     if candidate is None:

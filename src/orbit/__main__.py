@@ -367,8 +367,7 @@ def _serve(args) -> None:
     from .web.app import create_app
     from .web.builtin_handlers import BUILTIN_SCHEMAS, builtin_handlers
     from .web.local_identity import (
-        LOCAL_ACTOR, local_authorizer, loopback_authenticator,
-        loopback_scoped_mcp_authenticator,
+        LOCAL_ACTOR, local_authorizer, loopback_scoped_mcp_authenticator,
     )
     from .web.schema_guard import MixedSchemaError, assert_runtime_schema
     from .workflow.artifacts import LocalCASBackend
@@ -456,11 +455,16 @@ def _serve(args) -> None:
         os.kill(os.getpid(), signal.SIGINT)
 
     try:
-        harness_actor_prefix = "harness:session:" if args.mcp_tool_profile == "harness" else None
-        authenticator = loopback_authenticator if harness_actor_prefix is None else (
-            lambda request: loopback_scoped_mcp_authenticator(
-                request, trusted_prefix=harness_actor_prefix,
-            )
+        # Not conditional on the tool profile. The prefix decides which header
+        # values are *accepted*, never what they may do — a scoped actor holds
+        # exactly the scopes a loopback caller already held — and the Hub
+        # launches Runtimes without `--mcp-tool-profile`. Gating it on the
+        # profile meant every call routed through the Hub arrived as `local`,
+        # so a Workspace the Hub manages recorded every Run, every cancellation
+        # and every authoring job against one name.
+        harness_actor_prefix = "harness:session:"
+        authenticator = lambda request: loopback_scoped_mcp_authenticator(
+            request, trusted_prefix=harness_actor_prefix,
         )
         app = create_app(
             db_path,

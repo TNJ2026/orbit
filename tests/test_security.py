@@ -118,6 +118,69 @@ class AuthorizationTests(unittest.TestCase):
             api, trusted_prefix="harness:session:",
         ))
 
+    def test_the_hub_door_carries_a_session_identity_too(self) -> None:
+        """`/mcp` is not the only way into the tool backend, and was not ours.
+
+        A Runtime the Hub launched serves `serve_mcp=False`, so its only door
+        is `/internal/v1/agent-tools` and the Hub forwards the header there.
+        While only `/mcp` was on the list every call through the Hub resolved
+        to `local`, and a Workspace the Hub manages recorded every Run against
+        that one name.
+        """
+
+        request = SimpleNamespace(
+            client=SimpleNamespace(host="127.0.0.1"),
+            url=SimpleNamespace(path="/internal/v1/agent-tools"),
+            headers={"x-orbit-actor": "harness:session:abc-123"},
+        )
+        self.assertEqual(
+            "harness:session:abc-123",
+            loopback_scoped_mcp_authenticator(
+                request, trusted_prefix="harness:session:",
+            ),
+        )
+
+    def test_the_hub_door_refuses_an_actor_outside_the_prefix(self) -> None:
+        """Widening where the header is read must not widen what it may say."""
+
+        request = SimpleNamespace(
+            client=SimpleNamespace(host="127.0.0.1"),
+            url=SimpleNamespace(path="/internal/v1/agent-tools"),
+            headers={"x-orbit-actor": "attacker"},
+        )
+        self.assertIsNone(loopback_scoped_mcp_authenticator(
+            request, trusted_prefix="harness:session:",
+        ))
+        remote = SimpleNamespace(
+            client=SimpleNamespace(host="10.0.0.9"),
+            url=SimpleNamespace(path="/internal/v1/agent-tools"),
+            headers={"x-orbit-actor": "harness:session:abc-123"},
+        )
+        self.assertIsNone(loopback_scoped_mcp_authenticator(
+            remote, trusted_prefix="harness:session:",
+        ))
+
+    def test_every_tool_door_is_on_the_scoped_actor_list(self) -> None:
+        """The coupling that broke: one module names the route, another lists it.
+
+        Renaming or adding a door without adding it here does not fail — it
+        quietly resolves every caller on it to the single loopback operator.
+        """
+
+        import inspect
+
+        from orbit.web.local_identity import SCOPED_ACTOR_PATHS
+        from orbit.web.mcp import agent_tool_routes, mcp_routes
+
+        for build in (agent_tool_routes, mcp_routes):
+            routes = build(lambda _message, _actor: None)
+            for route in routes:
+                self.assertIn(route.path, SCOPED_ACTOR_PATHS, build.__name__)
+        self.assertEqual(
+            "/internal/v1/agent-tools",
+            inspect.signature(agent_tool_routes).parameters["path"].default,
+        )
+
     def test_scoped_identity_requires_a_session_suffix(self) -> None:
         request = SimpleNamespace(
             client=SimpleNamespace(host="127.0.0.1"),
