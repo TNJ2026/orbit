@@ -61,6 +61,18 @@ DEFAULT_MIN_FREE_FRACTION = 0.10
 # itself never polls faster than every 5 minutes, so ten minutes of headroom
 # costs nothing real while making the race essentially impossible to hit.
 DEFAULT_MIN_AGE_SECONDS = 600.0
+# Bumped whenever a destination's on-disk shape changes in a way new code
+# cannot tell apart from old code's by inspecting it — `acquire()`'s "a
+# non-empty destination is a complete one" trust depends entirely on that
+# being true. Before this constant existed, a destination could be left
+# non-empty but incomplete by a failure partway through a direct copy (the
+# very first version of this class, predating the atomic staging-then-rename
+# invariant `acquire()` uses below); a directory built by that code and left
+# on disk across an upgrade is otherwise indistinguishable, by name alone,
+# from one this invariant actually produced. Folding the version into the
+# directory name means new code only ever looks at a path old code never
+# wrote to, rather than re-deriving completeness at read time.
+STORAGE_VERSION = 2
 
 
 class QuotaExceeded(RuntimeError):
@@ -112,13 +124,13 @@ class FileAllowlistGrant:
     def __post_init__(self) -> None:
         self.project_root = Path(self.project_root).resolve()
         self.state_dir = Path(self.state_dir)
-        self._root = self.state_dir / "project-files"
+        self._root = self.state_dir / f"project-files-v{STORAGE_VERSION}"
         # A sibling of `_root`, not a child of it: `sweep()` only ever
         # iterates `_root` for reuse-checking, so a copy still being staged
         # here never collides on a name with a finished destination. Kept on
         # the same filesystem as `_root` (both direct children of
         # `state_dir`) so the rename in `acquire()` below is atomic.
-        self._staging_root = self.state_dir / "project-files-staging"
+        self._staging_root = self.state_dir / f"project-files-staging-v{STORAGE_VERSION}"
 
     def _destination(self, ref: str) -> Path:
         return self._root / workspace_slug(ref)
@@ -136,7 +148,10 @@ class FileAllowlistGrant:
         # a fully-populated staging directory onto it in one atomic step, so
         # its existing at this path at all *is* "an earlier attempt finished
         # copying everything it was asked to" — never a partial copy a failed
-        # attempt left behind.
+        # attempt left behind. That trust depends on `STORAGE_VERSION`: it is
+        # what keeps a directory some *other* version of this code produced
+        # (which may not carry the same guarantee) from ever being found at
+        # this path in the first place.
         if destination.exists() and any(destination.iterdir()):
             return destination
 

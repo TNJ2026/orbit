@@ -32,6 +32,7 @@ from orbit.workspace import (
     FileAllowlistGrant, GitWorkspaceProvider, GitWorktreeGrant, QuotaExceeded,
     WorkspaceError, WorkspaceUnavailable,
 )
+from orbit.workspace.git import workspace_slug
 
 
 def context(
@@ -350,6 +351,30 @@ class FileAllowlistProjectAccessTests(unittest.TestCase):
         self.assertEqual(
             ["a.txt", "b.txt"],
             sorted(p.name for p in result.iterdir()),
+        )
+
+    def test_a_pre_versioning_partial_copy_left_on_disk_is_never_reused(self) -> None:
+        """The version before the atomic staging-then-rename invariant could
+        leave a destination non-empty but incomplete after a failed copy.
+        Upgrading over that on-disk state must not resurrect the bug: a
+        directory built by that older code has to be invisible to this one,
+        not re-validated by it."""
+
+        (self.root / "b.txt").write_text("also visible\n")
+        grant = FileAllowlistGrant(self.root, self.state_dir)
+
+        # What the pre-STORAGE_VERSION code left behind: a real, non-empty,
+        # but incomplete directory at the *unversioned* path name it used.
+        stale_root = self.state_dir / "project-files"
+        stale_destination = stale_root / workspace_slug("run-1:node-1")
+        stale_destination.mkdir(parents=True)
+        (stale_destination / "a.txt").write_text("copied before the crash\n")
+
+        result = grant.acquire("run-1:node-1", files=["a.txt", "b.txt"])
+
+        self.assertNotEqual(stale_destination, result)
+        self.assertEqual(
+            ["a.txt", "b.txt"], sorted(p.name for p in result.iterdir()),
         )
 
     def test_concurrent_acquire_of_the_same_ref_never_corrupts_the_destination(self) -> None:
