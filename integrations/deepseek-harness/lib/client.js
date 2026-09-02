@@ -1776,7 +1776,8 @@ window.__ModuleLoader__.load({
 							!layout.collapsed
 						], controller.signal);
 						if (controller.signal.aborted) return;
-						const workflowNames = new Map((state.workflows ?? []).map((item) => [item.workflow_id, item.name || item.workflow_id]));
+						const workflowNames = new Map(Object.entries(state.retiredWorkflowNames ?? {}));
+						for (const item of state.workflows ?? []) workflowNames.set(item.workflow_id, item.name || item.workflow_id);
 						const next = orderRows(state.runs.map((run) => toRow(run, workflowNames.get(run.workflow_id))));
 						setRows(next);
 						setUiUrl(state.uiUrl);

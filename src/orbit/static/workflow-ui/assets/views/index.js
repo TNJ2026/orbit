@@ -160,6 +160,18 @@ export function createViews(context) {
     ]));
   }
 
+  /* A workflow that was deleted still opens: its runs did not go with it, and
+     a person following a link from one of them is owed the definition it was
+     executing. Nothing here can be acted on, so the page says why up front
+     rather than leaving a reader wondering where the buttons went. */
+  function deletedNotice(entry) {
+    if (!entry?.archived) return null;
+    return el("div", { class: "banner warn workflow-blocked" }, [
+      el("div", { class: "eyebrow", text: i18n.t("workflows.deleted.title") }),
+      el("p", { text: i18n.t("workflows.deleted.description") }),
+    ]);
+  }
+
   function engineRefusalNotice(entry) {
     const refusal = engineRefusal(entry);
     if (!refusal) return null;
@@ -2866,6 +2878,7 @@ export function createViews(context) {
                 : navigate({ view: "workflows", runId: null }),
             }),
           ]),
+          deletedNotice(value),
           engineRefusalNotice(value),
           agentBindingNotice(value),
           handlerDriftNotice(value, draw),

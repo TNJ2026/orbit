@@ -28,6 +28,8 @@ export declare class OrbitRemoteService extends TypertRemoteService {
     /** The last thing that went wrong while writing a Workflow here. */
     private readonly authoringTrouble;
     private readonly bridgeDiagnostics;
+    /** Deleted Workflows the panel still has to name, by Workspace and id. */
+    private readonly retiredNames;
     private readonly hostSessions;
     private readonly attachments;
     private readonly workspaceRegistry;
@@ -178,9 +180,26 @@ export declare class OrbitRemoteService extends TypertRemoteService {
         uiUrl: string;
         workflows: readonly WorkflowSummary[];
         agents: readonly AgentSummary[];
+        retiredWorkflowNames: Record<string, string>;
         authoring: readonly AuthoringSummary[];
         steps: Record<string, StepSummary[]>;
     }>;
+    /**
+     * Names for the Workflows a Run ran and the catalog no longer offers.
+     *
+     * Deleting a Workflow retires its id; it does not retract the Runs that
+     * carry it, which go on executing and being opened. The catalog is the
+     * wrong place to look one of those up — a catalog is what can be started —
+     * so the panel had nothing to name them by and printed the id, which reads
+     * as a Goal pointed at something that is not there. Orbit keeps the
+     * definition for exactly this, so ask it.
+     *
+     * Read once per id and remembered, negative answers included: a retired id
+     * is never reissued, so neither answer can go out of date, and a poll that
+     * runs every couple of seconds must not re-ask either one.
+     */
+    private retiredWorkflowNames;
+    private retiredKey;
     /**
      * The steps of the Runs that are still moving, so the Goal page can draw them.
      *

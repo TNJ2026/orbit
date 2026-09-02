@@ -240,6 +240,30 @@ test('only the tick the press starts is forced', async () => {
   assert.match(state, /if \(force \|\| authoring\.published\) \{[\s\S]{0,240}?refreshCatalog\(scope\)/)
 })
 
+test('a Goal keeps the name of a Workflow that was deleted', async () => {
+  /* Deleting a Workflow retires its id; the Runs that carry it keep running
+     and keep being opened. The catalog stops offering it — a catalog is what
+     can be started — so the panel had only the id left and drew
+     `workflow:wf_…` where the name goes, which reads as a Goal pointed at
+     something that is not there. Orbit keeps the definition for exactly this
+     case, so the Host asks it for the name. */
+  const host = await readFile(join(here, '..', 'src', 'index.ts'), 'utf8')
+  const resolver = host.slice(host.indexOf('private async retiredWorkflowNames('))
+  assert.ok(resolver, 'the Host resolves the names the catalog no longer carries')
+  assert.match(resolver, /'inspect_workflow_definition'/)
+  // Asked once per id and remembered, negative answers included: a retired id
+  // is never reissued, so a two-second poll must not re-ask either answer.
+  assert.match(resolver, /filter\(id => !this\.retiredNames\.has\(/)
+  // Merged under the catalog, never over it: an offered Workflow owns its name.
+  const merge = code.slice(
+    code.indexOf('const workflowNames = new Map'), code.indexOf('const next = orderRows'),
+  )
+  assert.ok(
+    merge.indexOf('retiredWorkflowNames') < merge.indexOf('state.workflows'),
+    'the catalog is written last so it wins the ids it shares',
+  )
+})
+
 test('a page with nothing on it still says something', () => {
   // The pages carried a heading and a subtitle each, which is how a panel this
   // size spends a fifth of its height explaining four tabs that already name

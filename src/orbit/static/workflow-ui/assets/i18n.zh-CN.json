@@ -378,6 +378,8 @@
   "workflows.deleteAction": "永久删除",
   "workflows.deleteConfirm": "永久删除“{name}”？此操作无法撤销，该工作流 ID 也不能再次使用。已有运行历史仅供查看。",
   "workflows.deleteTitle": "永久删除工作流？",
+  "workflows.deleted.title": "此工作流已删除",
+  "workflows.deleted.description": "保留它是为了让用过它的 Run 仍然可读。它不能再被启动或编辑。",
   "workflows.agentBinding.title": "在这里将由其它 Agent 执行",
   "workflows.agentBinding.description": "有 {count} 个步骤指定的 Agent 不在本机。它们将改由 {agent} 执行；已发布的定义不会被修改。",
   "workflows.agentBinding.description.one": "有 1 个步骤指定的 Agent 不在本机。它将改由 {agent} 执行；已发布的定义不会被修改。",

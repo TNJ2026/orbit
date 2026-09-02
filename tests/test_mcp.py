@@ -750,6 +750,52 @@ class DiscoveryAndResultTests(ApiTestCase):
             "workflow:reversed", {item["workflow_id"] for item in listed["workflows"]},
         )
 
+    def test_a_deleted_workflow_still_reads_for_the_runs_that_carry_it(self) -> None:
+        """Deleting retires an id; it does not retract the Runs holding it.
+
+        Those Runs go on executing and being read, and a reader drawing one has
+        the workflow id and nothing else to name it by. While the point read
+        refused a deleted id, every such Run was drawn as `workflow:wf_…` — an
+        execution target that reads as missing beside work that plainly is not.
+        So the catalogue stops offering it, because a catalogue is an offer to
+        start something, and the read by id keeps answering and says which it
+        is answering about.
+        """
+
+        self.publish_reversed_workflow()
+        with AsgiHarness(self.app) as client:
+            before = payload_of(tool(
+                client, "inspect_workflow_definition",
+                {"workflow_id": "workflow:reversed"}, actor="reader",
+            ))
+            tool(client, "delete_workflow", {
+                "workflow_id": "workflow:reversed", "expected_version": 1,
+                "idempotency_key": "delete-then-read",
+            }, actor="writer")
+            after = payload_of(tool(
+                client, "inspect_workflow_definition",
+                {"workflow_id": "workflow:reversed"}, actor="reader",
+            ))
+            catalogue = payload_of(tool(client, "inspect_workflows", {}, actor="reader"))
+            started = tool(client, "start_run", {
+                "workflow_id": "workflow:reversed", "input": {"value": 0},
+                "idempotency_key": "start-deleted",
+            }, actor="writer")
+
+        self.assertFalse(before["archived"])
+        self.assertTrue(after["archived"])
+        # The same reading as before, name and steps included: this is what a
+        # Run's row needs in order to say anything but the id.
+        self.assertEqual(before["name"], after["name"])
+        self.assertEqual(before["nodes"], after["nodes"])
+        self.assertNotIn(
+            "workflow:reversed",
+            {item["workflow_id"] for item in catalogue["workflows"]},
+        )
+        # Readable is not startable, and the refusal says which of the two.
+        self.assertTrue(started["result"]["isError"])
+        self.assertIn("deleted", payload_of(started)["error"])
+
     def test_ready_only_filters_to_what_a_goal_can_start(self) -> None:
         with AsgiHarness(self.app) as client:
             payload = payload_of(

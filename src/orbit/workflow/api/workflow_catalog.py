@@ -232,7 +232,9 @@ class WorkflowCatalogReadModelService:
             reason,
         )
 
-    def _entry(self, row, *, include_definition: bool) -> dict[str, Any]:
+    def _entry(
+        self, row, *, include_definition: bool, archived: bool = False,
+    ) -> dict[str, Any]:
         ir = json.loads(row["canonical_ir_json"])
         inputs, input_mode = self._inputs(ir)
         goal_binding = self._goal_binding(ir, inputs)
@@ -260,6 +262,10 @@ class WorkflowCatalogReadModelService:
             "goal_readiness": goal_readiness,
             "readiness_reason": readiness_reason,
             "source_available": source_available,
+            # False for everything `list` returns, because it does not return
+            # the deleted ones. It is `detail` that can answer for one, and a
+            # reader holding a deleted id has to be told which it is holding.
+            "archived": archived,
             "summary": self._summary(ir),
         }
         if include_definition:
@@ -297,27 +303,40 @@ class WorkflowCatalogReadModelService:
         return entries
 
     def detail(self, workflow_id: str) -> dict[str, Any]:
-        """The workflow as it stands now.
+        """The workflow as it stands now, deleted or not.
 
         Superseded versions stay in the store — a run executes the definition
         it started with, and that history is a correctness guarantee — but they
         are not addressable here: the catalog answers with one definition, the
         current one, so nothing downstream can read, run or edit an old one.
+
+        A deleted id still answers, and says so in `archived`. Deletion retires
+        an id; it does not retract the Runs that already carry it. Those Runs
+        keep executing, resuming and being read — `SQLiteWorkflowVersionStore`
+        keeps the versions for exactly that reason and its `get` answers for
+        the same ids — so a reader that already holds one is asking about work
+        that exists, and hiding the definition only left it naming a Run it
+        could not describe. `list` still omits them: a catalog is an offer to
+        start something, and this id can no longer be started. Refusing a new
+        start is the writer's question to ask, and the writers ask it.
         """
 
         with connect_workflow_database(self.path, read_only=True) as connection:
             row = connection.execute(
-                "SELECT v.*, d.name AS display_name FROM workflow_versions v"
+                "SELECT v.*, d.name AS display_name,"
+                " EXISTS (SELECT 1 FROM archived_workflows x"
+                " WHERE x.workflow_id = v.workflow_id) AS archived"
+                " FROM workflow_versions v"
                 " LEFT JOIN workflow_definitions d ON d.workflow_id = v.workflow_id"
-                " WHERE v.workflow_id = ? AND NOT EXISTS ("
-                " SELECT 1 FROM archived_workflows x"
-                " WHERE x.workflow_id=v.workflow_id)"
+                " WHERE v.workflow_id = ?"
                 " ORDER BY v.version DESC LIMIT 1",
                 (workflow_id,),
             ).fetchone()
         if row is None:
             raise ValueError(f"workflow not found: {workflow_id}")
-        item = self._entry(row, include_definition=True)
+        item = self._entry(
+            row, include_definition=True, archived=bool(row["archived"]),
+        )
         # The author-facing source, distinct from canonical IR (editor plan
         # §7). Early versions published without source degrade to
         # source_available=false — viewable and runnable, never "editable".

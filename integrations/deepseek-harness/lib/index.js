@@ -174,6 +174,8 @@ let OrbitRemoteService = (() => {
         /** The last thing that went wrong while writing a Workflow here. */
         authoringTrouble = new Map();
         bridgeDiagnostics = new Map();
+        /** Deleted Workflows the panel still has to name, by Workspace and id. */
+        retiredNames = new Map();
         hostSessions;
         attachments;
         workspaceRegistry;
@@ -766,11 +768,13 @@ let OrbitRemoteService = (() => {
                     ...agent,
                     ...(attemptCounts?.get(agent.name) ?? {}),
                 }));
+                const workflows = this.catalog.list(scope.canonicalPath);
                 return {
                     runs: result.runs,
                     uiUrl: await this.gateway.uiUrl(scope),
-                    workflows: this.catalog.list(scope.canonicalPath),
+                    workflows,
                     agents,
+                    retiredWorkflowNames: await this.retiredWorkflowNames(scope, sessionId, result.runs, workflows),
                     authoring: authoring.jobs,
                     steps: await this.liveSteps(scope, sessionId, result.runs),
                 };
@@ -778,6 +782,48 @@ let OrbitRemoteService = (() => {
             finally {
                 await release();
             }
+        }
+        /**
+         * Names for the Workflows a Run ran and the catalog no longer offers.
+         *
+         * Deleting a Workflow retires its id; it does not retract the Runs that
+         * carry it, which go on executing and being opened. The catalog is the
+         * wrong place to look one of those up — a catalog is what can be started —
+         * so the panel had nothing to name them by and printed the id, which reads
+         * as a Goal pointed at something that is not there. Orbit keeps the
+         * definition for exactly this, so ask it.
+         *
+         * Read once per id and remembered, negative answers included: a retired id
+         * is never reissued, so neither answer can go out of date, and a poll that
+         * runs every couple of seconds must not re-ask either one.
+         */
+        async retiredWorkflowNames(scope, sessionId, runs, listed) {
+            const offered = new Set(listed.map(item => item.workflow_id));
+            const retired = [...new Set(runs.map(run => run.workflow_id))]
+                .filter(id => !offered.has(id));
+            await Promise.all(retired
+                .filter(id => !this.retiredNames.has(this.retiredKey(scope, id)))
+                .map(async (id) => {
+                try {
+                    const definition = await this.gateway.call(scope, sessionId, 'inspect_workflow_definition', { workflow_id: id });
+                    this.retiredNames.set(this.retiredKey(scope, id), definition.name || null);
+                }
+                catch {
+                    // An id even the store cannot answer for. Held as unanswerable so
+                    // the row falls back to the id it has always shown, once.
+                    this.retiredNames.set(this.retiredKey(scope, id), null);
+                }
+            }));
+            const names = {};
+            for (const id of retired) {
+                const held = this.retiredNames.get(this.retiredKey(scope, id));
+                if (held)
+                    names[id] = held;
+            }
+            return names;
+        }
+        retiredKey(scope, workflowId) {
+            return `${scope.canonicalPath}\n${workflowId}`;
         }
         /**
          * The steps of the Runs that are still moving, so the Goal page can draw them.

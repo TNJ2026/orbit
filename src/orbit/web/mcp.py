@@ -1171,6 +1171,10 @@ def build_mcp_dispatcher(
                 "latest_version": detail["latest_version"],
                 "goal_readiness": detail["goal_readiness"],
                 "readiness_reason": detail["readiness_reason"],
+                # A deleted workflow still reads: its Runs did not go anywhere.
+                # Said out loud so a caller holding the id knows why starting
+                # it will be refused, rather than finding out from `start_run`.
+                "archived": detail["archived"],
                 "input_mode": detail["input_mode"],
                 "inputs": detail["inputs"],
                 "goal_binding": detail["goal_binding"],

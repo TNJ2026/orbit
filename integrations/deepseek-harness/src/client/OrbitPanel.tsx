@@ -340,6 +340,7 @@ export function OrbitPanel({ t, useSessions, onSelectWorkflow }: OrbitPanelProps
         const state = await hostCall<{
           runs: RunDto[]; uiUrl: string
           workflows: readonly WorkflowSummary[]; agents: readonly AgentSummary[]
+          retiredWorkflowNames: Record<string, string>
           authoring: readonly AuthoringSummary[]
           steps: Record<string, StepSummary[]>
         }>(
@@ -348,9 +349,16 @@ export function OrbitPanel({ t, useSessions, onSelectWorkflow }: OrbitPanelProps
           'getPanelState', [sessionId, forced, !layout.collapsed], controller.signal,
         )
         if (controller.signal.aborted) return
-        const workflowNames = new Map(
-          (state.workflows ?? []).map(item => [item.workflow_id, item.name || item.workflow_id]),
+        // The deleted ones first, so a catalog entry always wins the key it
+        // shares. A Run outlives the Workflow it ran — deleting one retires
+        // the id and keeps the definition — and naming it by id was the panel
+        // saying a Goal ran on something that does not exist.
+        const workflowNames = new Map<string, string>(
+          Object.entries(state.retiredWorkflowNames ?? {}),
         )
+        for (const item of state.workflows ?? []) {
+          workflowNames.set(item.workflow_id, item.name || item.workflow_id)
+        }
         const next = orderRows(state.runs.map(run => toRow(run, workflowNames.get(run.workflow_id))))
         setRows(next); setUiUrl(state.uiUrl); setError(null)
         setWorkflows(state.workflows ?? []); setAgents(state.agents ?? [])

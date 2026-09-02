@@ -563,10 +563,15 @@ class CatalogTests(ApiTestCase):
             self.assertNotIn(
                 "workflow:linear", [value["workflow_id"] for value in remaining]
             )
-            self.assertEqual(
-                404,
-                client.get("/api/v1/workflows/workflow:linear", actor="writer").status_code,
-            )
+            # The id still reads. The Runs that carry it did not go anywhere —
+            # they still execute, resume and get opened — and a reader holding
+            # one has only this to name what it ran. What the deletion takes
+            # away is the offer: nothing here can be acted on any more.
+            retired = client.get("/api/v1/workflows/workflow:linear", actor="writer")
+            self.assertEqual(200, retired.status_code, retired.text)
+            self.assertTrue(retired.json()["data"]["archived"])
+            self.assertEqual([], retired.json()["data"]["allowed_commands"])
+            self.assertEqual({}, retired.json()["data"]["action_editors"])
             stale_start = client.post(
                 "/api/v1/langgraph-runs", actor="writer", key="start-deleted",
                 body={
@@ -1209,6 +1214,47 @@ class WorkflowDraftApiTests(ApiTestCase):
                 },
             )
             self.assertEqual(409, denied.status_code)
+
+    def test_a_deleted_workflow_reads_but_refuses_an_edit(self) -> None:
+        """The read survives the deletion; the writes do not.
+
+        A deleted id answers so the Runs that carry it can still be described,
+        and that is the whole of what it gets: republishing under a retired id
+        is refused by the store, so an editor offered here would only walk a
+        person up to a refusal they cannot do anything about.
+        """
+
+        with AsgiHarness(self._app_with_action_agents()) as client:
+            detail = client.get(
+                "/api/v1/workflows/workflow:draftable", actor="writer",
+            ).json()["data"]
+            editor = detail["action_editors"]["work"]
+            deleted = client.request(
+                "DELETE", "/api/v1/workflows/workflow:draftable", actor="writer",
+                headers={"idempotency-key": "delete-draftable"},
+                body={"expected_version": detail["latest_version"]},
+            )
+            self.assertEqual(200, deleted.status_code, deleted.text)
+
+            after = client.get(
+                "/api/v1/workflows/workflow:draftable", actor="writer",
+            ).json()["data"]
+            refused = client.post(
+                editor["allowed_command"]["href"], actor="writer", key="edit-deleted",
+                body={
+                    "expected_version": editor["allowed_command"]["expected_version"],
+                    "label": "Search web",
+                    "handler": {"name": "agent.codex", "version": "1.0.0"},
+                    "prompt": "Find reliable primary sources.",
+                },
+            )
+
+        self.assertTrue(after["archived"])
+        self.assertEqual(detail["name"], after["name"])
+        self.assertEqual(detail["definition"], after["definition"])
+        self.assertEqual({}, after["action_editors"])
+        self.assertEqual(409, refused.status_code, refused.text)
+        self.assertIn("deleted", refused.json()["error"]["message"])
 
     def test_agent_cli_version_change_is_not_reported_as_handler_drift(self) -> None:
         import json as json_module

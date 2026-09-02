@@ -626,6 +626,13 @@ def build_routes(ctx) -> list[Route]:
                 "payload_schema": "workflow-rebind/1.0",
                 "confirmation": "explicit",
             })
+        if item["archived"]:
+            # Readable, not actionable. Every command above is refused for a
+            # deleted id — starting, editing, republishing, deleting it twice —
+            # so advertising one only moves the refusal to where a person has
+            # already committed to it.
+            item["allowed_commands"] = []
+            item["action_editors"] = {}
         return JSONResponse(envelope(item))
 
     async def workflow_branches(request: Request) -> JSONResponse:
@@ -694,6 +701,11 @@ def build_routes(ctx) -> list[Route]:
                     raise ValueError("handler name and version must be strings")
 
             item = ctx.workflow_reads.detail(workflow_id)
+            # The catalog answers for a deleted id so its Runs stay readable.
+            # Editing one is a different act: the id is retired and republishing
+            # under it is refused, so refuse here rather than after compiling.
+            if item["archived"]:
+                raise ValueError(f"workflow was deleted: {workflow_id}")
             if int(item["latest_version"]) != expected:
                 raise ValueError(
                     f"publish conflict: expected {expected}, actual {item['latest_version']}"
@@ -777,6 +789,8 @@ def build_routes(ctx) -> list[Route]:
         def command(body: Mapping[str, Any], actor: str, key: str) -> Mapping[str, Any]:
             expected = _required_version(body)
             detail = ctx.workflow_reads.detail(workflow_id)
+            if detail["archived"]:
+                raise ValueError(f"workflow was deleted: {workflow_id}")
             source = detail.get("source")
             if not source:
                 raise ValueError(
