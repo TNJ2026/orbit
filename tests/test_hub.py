@@ -478,6 +478,31 @@ class HubGlobalControlTests(unittest.TestCase):
         self.assertEqual(400, missing_version.status_code)
         self.assertIn("expected_version", missing_version.text)
 
+    def test_corrupt_global_template_catalog_is_unavailable_not_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "templates.json"
+            path.write_text("{broken", encoding="utf-8")
+            with AsgiHarness(create_hub_app(
+                self.Manager(), template_store=WorkflowTemplateStore(path),
+            )) as client:
+                read = client.get("/api/v1/workflow-templates")
+                write = client.request(
+                    "POST", "/api/v1/workflow-templates",
+                    headers={"idempotency-key": "new"},
+                    body={
+                        "name": "x", "expected_version": 0,
+                        "source": json.dumps({
+                            "dsl_version": "1.0",
+                            "metadata": {"id": "workflow:x", "name": "x"},
+                            "nodes": [], "edges": [],
+                        }),
+                    },
+                )
+
+            self.assertEqual(503, read.status_code)
+            self.assertEqual(503, write.status_code)
+            self.assertEqual("{broken", path.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -583,6 +583,22 @@ def create_app(
                 "provide langgraph_service or langgraph_state_directory, not both"
             )
         from ..workflow.langgraph_runtime import build_service
+        from ..platform import public_workflow_db_path, retired_workflow_library_path
+        from ..workflow.persistence.workflow_versions import (
+            restore_referenced_workflow_versions,
+        )
+
+        restored = restore_referenced_workflow_versions(
+            workflow_db_path or db_path,
+            Path(langgraph_state_directory) / "langgraph-runs.sqlite3",
+            (retired_workflow_library_path(), public_workflow_db_path()),
+        )
+        if restored:
+            print(
+                f"workflow history: restored {restored} legacy version(s) "
+                "referenced by this Workspace",
+                flush=True,
+            )
 
         langgraph_service = build_service(
             workflow_db_path or db_path,

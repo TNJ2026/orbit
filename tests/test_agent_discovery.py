@@ -8,6 +8,7 @@ become an executable, an argument or a path.
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 from pathlib import Path
 import shutil
 import tempfile
@@ -174,6 +175,39 @@ class DiscoveryTests(unittest.TestCase):
 
         self.assertEqual(2, len(calls))
         self.assertEqual("2.1.2", result[0].version)
+
+    def test_cache_writes_do_not_slide_a_failed_probe_forever(self) -> None:
+        calls = []
+
+        def runner(argv, **_kwargs):
+            calls.append(argv)
+            return SimpleNamespace(returncode=1, stdout="", stderr="timeout")
+
+        with tempfile.TemporaryDirectory() as root:
+            cache = Path(root) / "agents.json"
+            for instant in (0, 20, 40, 60):
+                discover_agent_clis_cached(
+                    (CLAUDE,), cache_path=cache, which=fake_which({"claude"}),
+                    runner=runner, now=lambda value=instant: value,
+                )
+
+        self.assertEqual(2, len(calls), "a failed probe has its own short fixed TTL")
+
+    def test_cache_hit_preserves_the_original_probe_time(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            cache = Path(root) / "agents.json"
+            runner = fake_runner({"claude": (0, "claude 2.1.3")})
+            discover_agent_clis_cached(
+                (CLAUDE,), cache_path=cache, which=fake_which({"claude"}),
+                runner=runner, now=lambda: 100,
+            )
+            discover_agent_clis_cached(
+                (CLAUDE,), cache_path=cache, which=fake_which({"claude"}),
+                runner=runner, now=lambda: 200,
+            )
+            payload = json.loads(cache.read_text(encoding="utf-8"))
+
+        self.assertEqual(100, payload["agents"][0]["probed_at"])
 
     def test_trusted_cli_environment_keeps_identity_but_not_provider_tokens(self) -> None:
         environment = trusted_cli_environment({

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from contextlib import contextmanager
 import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
 import threading
@@ -15,10 +17,55 @@ import yaml
 
 
 DEFAULT_GLOBAL_ROOT = Path.home() / ".orbit" / "global"
+_PROCESS_LOCKS: dict[str, threading.RLock] = {}
+_PROCESS_LOCKS_GUARD = threading.Lock()
+
+
+def _process_lock(path: Path) -> threading.RLock:
+    key = str(path.resolve())
+    with _PROCESS_LOCKS_GUARD:
+        return _PROCESS_LOCKS.setdefault(key, threading.RLock())
+
+
+@contextmanager
+def _exclusive_file_lock(path: Path):
+    """Serialize a machine-wide JSON transaction across threads and processes."""
+
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with _process_lock(lock_path):
+        handle = lock_path.open("a+b")
+        try:
+            handle.seek(0, 2)
+            if handle.tell() == 0:
+                handle.write(b"0"); handle.flush()
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            try:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                handle.close()
 
 
 class WorkflowTemplateError(ValueError):
     pass
+
+
+class WorkflowTemplateStorageError(WorkflowTemplateError):
+    """The durable catalog cannot be trusted, so no mutation may continue."""
 
 
 class WorkflowTemplateStore:
@@ -26,13 +73,15 @@ class WorkflowTemplateStore:
 
     def __init__(self, path: Path | str | None = None) -> None:
         self.path = Path(path or DEFAULT_GLOBAL_ROOT / "workflow-templates.json").expanduser()
-        self._lock = threading.Lock()
 
     def list(self) -> list[dict[str, Any]]:
-        return sorted(self._read().values(), key=lambda item: (item["name"], item["template_id"]))
+        with _exclusive_file_lock(self.path):
+            values, _receipts = self._read_state_unlocked()
+        return sorted(values.values(), key=lambda item: (item["name"], item["template_id"]))
 
     def get(self, template_id: str) -> dict[str, Any]:
-        item = self._read().get(template_id)
+        with _exclusive_file_lock(self.path):
+            item = self._read_state_unlocked()[0].get(template_id)
         if item is None:
             raise WorkflowTemplateError(f"unknown Workflow template: {template_id}")
         return item
@@ -53,16 +102,19 @@ class WorkflowTemplateStore:
             raise WorkflowTemplateError("template source must be JSON") from exc
         metadata = document.get("metadata") if isinstance(document, Mapping) else None
         workflow_id = metadata.get("id") if isinstance(metadata, Mapping) else None
-        if not isinstance(workflow_id, str) or not workflow_id.startswith("workflow:"):
+        if not isinstance(workflow_id, str) or not workflow_id.strip():
             raise WorkflowTemplateError("template source must declare metadata.id")
+        workflow_id = workflow_id.strip()
+        if not workflow_id.startswith("workflow:"):
+            workflow_id = f"workflow:{workflow_id}"
         canonical = json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         request_hash = "sha256:" + hashlib.sha256(json.dumps({
             "name": name.strip(), "source": source,
             "source_format": source_format, "expected_version": expected_version,
         }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         now = datetime.now(timezone.utc).isoformat()
-        with self._lock:
-            values, receipts = self._read_state()
+        with _exclusive_file_lock(self.path):
+            values, receipts = self._read_state_unlocked()
             if idempotency_key:
                 receipt = receipts.get(idempotency_key)
                 if receipt:
@@ -101,8 +153,8 @@ class WorkflowTemplateStore:
         request_hash = "sha256:" + hashlib.sha256(json.dumps({
             "template_id": template_id, "expected_version": expected_version,
         }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        with self._lock:
-            values, receipts = self._read_state()
+        with _exclusive_file_lock(self.path):
+            values, receipts = self._read_state_unlocked()
             if idempotency_key:
                 receipt = receipts.get(idempotency_key)
                 if receipt:
@@ -128,16 +180,29 @@ class WorkflowTemplateStore:
                 self._write(values, receipts)
             return existed
 
-    def _read(self) -> dict[str, dict[str, Any]]:
-        return self._read_state()[0]
-
-    def _read_state(self) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    def _read_state_unlocked(self) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, OSError, json.JSONDecodeError):
+        except FileNotFoundError:
             return {}, {}
+        except OSError as exc:
+            raise WorkflowTemplateStorageError(
+                f"cannot read Workflow template catalog: {exc}"
+            ) from exc
+        except json.JSONDecodeError as exc:
+            raise WorkflowTemplateStorageError(
+                "Workflow template catalog is corrupt; refusing to overwrite it"
+            ) from exc
+        if not isinstance(payload, Mapping):
+            raise WorkflowTemplateStorageError(
+                "Workflow template catalog root must be an object"
+            )
         values = payload.get("templates", {}) if isinstance(payload, Mapping) else {}
         receipts = payload.get("receipts", {}) if isinstance(payload, Mapping) else {}
+        if not isinstance(values, Mapping) or not isinstance(receipts, Mapping):
+            raise WorkflowTemplateStorageError(
+                "Workflow template catalog has invalid collections"
+            )
         return ({
             str(key): dict(value) for key, value in values.items()
             if isinstance(key, str) and isinstance(value, Mapping)
@@ -183,13 +248,14 @@ def import_legacy_workflow_library(
                 SELECT workflow_id, MAX(version) AS version
                 FROM workflow_versions GROUP BY workflow_id
             ) latest ON latest.workflow_id=v.workflow_id AND latest.version=v.version
-            LEFT JOIN archived_workflows a ON a.workflow_id=v.workflow_id
-            WHERE a.workflow_id IS NULL AND v.source_text IS NOT NULL
+            WHERE v.source_text IS NOT NULL
             ORDER BY v.workflow_id
         """).fetchall()
         connection.close()
-    except sqlite3.Error:
-        return 0
+    except sqlite3.Error as exc:
+        raise WorkflowTemplateStorageError(
+            f"cannot read legacy Workflow library {path}: {exc}"
+        ) from exc
 
     imported = 0
     for row in rows:
@@ -207,6 +273,8 @@ def import_legacy_workflow_library(
                 idempotency_key=f"legacy-library:{row['definition_hash']}",
             )
             imported += int(len(store.list()) > before)
+        except WorkflowTemplateStorageError:
+            raise
         except (ValueError, TypeError, WorkflowTemplateError, yaml.YAMLError):
             continue
     return imported

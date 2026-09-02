@@ -1032,11 +1032,16 @@ def main() -> None:
         from .global_control import (
             WorkflowTemplateStore, import_legacy_workflow_library,
         )
-        from .platform.projects import public_workflow_db_path
+        from .platform.projects import (
+            public_workflow_db_path, retired_workflow_library_path,
+        )
 
         templates = WorkflowTemplateStore()
-        imported = import_legacy_workflow_library(
-            public_workflow_db_path(), templates,
+        imported = sum(
+            import_legacy_workflow_library(path, templates)
+            for path in (
+                public_workflow_db_path(), retired_workflow_library_path(),
+            )
         )
         if imported:
             print(

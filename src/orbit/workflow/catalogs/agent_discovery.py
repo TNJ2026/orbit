@@ -40,6 +40,7 @@ from .handlers import HandlerManifest
 
 VERSION_PROBE_TIMEOUT_SECONDS = 10
 AGENT_DISCOVERY_CACHE_SECONDS = 300
+AGENT_DISCOVERY_FAILURE_CACHE_SECONDS = 30
 DEFAULT_AGENT_DISCOVERY_CACHE = Path.home() / ".orbit" / "cache" / "agents.json"
 _VERSION_PATTERN = re.compile(r"(\d+\.\d+(?:\.\d+)?)")
 _SAFE_NAME = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
@@ -328,32 +329,38 @@ def discover_agent_clis_cached(
 
     clock = now or time.time
     path = Path(cache_path).expanduser()
-    cached: dict[tuple[str, str, tuple[int, int, int, int] | None], str | None] = {}
+    cached: dict[
+        tuple[str, str, tuple[int, int, int, int] | None], tuple[str | None, float]
+    ] = {}
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        written_at = float(payload.get("written_at", 0))
-        if clock() - written_at <= max_age_seconds:
-            for item in payload.get("agents", ()):
-                if not isinstance(item, Mapping):
-                    continue
-                name, executable = item.get("name"), item.get("executable_path")
-                version = item.get("version")
-                raw_identity = item.get("identity")
-                identity = (
-                    tuple(raw_identity) if isinstance(raw_identity, list)
-                    and len(raw_identity) == 4
-                    and all(isinstance(value, int) for value in raw_identity)
-                    else None
-                )
-                if isinstance(name, str) and isinstance(executable, str) and (
-                    version is None or isinstance(version, str)
-                ):
-                    cached[(name, executable, identity)] = version
+        for item in payload.get("agents", ()):
+            if not isinstance(item, Mapping):
+                continue
+            name, executable = item.get("name"), item.get("executable_path")
+            version = item.get("version")
+            probed_at = item.get("probed_at")
+            raw_identity = item.get("identity")
+            identity = (
+                tuple(raw_identity) if isinstance(raw_identity, list)
+                and len(raw_identity) == 4
+                and all(isinstance(value, int) for value in raw_identity)
+                else None
+            )
+            if (
+                isinstance(name, str) and isinstance(executable, str)
+                and (version is None or isinstance(version, str))
+                and isinstance(probed_at, (int, float))
+                and not isinstance(probed_at, bool)
+            ):
+                cached[(name, executable, identity)] = (version, float(probed_at))
     except (OSError, ValueError, TypeError):
         pass
 
     hermes_profiles = profile_root or (Path.home() / ".hermes" / "profiles")
     found: list[DiscoveredAgent] = []
+    cache_rows: list[dict[str, object]] = []
+    observed_at = clock()
     for base_spec in specs:
         resolved = which(base_spec.executable)
         if not resolved:
@@ -369,28 +376,31 @@ def discover_agent_clis_cached(
             candidates += _hermes_profile_specs(base_spec, hermes_profiles)
         for spec in candidates:
             key = (spec.name, executable, identity)
-            version = cached[key] if key in cached else _probe_version(
-                executable, spec, runner,
+            prior = cached.get(key)
+            ttl = (
+                AGENT_DISCOVERY_FAILURE_CACHE_SECONDS
+                if prior is not None and prior[0] is None else max_age_seconds
             )
+            if prior is not None and observed_at - prior[1] <= ttl:
+                version, probed_at = prior
+            else:
+                version = _probe_version(executable, spec, runner)
+                probed_at = observed_at
             found.append(DiscoveredAgent(spec, executable, version))
+            cache_rows.append({
+                "name": spec.name, "executable_path": executable,
+                "version": version, "identity": list(identity) if identity else None,
+                "probed_at": probed_at,
+            })
 
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(f".{os.getpid()}.tmp")
         temporary.write_text(json.dumps({
-            "schema_version": 2,
-            "written_at": clock(),
+            "schema_version": 3,
+            "written_at": observed_at,
             "written_at_iso": datetime.now(timezone.utc).isoformat(),
-            "agents": [{
-                "name": item.name,
-                "executable_path": item.executable_path,
-                "version": item.version,
-                "identity": (lambda executable: (
-                    [executable.st_dev, executable.st_ino, executable.st_size,
-                     executable.st_mtime_ns]
-                ))(Path(item.executable_path).stat())
-                if Path(item.executable_path).exists() else None,
-            } for item in found],
+            "agents": cache_rows,
         }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         temporary.replace(path)
     except OSError:

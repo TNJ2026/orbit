@@ -12,6 +12,7 @@ from orbit.workflow.dsl import compile_source
 from orbit.workflow.domain.durable_execution import ExecutionSafety
 from orbit.workflow.domain.handlers import ResourceProfile
 from orbit.workflow.persistence import PublishConflictError, SQLiteWorkflowVersionStore
+from orbit.workflow.persistence.workflow_versions import restore_referenced_workflow_versions
 from orbit.workflow.persistence.database import connect_workflow_database
 from tests.test_workflow_dsl import VALID_DSL
 
@@ -178,6 +179,32 @@ class WorkflowVersionStoreTests(unittest.TestCase):
                 "SELECT version FROM workflow_schema_migrations ORDER BY version"
             ).fetchall()
             self.assertEqual(list(range(1, 25)), [row[0] for row in versions])
+
+    def test_only_versions_referenced_by_old_runs_are_restored_and_archived(self) -> None:
+        record = self.publish(self.compile(), 0)
+        self.publish(self.compile(name="Unreferenced", wf_id="unreferenced"), 0)
+        destination = Path(self.temp_dir.name) / "runtime.db"
+        runs = Path(self.temp_dir.name) / "langgraph-runs.sqlite3"
+        with sqlite3.connect(runs) as connection:
+            connection.execute(
+                "CREATE TABLE langgraph_runs("
+                "run_id TEXT,workflow_id TEXT,workflow_version INTEGER)"
+            )
+            connection.execute(
+                "INSERT INTO langgraph_runs VALUES (?,?,?)",
+                ("run-1", record.workflow_id, record.version.value),
+            )
+
+        self.assertEqual(1, restore_referenced_workflow_versions(
+            destination, runs, (self.db_path,),
+        ))
+        restored = SQLiteWorkflowVersionStore(destination)
+        self.assertIsNotNone(restored.get(record.workflow_id, record.version.value))
+        self.assertTrue(restored.is_archived(record.workflow_id))
+        self.assertEqual(0, restored.latest_version("workflow:unreferenced"))
+        self.assertEqual(0, restore_referenced_workflow_versions(
+            destination, runs, (self.db_path,),
+        ))
 
 
 if __name__ == "__main__":

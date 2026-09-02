@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 
 from orbit.global_control import (
     WorkflowTemplateError, WorkflowTemplateStore,
@@ -31,12 +32,51 @@ class WorkflowTemplateStoreTests(unittest.TestCase):
             self.assertEqual([item], WorkflowTemplateStore(path).list())
             self.assertNotIn("workspace_id", item)
 
+    def test_dsl_id_is_normalized_to_the_runtime_workflow_id(self) -> None:
+        source = json.dumps({
+            "dsl_version": "1.0",
+            "metadata": {"id": "plain-id", "name": "Plain"},
+            "nodes": [], "edges": [],
+        })
+        with tempfile.TemporaryDirectory() as root:
+            item = WorkflowTemplateStore(
+                Path(root) / "templates.json"
+            ).put(name="Plain", source=source)
+        self.assertEqual("workflow:plain-id", item["workflow_id"])
+
     def test_invalid_source_never_enters_the_global_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             store = WorkflowTemplateStore(Path(root) / "templates.json")
             with self.assertRaisesRegex(WorkflowTemplateError, "metadata.id"):
                 store.put(name="broken", source="{}")
             self.assertEqual([], store.list())
+
+    def test_corrupt_catalog_fails_closed_instead_of_overwriting(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "templates.json"
+            path.write_text("{broken", encoding="utf-8")
+            store = WorkflowTemplateStore(path)
+            with self.assertRaisesRegex(WorkflowTemplateError, "corrupt"):
+                store.put(name="Shared", source=SOURCE)
+            self.assertEqual("{broken", path.read_text(encoding="utf-8"))
+
+    def test_two_store_instances_do_not_lose_concurrent_updates(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "templates.json"
+            sources = [json.dumps({
+                "dsl_version": "1.0",
+                "metadata": {"id": f"workflow:item-{index}", "name": str(index)},
+                "nodes": [], "edges": [],
+            }) for index in range(12)]
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                list(pool.map(
+                    lambda pair: WorkflowTemplateStore(path).put(
+                        name=str(pair[0]), source=pair[1],
+                        idempotency_key=f"create-{pair[0]}",
+                    ),
+                    enumerate(sources),
+                ))
+            self.assertEqual(12, len(WorkflowTemplateStore(path).list()))
 
     def test_delete_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as root:
@@ -102,6 +142,9 @@ class WorkflowTemplateStoreTests(unittest.TestCase):
             connection.execute(
                 "INSERT INTO workflow_versions VALUES (?, ?, ?, ?, ?)",
                 ("workflow:shared", 1, "sha256:legacy", "json", SOURCE),
+            )
+            connection.execute(
+                "INSERT INTO archived_workflows VALUES (?)", ("workflow:shared",),
             )
             connection.commit()
             connection.close()

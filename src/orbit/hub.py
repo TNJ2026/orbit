@@ -24,7 +24,9 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from websockets.asyncio.client import connect as websocket_connect
 
 from .agent_apps.host import default_workspace
-from .global_control import WorkflowTemplateError, WorkflowTemplateStore
+from .global_control import (
+    WorkflowTemplateError, WorkflowTemplateStorageError, WorkflowTemplateStore,
+)
 from .platform.projects import project_id, resolve_project_root
 from .platform.runtime_ownership import DiscoveredRuntime, discover_runtimes
 from .web.mcp import (
@@ -468,7 +470,10 @@ def create_hub_app(
 
     async def template_catalog(request: Request) -> Response:
         if request.method == "GET":
-            return JSONResponse({"templates": templates.list()})
+            try:
+                return JSONResponse({"templates": templates.list()})
+            except WorkflowTemplateStorageError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=503)
         try:
             body = await request.json()
             idempotency_key = request.headers.get("idempotency-key", "").strip()
@@ -480,6 +485,8 @@ def create_hub_app(
                 expected_version=body.get("expected_version"),
                 idempotency_key=idempotency_key,
             )
+        except WorkflowTemplateStorageError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503)
         except (ValueError, WorkflowTemplateError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         return JSONResponse(item, status_code=201)
@@ -499,11 +506,15 @@ def create_hub_app(
                     template_id, expected_version=expected_version,
                     idempotency_key=idempotency_key,
                 )
+            except WorkflowTemplateStorageError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=503)
             except (ValueError, WorkflowTemplateError) as exc:
                 return JSONResponse({"error": str(exc)}, status_code=400)
             return JSONResponse({"template_id": template_id, "deleted": deleted})
         try:
             return JSONResponse(templates.get(template_id))
+        except WorkflowTemplateStorageError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503)
         except WorkflowTemplateError as exc:
             return JSONResponse({"error": str(exc)}, status_code=404)
 
@@ -533,6 +544,8 @@ def create_hub_app(
                     }, timeout=60,
                 )
             )
+        except WorkflowTemplateStorageError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503)
         except (ValueError, WorkflowTemplateError, HubError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         return JSONResponse({
