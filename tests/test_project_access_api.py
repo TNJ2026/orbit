@@ -49,7 +49,8 @@ class ProjectAccessEndpointTests(unittest.TestCase):
             workspace_path=self.project,
             authenticator=lambda request: request.headers.get("x-orbit-actor"),
             authorizer=Authorizer(
-                lambda actor: [READ_SCOPE, WRITE_SCOPE, OPS_WRITE_SCOPE]
+                lambda actor: [READ_SCOPE] if actor == "reader"
+                else [READ_SCOPE, WRITE_SCOPE, OPS_WRITE_SCOPE]
             ),
             single_goal_mode=False, **kwargs,
         )
@@ -94,6 +95,19 @@ class ProjectAccessEndpointTests(unittest.TestCase):
             self.assertEqual(409, access_held.status_code)
 
             access.abandon("run-1")  # as a stopped Runtime leaves it
+            commands = client.get(
+                "/api/v1/project-access", actor="local",
+            ).json()["data"]["allowed_commands"]
+            self.assertEqual(1, len(commands))
+            command = commands[0]
+            self.assertEqual("POST", command["method"])
+            self.assertEqual("project_access.resolve", command["command"])
+            self.assertEqual("explicit", command["confirmation"])
+            self.assertEqual(
+                {"run_id": "run-1", "processes_stopped": False,
+                 "claim_token": command["payload"]["claim_token"]},
+                command["payload"],
+            )
             unconfirmed = client.post(
                 "/api/v1/project-access/resolve", key="b", actor="local",
                 body={"run_id": "run-1"},
@@ -101,14 +115,86 @@ class ProjectAccessEndpointTests(unittest.TestCase):
             self.assertEqual(409, unconfirmed.status_code)
             self.assertIn("processes_stopped", unconfirmed.json()["error"]["message"])
 
-            resolved = client.post(
-                "/api/v1/project-access/resolve", key="c", actor="local",
+            unnamed = client.post(
+                "/api/v1/project-access/resolve", key="b2", actor="local",
                 body={"run_id": "run-1", "processes_stopped": True},
+            )
+            self.assertEqual(409, unnamed.status_code)
+            self.assertIn("claim_token", unnamed.json()["error"]["message"])
+
+            resolved = client.post(
+                command["href"], key="c", actor="local",
+                body={**command["payload"], "processes_stopped": True},
             )
             self.assertEqual(["run-1"], resolved.json()["data"]["resolved"])
             after = client.get("/api/v1/project-access", actor="local").json()["data"]
         self.assertEqual([], after["occupancies"])
         self.assertFalse(after["recovery_required"])
+        self.assertEqual([], after["allowed_commands"])
+
+    def test_a_confirmation_read_before_a_new_hold_does_not_clear_it(self) -> None:
+        """The page was read about one hold and answered about another.
+
+        The run is resolved, recovers, takes the project again, and that
+        Runtime stops too — same run id, same record file, and an Agent
+        nobody has been to check. The advertised payload of the first read
+        must not clear the second hold.
+        """
+
+        app = self.app(discover_agents=True, agent_project_write=True)
+        access = app.state.runtime.langgraph_service.project_access
+        from orbit.workflow.langgraph_runtime.project_access import ProjectAccessNeed
+
+        need = ProjectAccessNeed(required=True, write=True)
+        access.acquire("run-1", need)
+        access.abandon("run-1")
+        with AsgiHarness(app) as client:
+            stale = client.get(
+                "/api/v1/project-access", actor="local",
+            ).json()["data"]["allowed_commands"][0]["payload"]
+
+            access.registry.resolve(
+                "run-1", expected_claim=stale["claim_token"],
+                processes_stopped=True,
+            )
+            access.acquire("run-1", need)      # the second hold
+            access.abandon("run-1")
+
+            refused = client.post(
+                "/api/v1/project-access/resolve", key="a", actor="local",
+                body={**stale, "processes_stopped": True},
+            )
+            self.assertEqual(409, refused.status_code)
+            self.assertIn("changed since", refused.json()["error"]["message"])
+            after = client.get("/api/v1/project-access", actor="local").json()["data"]
+        self.assertEqual(["run-1"], [item["run_id"] for item in after["occupancies"]])
+
+    def test_reader_cannot_discover_or_execute_repair_commands(self) -> None:
+        app = self.app(discover_agents=True, agent_project_write=True)
+        access = app.state.runtime.langgraph_service.project_access
+        with AsgiHarness(app) as client:
+            for corrupt in (False, True):
+                with self.subTest(corrupt=corrupt):
+                    claim = access.registry.claim(self.project, run_id="repair")
+                    claim._lock.release()
+                    if corrupt:
+                        next((self.root / "occupancy").glob("*.json")).write_text("{")
+                    admin = client.get("/api/v1/project-access", actor="local").json()["data"]
+                    command = admin["allowed_commands"][0]
+                    reader = client.get("/api/v1/project-access", actor="reader").json()["data"]
+                    self.assertTrue(reader["recovery_required"])
+                    self.assertEqual([], reader["allowed_commands"])
+                    denied = client.post(command["href"], key=f"reader-{corrupt}",
+                        actor="reader", body={**command["payload"], "processes_stopped": True})
+                    self.assertEqual(403, denied.status_code)
+                    # An advertised payload must still require a real confirmation.
+                    unconfirmed = client.post(command["href"], key=f"unconfirmed-{corrupt}",
+                        actor="local", body=command["payload"])
+                    self.assertEqual(409, unconfirmed.status_code)
+                    access.registry.resolve(
+                        "repair", processes_stopped=True,
+                        expected_claim=command["payload"]["claim_token"],
+                    )
 
     def test_a_corrupt_record_can_be_resolved_by_its_file_name(self) -> None:
         app = self.app(discover_agents=True, agent_project_write=True)
@@ -120,12 +206,12 @@ class ProjectAccessEndpointTests(unittest.TestCase):
         with AsgiHarness(app) as client:
             listed = client.get("/api/v1/project-access", actor="local").json()["data"]
             self.assertTrue(listed["recovery_required"])
+            command = listed["allowed_commands"][0]
+            self.assertEqual(record.name, command["payload"]["record_id"])
+            self.assertNotIn("run_id", command["payload"])
             response = client.post(
-                "/api/v1/project-access/resolve", key="a", actor="local",
-                body={
-                    "record_id": listed["corrupt_records"][0]["record_id"],
-                    "processes_stopped": True,
-                },
+                command["href"], key="a", actor="local",
+                body={**command["payload"], "processes_stopped": True},
             )
         self.assertEqual(200, response.status_code)
         self.assertFalse(record.exists())
@@ -136,6 +222,7 @@ class ProjectAccessEndpointTests(unittest.TestCase):
             payload = client.get("/api/v1/project-access", actor="local").json()["data"]
 
         self.assertFalse(payload["enabled"])
+        self.assertEqual([], payload["allowed_commands"])
         self.assertIn("grants no project-directory access", payload["reason"])
 
     def test_it_reports_the_project_and_what_was_granted(self) -> None:
@@ -147,6 +234,7 @@ class ProjectAccessEndpointTests(unittest.TestCase):
         self.assertTrue(payload["write_granted"])
         self.assertEqual(str(self.project.resolve()), payload["project_root"])
         self.assertEqual([], payload["occupancies"])
+        self.assertEqual([], payload["allowed_commands"])
 
     def test_a_held_project_names_its_holder_and_its_way_back(self) -> None:
         app = self.app(discover_agents=True, agent_project_write=True)
@@ -160,6 +248,7 @@ class ProjectAccessEndpointTests(unittest.TestCase):
             payload = client.get("/api/v1/project-access", actor="local").json()["data"]
 
         held = payload["occupancies"][0]
+        self.assertEqual([], payload["allowed_commands"])
         self.assertEqual("run-1", held["run_id"])
         self.assertTrue(held["holder_live"])
         self.assertEqual("git", held["recovery"]["kind"])

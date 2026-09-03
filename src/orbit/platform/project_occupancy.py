@@ -34,6 +34,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import secrets
 import threading
 import tempfile
 from typing import Iterable, TextIO
@@ -60,6 +61,15 @@ class ProjectNeedsRecovery(ProjectOccupancyError):
     behind this would wait forever; stepping over it would let a new run write
     the same files as a process that may still be writing them.
     """
+
+
+def _digest(path: Path) -> str:
+    """What generation of a record this is, readable or not."""
+
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    except OSError:
+        return ""
 
 
 def _write_record(path: Path, value: dict) -> None:
@@ -287,6 +297,12 @@ class Occupancy:
     # to outlive a crashed Runtime — and a crash is when somebody most needs
     # to be told what can be restored before they resolve the claim.
     recovery: dict | None = None
+    # Minted per claim, never derived from the run. One run can hold this
+    # project more than once — it is resolved, it recovers, it claims again —
+    # and the second hold is a different thing to confirm stopped than the
+    # first. Without this, two generations of one run are the same record to
+    # anybody looking at it. See `claim_token`.
+    claim_id: str = ""
 
     def to_primitive(self) -> dict[str, object]:
         return {
@@ -296,6 +312,7 @@ class Occupancy:
             "claimed_at": self.claimed_at,
             "state": self.state,
             "recovery": self.recovery,
+            "claim_id": self.claim_id,
         }
 
     @classmethod
@@ -308,6 +325,7 @@ class Occupancy:
             str(value.get("claimed_at", "")),
             str(value.get("state", "active")),
             recovery if isinstance(recovery, dict) else None,
+            str(value.get("claim_id", "")),
         )
 
 
@@ -368,21 +386,29 @@ class ProjectOccupancyRegistry:
     def _project_lock(self, identity: ProjectIdentity) -> _FileLock:
         return _FileLock(self.root / f"{identity.key}.owner.lock")
 
-    def _records(self, *, errors: list | None = None) -> tuple[tuple[Path, Occupancy], ...]:
+    def _records(
+        self, *, errors: list | None = None,
+    ) -> tuple[tuple[Path, Occupancy, str], ...]:
         """Every claim on record, with the file it was actually read from.
 
         Removal goes by the path found here rather than by recomputing a name
         from the run id: the record is the thing that blocks, so whatever is
         on disk is what has to come off it, whoever wrote it and by whatever
         name.
+
+        Each comes with its `claim_token` — a digest of the bytes on disk, so
+        an unreadable record has one too. It is what a caller that looked at a
+        claim quotes back to say *that* is the claim it means.
         """
 
         if not self.root.is_dir():
             return ()
-        found: list[tuple[Path, Occupancy]] = []
+        found: list[tuple[Path, Occupancy, str]] = []
         for path in sorted(self.root.glob("*.json")):
             try:
-                value = json.loads(path.read_text(encoding="utf-8"))
+                raw = path.read_bytes()
+                token = hashlib.sha256(raw).hexdigest()[:16]
+                value = json.loads(raw.decode("utf-8"))
                 if not isinstance(value, dict) or not value.get("run_id"):
                     raise ValueError("missing run identity")
                 occupancy = Occupancy.from_primitive(value)
@@ -390,20 +416,25 @@ class ProjectOccupancyRegistry:
                     raise ValueError("missing absolute project path")
             except (OSError, ValueError, TypeError, AttributeError) as exc:
                 if errors is not None:
-                    errors.append({"record_id": path.name, "state": "corrupt",
-                                   "error": str(exc)})
+                    errors.append({
+                        "record_id": path.name, "state": "corrupt",
+                        "error": str(exc),
+                        # A record nobody can parse still has bytes, and those
+                        # are as much a generation as a parsed claim_id is.
+                        "claim_token": _digest(path),
+                    })
                     continue
                 raise ProjectNeedsRecovery(
                     f"cannot safely read project occupancy {path}: {exc}; "
                     "refusing new claims until the record is repaired"
                 ) from exc
-            found.append((path, occupancy))
+            found.append((path, occupancy, token))
         return tuple(found)
 
     def occupancies(self) -> tuple[Occupancy, ...]:
         """Every claim on record, live or abandoned."""
 
-        return tuple(occupancy for _path, occupancy in self._records())
+        return tuple(occupancy for _path, occupancy, _token in self._records())
 
     def holder_is_live(self, occupancy: Occupancy) -> bool:
         """Whether a Runtime still holds this claim's project lock.
@@ -438,7 +469,10 @@ class ProjectOccupancyRegistry:
         stamp = now or datetime.now(timezone.utc).isoformat(
             timespec="microseconds"
         ).replace("+00:00", "Z")
-        occupancy = Occupancy(run_id, identity, os.getpid(), stamp)
+        occupancy = Occupancy(
+            run_id, identity, os.getpid(), stamp,
+            claim_id=secrets.token_hex(8),
+        )
 
         self.root.mkdir(parents=True, exist_ok=True)
         lock = self._project_lock(identity)
@@ -480,7 +514,7 @@ class ProjectOccupancyRegistry:
 
     def _rewrite(self, occupancy: Occupancy) -> None:
         with _FileLock(self.root / REGISTRY_LOCK_NAME):
-            for path, found in self._records():
+            for path, found, _token in self._records():
                 if found.run_id == occupancy.run_id:
                     _write_record(path, occupancy.to_primitive())
 
@@ -489,19 +523,29 @@ class ProjectOccupancyRegistry:
             # An unrelated broken record must not prevent a known owner
             # releasing its own claim. Broken records remain quarantined by
             # the strict claim path until explicitly resolved.
-            for path, found in self._records(errors=[]):
+            for path, found, _token in self._records(errors=[]):
                 if found.run_id == occupancy.run_id:
                     path.unlink(missing_ok=True)
 
     def resolve(
-        self, run_id: str, *, processes_stopped: bool = False,
+        self, run_id: str, *, expected_claim: str,
+        processes_stopped: bool = False,
     ) -> tuple[str, ...]:
-        """Clear abandoned claims, once their processes are known to be gone.
+        """Clear an abandoned claim, once its processes are known to be gone.
 
         Deliberately explicit and deliberately not called by `claim`: proving
         an Agent subprocess died is not something this module can do, and
         clearing the record is the step that lets another run write the files
         that process may still be holding.
+
+        `expected_claim` is the `claim_token` the caller saw, checked here
+        under the registration lock. A confirmation is about the claim
+        somebody looked at, and one run can hold this project more than once:
+        resolved, recovered, claimed again. Between reading a page and
+        answering it, the record may have become a *later* generation of the
+        same run — whose Agent processes nobody has checked at all. Without
+        this the stale confirmation would clear it, which is the one thing §4
+        exists to prevent.
 
         `processes_stopped` is asked for only where a record cannot be read at
         all. Naming the run proves nothing extra about such a record — the
@@ -512,21 +556,49 @@ class ProjectOccupancyRegistry:
         cleared: list[str] = []
         with _FileLock(self.root / REGISTRY_LOCK_NAME):
             errors: list = []
-            for path, occupancy in self._records(errors=errors):
+            found = False
+            for path, occupancy, token in self._records(errors=errors):
                 if occupancy.run_id != run_id:
                     continue
+                found = True
                 if self.holder_is_live(occupancy):
                     raise ProjectBusy(f"run {run_id!r} still holds the project")
+                self._check_generation(
+                    expected_claim, token, f"run {run_id!r}",
+                )
                 path.unlink(missing_ok=True)
                 cleared.append(occupancy.run_id)
             suffix = hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:16]
             for item in errors:
                 if item["record_id"].endswith(f".{suffix}.json"):
+                    found = True
+                    self._check_generation(
+                        expected_claim, item["claim_token"], f"run {run_id!r}",
+                    )
                     self._quarantine_record(
                         item["record_id"], processes_stopped=processes_stopped,
                     )
                     cleared.append(run_id)
+            if not found:
+                # A caller reached here having looked at a claim. Nothing to
+                # clear is news, not success: reporting an empty tuple reads
+                # as "cleared", and what happened is that the claim they were
+                # looking at is not the one on disk any more.
+                raise ProjectNeedsRecovery(
+                    f"run {run_id!r} has no claim on record here; the one you "
+                    "were looking at is already gone"
+                )
         return tuple(cleared)
+
+    @staticmethod
+    def _check_generation(expected: str, actual: str, subject: str) -> None:
+        if expected != actual:
+            raise ProjectNeedsRecovery(
+                f"the claim on {subject} changed since it was inspected "
+                f"({expected!r} is now {actual!r}); confirm the Agent "
+                "processes of the claim that is there now, not of the one "
+                "that was"
+            )
 
     def _quarantine_record(
         self, record_id: str, *, processes_stopped: bool,
@@ -558,19 +630,39 @@ class ProjectOccupancyRegistry:
         finally:
             lock.release()
 
-    def resolve_record(self, record_id: str, *, processes_stopped: bool = False) -> None:
-        """Repair one corrupt record, for a caller that cannot name its run."""
+    def resolve_record(
+        self, record_id: str, *, expected_claim: str,
+        processes_stopped: bool = False,
+    ) -> None:
+        """Repair one corrupt record, for a caller that cannot name its run.
+
+        A record's file name is its project and its run, so a later generation
+        of the same run lands on the same name. `expected_claim` is what
+        separates them here, as it does in `resolve`.
+        """
+
         with _FileLock(self.root / REGISTRY_LOCK_NAME):
             errors: list = []
             self._records(errors=errors)
-            if record_id not in {item["record_id"] for item in errors}:
+            broken = {item["record_id"]: item for item in errors}
+            if record_id not in broken:
                 raise ProjectNeedsRecovery("record is not a known corrupt record")
+            self._check_generation(
+                expected_claim, broken[record_id]["claim_token"],
+                f"record {record_id!r}",
+            )
             self._quarantine_record(
                 record_id, processes_stopped=processes_stopped,
             )
 
-    def inspect(self, path: Path | str) -> tuple[tuple[Occupancy, ...], tuple[dict, ...]]:
+    def inspect(
+        self, path: Path | str,
+    ) -> tuple[tuple[tuple[Occupancy, str], ...], tuple[dict, ...]]:
         """Diagnostic reads report corruption without opening the claim gate.
+
+        Each claim comes with its `claim_token`, because a page that shows a
+        claim is where somebody decides to clear one, and `resolve` will ask
+        which claim they meant.
 
         Identity is established the way `blocked_by` establishes it — device
         and inode, not the path as spelled. A page that answered "nobody holds
@@ -591,8 +683,13 @@ class ProjectOccupancyRegistry:
             identity = ProjectIdentity.of(path)
         except ProjectOccupancyError:
             identity = ProjectIdentity(Path(path).expanduser().resolve())
-        return (tuple(item for _, item in records if item.identity.overlaps(identity)),
-                tuple(errors))
+        return (
+            tuple(
+                (item, token) for _path, item, token in records
+                if item.identity.overlaps(identity)
+            ),
+            tuple(errors),
+        )
 
     def blocked_by(self, path: Path | str) -> tuple[Occupancy, ...]:
         """Claims that would refuse a run here, for a caller that wants to say so."""

@@ -396,6 +396,7 @@ def build_routes(ctx, service) -> list[Route]:
             return JSONResponse(envelope({
                 "enabled": False,
                 "reason": "this Runtime grants no project-directory access",
+                "allowed_commands": [],
             }))
         registry = access.registry
         records, corrupt_records = registry.inspect(access.project_root)
@@ -411,13 +412,50 @@ def build_routes(ctx, service) -> list[Route]:
                 # resolve rather than step over.
                 "holder_live": registry.holder_is_live(item),
                 "recovery": item.recovery,
+                # Which generation of this run's hold you are looking at. A
+                # resolve quotes it back; see the resolve route for why.
+                "claim_token": token,
             }
-            for item in records
+            for item, token in records
         ]
+        commands = []
+        if ctx.guard.allows(actor, OPS_WRITE_SCOPE):
+            # The token travels with the affordance because this read is the
+            # observation the confirmation will be about: a client that comes
+            # back with this payload is saying "the claim I saw here".
+            targets = [
+                {"run_id": item["run_id"], "claim_token": item["claim_token"]}
+                for item in occupancies if not item["holder_live"]
+            ] + [
+                {"record_id": item["record_id"],
+                 "claim_token": item["claim_token"]}
+                for item in corrupt_records
+            ]
+            for target in targets:
+                commands.append({
+                    "command": "project_access.resolve",
+                    "label": "Resolve abandoned project claim",
+                    "method": "POST",
+                    "href": "/api/v1/project-access/resolve",
+                    "target_aggregate_id": next(iter(target.values())),
+                    "payload_schema": "project-access-resolve/1.0",
+                    # Do not pre-fill true: discovery is not confirmation
+                    # that the old Agent processes have actually stopped.
+                    "payload": {**target, "processes_stopped": False},
+                    "confirmation": "explicit",
+                    "confirmation_message": (
+                        "Confirm the claim's Agent processes have stopped, "
+                        "then set processes_stopped to true. The server "
+                        "rechecks the ownership lock before clearing the "
+                        "claim, and refuses if the claim itself changed after "
+                        "this page was read."
+                    ),
+                })
         return JSONResponse(envelope({
             "enabled": True,
             "project_root": str(access.project_root),
             "write_granted": access.write_granted,
+            "allowed_commands": commands,
             "occupancies": occupancies,
             "corrupt_records": list(corrupt_records),
             "recovery_required": bool(corrupt_records) or any(
@@ -475,6 +513,14 @@ def build_routes(ctx, service) -> list[Route]:
         `abandon` releases it deliberately. Clearing the record is what lets
         the next run write the files that process may still be writing, so the
         caller has to say it looked.
+
+        And `claim_token` says which claim it looked at. A confirmation is
+        about one hold of the project, and one run can take it more than once
+        — resolved, recovered, claimed again. A page read before that,
+        answered after it, would otherwise carry a promise about the old
+        Agent's processes onto a claim held by a new one nobody has checked.
+        The registry re-reads the token under its own lock, so the check
+        cannot be raced either.
         """
 
         def command(body: Mapping[str, Any], actor: str, key: str):
@@ -494,14 +540,22 @@ def build_routes(ctx, service) -> list[Route]:
                     "processes_stopped must be true: confirm the run's Agent "
                     "processes have stopped before its claim is cleared"
                 )
+            claim_token = str(body.get("claim_token") or "").strip()
+            if not claim_token:
+                raise ValueError(
+                    "claim_token is required: name the claim you looked at, "
+                    "from GET /api/v1/project-access"
+                )
             try:
                 if run_id:
                     cleared = access.registry.resolve(
-                        run_id, processes_stopped=True,
+                        run_id, expected_claim=claim_token,
+                        processes_stopped=True,
                     )
                 else:
                     access.registry.resolve_record(
-                        record_id, processes_stopped=True,
+                        record_id, expected_claim=claim_token,
+                        processes_stopped=True,
                     )
                     cleared = (record_id,)
             except ProjectOccupancyError as exc:

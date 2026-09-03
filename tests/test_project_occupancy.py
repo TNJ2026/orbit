@@ -194,7 +194,8 @@ class AbandonedClaimTests(unittest.TestCase):
     def test_resolving_it_is_explicit_and_then_the_project_is_free(self) -> None:
         self.abandon("dead-run")
 
-        cleared = self.registry.resolve("dead-run")
+        [(_held, token)] = self.registry.inspect(self.project)[0]
+        cleared = self.registry.resolve("dead-run", expected_claim=token)
 
         self.assertEqual(("dead-run",), cleared)
         claim = self.registry.claim(self.project, run_id="run-2")
@@ -295,7 +296,8 @@ class CrossProcessTests(unittest.TestCase):
         self.assertIn("killed-run", str(caught.exception))
 
         # And only an explicit resolution opens it again.
-        self.registry.resolve("killed-run")
+        [(_held, token)] = self.registry.inspect(self.project)[0]
+        self.registry.resolve("killed-run", expected_claim=token)
         claim = self.registry.claim(self.project, run_id="next-run")
         self.addCleanup(claim.release)
 

@@ -147,7 +147,8 @@ class RecoveryRegressions(unittest.TestCase):
         restarted = coordinator()
         with self.assertRaises(ProjectNeedsRecovery):
             restarted.acquire("run", need)
-        registry.resolve("run")
+        [(_held, token)] = registry.inspect(self.project)[0]
+        registry.resolve("run", expected_claim=token)
         restarted.acquire("run", need)
         try:
             self.assertEqual(original, self.points.load("run"))
@@ -170,12 +171,15 @@ class OccupancyRegressions(unittest.TestCase):
         record.write_text("{")
         _, errors = self.registry.inspect(self.project)
         self.assertEqual(record.name, errors[0]["record_id"])
+        token = errors[0]["claim_token"]
         with self.assertRaises(ProjectBusy):
-            self.registry.resolve("run")
+            self.registry.resolve("run", expected_claim=token)
         claim._lock.release()
         with self.assertRaises(ProjectNeedsRecovery):
-            self.registry.resolve_record(record.name)
-        self.registry.resolve_record(record.name, processes_stopped=True)
+            self.registry.resolve_record(record.name, expected_claim=token)
+        self.registry.resolve_record(
+            record.name, expected_claim=token, processes_stopped=True,
+        )
         self.assertFalse(record.exists())
         self.assertEqual("{", next((self.root / "registry" / "quarantine").iterdir()).read_text())
         self.registry.claim(self.project, run_id="new").release()
@@ -185,17 +189,19 @@ class OccupancyRegressions(unittest.TestCase):
         record = next((self.root / "registry").glob("*.json"))
         record.write_text("{")
         claim._lock.release()
-        self.assertEqual((), self.registry.resolve("different"))
+        token = self.registry.inspect(self.project)[1][0]["claim_token"]
+        with self.assertRaises(ProjectNeedsRecovery):
+            self.registry.resolve("different", expected_claim=token)
         self.assertTrue(record.exists())
         # Naming the run proves nothing extra about a record nobody can read
         # — the match is on the file name either way — so this door asks for
         # the same promise `resolve_record` asks for.
         with self.assertRaises(ProjectNeedsRecovery):
-            self.registry.resolve("run")
+            self.registry.resolve("run", expected_claim=token)
         self.assertTrue(record.exists())
-        self.assertEqual(
-            ("run",), self.registry.resolve("run", processes_stopped=True),
-        )
+        self.assertEqual(("run",), self.registry.resolve(
+            "run", expected_claim=token, processes_stopped=True,
+        ))
 
     def test_inspect_still_answers_when_the_project_is_gone(self):
         # A vanished directory is one of the ways a run gets stuck holding it,
@@ -205,7 +211,8 @@ class OccupancyRegressions(unittest.TestCase):
         (self.project / "child").rmdir()
         self.project.rename(self.root / "moved")
         self.assertEqual(
-            ["run"], [item.run_id for item in self.registry.inspect(self.project)[0]],
+            ["run"],
+            [item.run_id for item, _token in self.registry.inspect(self.project)[0]],
         )
 
     def test_inspect_identifies_the_project_the_way_the_gate_does(self):
@@ -221,15 +228,58 @@ class OccupancyRegressions(unittest.TestCase):
         self.addCleanup(claim.release)
         self.assertEqual(
             [item.run_id for item in self.registry.blocked_by(alias)],
-            [item.run_id for item in self.registry.inspect(alias)[0]],
+            [item.run_id for item, _token in self.registry.inspect(alias)[0]],
         )
+
+    def test_a_confirmation_does_not_carry_to_a_later_generation(self):
+        """One run can hold this project more than once.
+
+        Between reading the page and answering it, the record may have become
+        a *later* hold by the same run — whose Agent processes the person
+        confirming has never seen. Their promise was about the first one.
+        """
+
+        first = self.registry.claim(self.project, run_id="run")
+        first._lock.release()
+        [(_seen, stale)] = self.registry.inspect(self.project)[0]
+
+        self.registry.resolve("run", expected_claim=stale, processes_stopped=True)
+        second = self.registry.claim(self.project, run_id="run")
+        second._lock.release()
+        [(_now, live)] = self.registry.inspect(self.project)[0]
+        self.assertNotEqual(stale, live)
+
+        with self.assertRaisesRegex(ProjectNeedsRecovery, "changed since"):
+            self.registry.resolve(
+                "run", expected_claim=stale, processes_stopped=True,
+            )
+        self.assertEqual(
+            ["run"],
+            [item.run_id for item, _token in self.registry.inspect(self.project)[0]],
+        )
+        self.registry.resolve("run", expected_claim=live, processes_stopped=True)
+        self.assertEqual((), self.registry.inspect(self.project)[0])
+
+    def test_a_corrupt_record_rewritten_underneath_is_a_different_claim(self):
+        claim = self.registry.claim(self.project, run_id="run")
+        record = next((self.root / "registry").glob("*.json"))
+        record.write_text("{")
+        claim._lock.release()
+        stale = self.registry.inspect(self.project)[1][0]["claim_token"]
+        record.write_text("{{")            # a later generation, still broken
+        with self.assertRaisesRegex(ProjectNeedsRecovery, "changed since"):
+            self.registry.resolve_record(
+                record.name, expected_claim=stale, processes_stopped=True,
+            )
+        self.assertTrue(record.exists())
 
     def test_same_run_stale_claim_requires_explicit_resolution(self):
         claim = self.registry.claim(self.project, run_id="run")
         claim._lock.release()
         with self.assertRaises(ProjectNeedsRecovery):
             self.registry.claim(self.project, run_id="run")
-        self.registry.resolve("run")
+        [(_held, token)] = self.registry.inspect(self.project)[0]
+        self.registry.resolve("run", expected_claim=token)
         self.registry.claim(self.project, run_id="run").release()
 
     def test_corrupt_parent_record_blocks_nested_claim(self):
