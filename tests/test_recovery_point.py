@@ -355,3 +355,137 @@ class RetentionTests(GitRecoveryPointTests):
 
         self.assertIsNone(self.points.load("old-run"))
         self.assertIsNotNone(self.points.load("live-run"))
+
+
+class FileBackupRecoveryTests(unittest.TestCase):
+    """A way back for a project git cannot answer for (§6.2).
+
+    The coverage is partial by construction — an Agent writes through the
+    filesystem, not through anything this process can intercept — so what
+    these defend is that the partiality is stated rather than smoothed over.
+    """
+
+    def setUp(self) -> None:
+        from orbit.workspace.recovery import FileBackupRecoveryPoints
+
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.project = Path(self.temp.name) / "project"
+        (self.project / "src").mkdir(parents=True)
+        (self.project / "important.conf").write_text("original\n")
+        (self.project / "src" / "main.py").write_text("print('before')\n")
+        (self.project / "unnamed.txt").write_text("nobody asked for me\n")
+        self.points = FileBackupRecoveryPoints(
+            self.project, self.project / ".orbit",
+        )
+
+    def test_nothing_declared_is_refused_rather_than_covering_nothing(self) -> None:
+        with self.assertRaises(RecoveryUnavailable) as caught:
+            self.points.create("run-1")
+        self.assertIn("declare workspace_access.protect", str(caught.exception))
+
+    def test_declared_files_are_covered_and_the_rest_is_declared_uncovered(self) -> None:
+        point = self.points.create(
+            "run-1", protect=["important.conf", "src/*.py"],
+        )
+
+        self.assertEqual(
+            ["important.conf", "src/main.py"], sorted(point.covered),
+        )
+        self.assertIn(
+            "every file the workflow did not name in workspace_access.protect",
+            point.uncovered,
+        )
+        self.assertNotIn("unnamed.txt", point.covered)
+
+    def test_a_declared_file_comes_back(self) -> None:
+        point = self.points.create("run-1", protect=["important.conf"])
+        (self.project / "important.conf").write_text("AGENT WRECKED THIS\n")
+
+        self.points.restore(point, self.points.plan_restore(point))
+
+        self.assertEqual(
+            "original\n", (self.project / "important.conf").read_text(),
+        )
+
+    def test_a_deleted_declared_file_comes_back(self) -> None:
+        point = self.points.create("run-1", protect=["important.conf"])
+        (self.project / "important.conf").unlink()
+
+        self.points.restore(point, self.points.plan_restore(point))
+
+        self.assertEqual(
+            "original\n", (self.project / "important.conf").read_text(),
+        )
+
+    def test_an_undeclared_file_is_not_restored_and_the_plan_says_so(self) -> None:
+        point = self.points.create("run-1", protect=["important.conf"])
+        (self.project / "unnamed.txt").write_text("changed\n")
+
+        plan = self.points.plan_restore(point)
+        self.points.restore(point, plan)
+
+        self.assertEqual("changed\n", (self.project / "unnamed.txt").read_text())
+        self.assertIn(
+            "(everything not named in protect)",
+            [item.path for item in plan.keeps],
+        )
+
+    def test_a_type_conflict_blocks_the_restore(self) -> None:
+        point = self.points.create("run-1", protect=["important.conf"])
+        (self.project / "important.conf").unlink()
+        (self.project / "important.conf").mkdir()
+
+        plan = self.points.plan_restore(point)
+
+        self.assertTrue(plan.blocked)
+        with self.assertRaises(RecoveryPointError):
+            self.points.restore(point, plan)
+
+    def test_a_symlink_escaping_the_project_is_refused(self) -> None:
+        outside = Path(self.temp.name) / "outside.txt"
+        outside.write_text("not part of the project\n")
+        (self.project / "link.conf").symlink_to(outside)
+
+        with self.assertRaises(RecoveryPointError):
+            self.points.create("run-1", protect=["link.conf"])
+
+    def test_it_reports_no_independent_comparison(self) -> None:
+        """§5: outside git the change record is the Agent's own account.
+        Saying so beats an empty diff that reads like "nothing changed"."""
+
+        point = self.points.create("run-1", protect=["important.conf"])
+
+        summary = self.points.summarize(point)
+
+        self.assertEqual("agent_report_only", summary.kind)
+        self.assertEqual((), summary.content)
+        self.assertIn("made no independent comparison", " ".join(summary.uncovered))
+
+    def test_it_is_loadable_after_the_fact(self) -> None:
+        self.points.create("run-1", protect=["important.conf", "src/*.py"])
+
+        loaded = self.points.load("run-1")
+
+        self.assertEqual(["important.conf", "src/main.py"], sorted(loaded.covered))
+
+    def test_retention_reclaims_only_settled_runs_past_the_period(self) -> None:
+        self.points.create("old-run", protect=["important.conf"])
+        self.points.create("live-run", protect=["important.conf"])
+
+        self.points.sweep({"live-run"}, older_than_seconds=1, now=2 ** 40)
+
+        self.assertIsNone(self.points.load("old-run"))
+        self.assertIsNotNone(self.points.load("live-run"))
+        # And the project's own files are untouched by any of it.
+        self.assertTrue((self.project / "important.conf").exists())
+        self.assertTrue((self.project / "unnamed.txt").exists())
+
+    def test_too_little_disk_refuses_rather_than_running_unprotected(self) -> None:
+        from orbit.workspace.recovery import FileBackupRecoveryPoints
+
+        points = FileBackupRecoveryPoints(
+            self.project, self.project / ".orbit", min_free_bytes=10 ** 18,
+        )
+        with self.assertRaises(RecoveryUnavailable):
+            points.create("run-1", protect=["important.conf"])

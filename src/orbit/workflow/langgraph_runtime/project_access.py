@@ -48,6 +48,9 @@ class ProjectAccessNeed:
 
     required: bool = False
     write: bool = False
+    # Files the workflow says must be recoverable. Only consulted where git
+    # cannot supply a baseline of its own (§6.2).
+    protect: tuple[str, ...] = ()
     # The Agent nodes that will work in the directory. Under `isolation:
     # none` that is *every* Agent node in the workflow, not only the ones
     # carrying the policy — see §2.
@@ -82,6 +85,11 @@ def project_access_need(ir: Any) -> ProjectAccessNeed:
         write=any(
             (policy.config or {}).get("mode") == "read_write" for policy in asked
         ),
+        protect=tuple(sorted({
+            str(item)
+            for policy in asked
+            for item in ((policy.config or {}).get("protect") or ())
+        })),
         agent_nodes=tuple(
             node.id for node in ir.nodes
             if node.handler is not None and node.handler.name.startswith("agent.")
@@ -115,9 +123,23 @@ class ProjectAccessCoordinator:
         # workflow whose recovery point cannot be established rather than
         # running it unprotected.
         if recovery_points is None:
-            from ...workspace.recovery import GitRecoveryPoints
+            from ...workspace.git import is_git_repo
+            from ...workspace.recovery import (
+                FileBackupRecoveryPoints, GitRecoveryPoints,
+            )
 
-            recovery_points = GitRecoveryPoints(self.project_root)
+            # git where git can answer, because its baseline covers the whole
+            # project without anybody having to enumerate it. Where it cannot,
+            # the only honest alternative is the files the workflow named —
+            # see `FileBackupRecoveryPoints` for why a whole-directory copy is
+            # not on the list.
+            recovery_points = (
+                GitRecoveryPoints(self.project_root)
+                if is_git_repo(self.project_root)
+                else FileBackupRecoveryPoints(
+                    self.project_root, self.project_root / ".orbit",
+                )
+            )
         self.recovery_points = recovery_points
         self._claims: dict[str, ProjectClaim] = {}
 
@@ -145,7 +167,7 @@ class ProjectAccessCoordinator:
         # never started: on failure the project goes straight back rather than
         # being held by a run nobody can rescue.
         try:
-            point = self.recovery_points.create(run_id)
+            point = self.recovery_points.create(run_id, protect=need.protect)
         except BaseException:
             claim.release()
             raise

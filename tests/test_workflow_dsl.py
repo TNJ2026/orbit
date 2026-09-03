@@ -1164,6 +1164,33 @@ class WorkspaceAccessPolicyTests(unittest.TestCase):
         codes = {item.code for item in caught.exception.diagnostics}
         self.assertIn("DSL_POLICY_INVALID", codes)
 
+    def test_protect_declares_what_must_be_recoverable(self) -> None:
+        analysis = self.analyze({
+            "mode": "read_write", "isolation": "none",
+            "protect": ["important.conf", "src/*.py"],
+        })
+        self.assertEqual(("done",), analysis.outgoing["review"])
+
+    def test_protect_is_refused_alongside_a_disposable_copy(self) -> None:
+        with self.assertRaises(DiagnosticError) as caught:
+            self.analyze({
+                "mode": "read_only", "isolation": "worktree",
+                "protect": ["important.conf"],
+            })
+        self.assertIn(
+            "a disposable copy is already the way back",
+            " ".join(item.message for item in caught.exception.diagnostics),
+        )
+
+    def test_a_protect_path_escaping_the_project_is_refused(self) -> None:
+        with self.assertRaises(DiagnosticError) as caught:
+            self.analyze({
+                "mode": "read_write", "isolation": "none",
+                "protect": ["../outside.conf"],
+            })
+        codes = {item.code for item in caught.exception.diagnostics}
+        self.assertIn("DSL_POLICY_INVALID", codes)
+
 
 class ProjectAccessModeTests(unittest.TestCase):
     """`workspace_access` with `isolation: none` — the real project directory.

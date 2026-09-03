@@ -33,7 +33,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from typing import Iterable, Mapping
+from typing import Iterable, Mapping, Sequence
 
 from .git import GIT_TIMEOUT_SECONDS, WorkspaceError, _git, is_git_repo
 
@@ -252,11 +252,18 @@ class GitRecoveryPoints:
     def available(self) -> bool:
         return is_git_repo(self.project_root)
 
-    def create(self, run_id: str) -> RecoveryPoint:
+    def create(
+        self, run_id: str, *, protect: Sequence[str] = (),
+    ) -> RecoveryPoint:
         """Record where the project is, before anything is allowed to write.
 
         Taken after the project lock and before the first node runs, so what
         it captures is the state the operator would expect to come back to.
+
+        `protect` is accepted and ignored, so a caller does not have to know
+        which strategy it is talking to. git's baseline is the whole project
+        already; there is nothing for a workflow to enumerate, and a list that
+        narrowed it would only describe less than what is covered.
         """
 
         if not self.available():
@@ -575,3 +582,203 @@ class GitRecoveryPoints:
             if result.returncode == 0:
                 reclaimed.append(ref)
         return tuple(reclaimed)
+
+
+class FileBackupRecoveryPoints:
+    """A way back for a project git cannot give one for (§6.2).
+
+    Outside git there is no "everything tracked" to lean on, and copying the
+    whole directory is what this design refuses to do. So the workflow names
+    the files whose loss would matter — `workspace_access.protect` — and those
+    are copied before the run.
+
+    The coverage is partial by construction, and that is the point to be
+    honest about rather than to smooth over: an Agent CLI writes through the
+    filesystem, not through anything this process can intercept, so a file
+    nobody named is a file with no way back. `uncovered` says so, and §6.2
+    requires an operator to be shown it before the run rather than after.
+
+    Filesystem snapshots and copy-on-write (§6.2's first choice) are not
+    implemented: whether a given platform, volume and path support them is
+    not something this can establish portably, and claiming a snapshot that
+    silently was not one would be worse than not offering it.
+    """
+
+    def __init__(
+        self, project_root: Path | str, state_dir: Path | str, *,
+        min_free_bytes: int = DEFAULT_MIN_FREE_BYTES,
+    ) -> None:
+        self.project_root = Path(project_root).expanduser().resolve()
+        self.state_dir = Path(state_dir)
+        self.min_free_bytes = min_free_bytes
+        self._root = self.state_dir / "recovery-points"
+
+    def available(self) -> bool:
+        return self.project_root.is_dir()
+
+    def _home(self, run_id: str) -> Path:
+        safe = "".join(
+            character if character.isalnum() or character in "-_." else "-"
+            for character in run_id
+        ).strip("-.") or "run"
+        return self._root / safe
+
+    def create(
+        self, run_id: str, *, protect: Sequence[str] = (),
+    ) -> RecoveryPoint:
+        if not protect:
+            raise RecoveryUnavailable(
+                f"{self.project_root} is not a git repository, so a recovery "
+                "point can only cover files the workflow names; declare "
+                "workspace_access.protect or run somewhere git can answer"
+            )
+        matches: list[tuple[Path, Path]] = []
+        for pattern in protect:
+            for candidate in sorted(self.project_root.glob(pattern)):
+                if not candidate.is_file():
+                    continue
+                resolved = candidate.resolve()
+                try:
+                    relative = resolved.relative_to(self.project_root)
+                except ValueError:
+                    raise RecoveryPointError(
+                        f"{pattern!r} matched {candidate}, which resolves "
+                        f"outside {self.project_root}"
+                    ) from None
+                matches.append((resolved, relative))
+        self._check_space(sum(source.stat().st_size for source, _ in matches))
+        home = self._home(run_id)
+        if home.exists():
+            shutil.rmtree(home, ignore_errors=True)
+        for source, relative in matches:
+            target = home / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        home.mkdir(parents=True, exist_ok=True)
+        return RecoveryPoint(
+            run_id=run_id,
+            project_root=self.project_root,
+            kind="file_backup",
+            created_at=_stamp(),
+            ref=str(home),
+            covered=tuple(
+                sorted(str(relative) for _source, relative in matches)
+            ),
+            uncovered=(
+                "every file the workflow did not name in "
+                "workspace_access.protect",
+            ),
+        )
+
+    def _check_space(self, needed: int) -> None:
+        try:
+            usage = shutil.disk_usage(
+                self.state_dir if self.state_dir.exists()
+                else self.state_dir.parent
+            )
+        except OSError as exc:
+            raise RecoveryPointError(f"could not read free space: {exc}") from exc
+        if usage.free - needed < self.min_free_bytes:
+            raise RecoveryUnavailable(
+                f"copying {needed} bytes would leave less than "
+                f"{self.min_free_bytes} bytes free; refusing rather than "
+                "running unprotected"
+            )
+
+    def load(self, run_id: str) -> RecoveryPoint | None:
+        home = self._home(run_id)
+        if not home.is_dir():
+            return None
+        covered = sorted(
+            str(item.relative_to(home))
+            for item in home.rglob("*") if item.is_file()
+        )
+        return RecoveryPoint(
+            run_id=run_id, project_root=self.project_root, kind="file_backup",
+            created_at="", ref=str(home), covered=tuple(covered),
+            uncovered=(
+                "every file the workflow did not name in "
+                "workspace_access.protect",
+            ),
+        )
+
+    def plan_restore(self, point: RecoveryPoint) -> RestorePlan:
+        home = Path(point.ref or "")
+        entries: list[RestoreEntry] = []
+        for relative in point.covered:
+            target = self.project_root / relative
+            if target.is_dir() and not target.is_symlink():
+                entries.append(RestoreEntry(
+                    relative, "conflict",
+                    "a directory now stands where this file was",
+                ))
+            else:
+                entries.append(RestoreEntry(relative, "restore"))
+        entries.append(RestoreEntry(
+            "(everything not named in protect)", "keep",
+            "never copied, so never restored — see uncovered",
+        ))
+        return RestorePlan(point, tuple(entries))
+
+    def restore(self, point: RecoveryPoint, plan: RestorePlan) -> tuple[str, ...]:
+        if plan.blocked:
+            raise RecoveryPointError(
+                "restore is blocked by path type conflicts: "
+                + ", ".join(item.path for item in plan.conflicts)
+            )
+        home = Path(point.ref or "")
+        restored: list[str] = []
+        for entry in plan.restores:
+            source = home / entry.path
+            if not source.is_file():
+                continue
+            target = self.project_root / entry.path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            restored.append(entry.path)
+        return tuple(restored)
+
+    def summarize(self, point: RecoveryPoint) -> ChangeSummary:
+        """There is no independent comparison to make here.
+
+        §5 is explicit that outside git the change record is the Agent's own
+        account plus whatever the workflow's acceptance could verify. Saying
+        that plainly beats returning an empty diff that reads like "nothing
+        changed".
+        """
+
+        return ChangeSummary(
+            kind="agent_report_only",
+            scope="run_cumulative",
+            uncovered=(
+                "this project is not a git repository; Orbit made no "
+                "independent comparison, so the change record is the Agent's "
+                "own account plus the workflow's acceptance",
+            ),
+        )
+
+    def sweep(
+        self, live_run_ids: Iterable[str], *, older_than_seconds: float,
+        now: float | None = None,
+    ) -> tuple[str, ...]:
+        if not self._root.is_dir():
+            return ()
+        moment = time.time() if now is None else now
+        live = {self._home(str(item)).name for item in live_run_ids}
+        reclaimed: list[str] = []
+        for child in sorted(self._root.iterdir()):
+            if child.name in live or not child.is_dir():
+                continue
+            try:
+                age = moment - child.stat().st_mtime
+            except OSError:
+                continue
+            if age < older_than_seconds:
+                continue
+            shutil.rmtree(child, ignore_errors=True)
+            reclaimed.append(child.name)
+        return tuple(reclaimed)
+
+    def forget(self, point: RecoveryPoint) -> None:
+        if point.ref:
+            shutil.rmtree(Path(point.ref), ignore_errors=True)

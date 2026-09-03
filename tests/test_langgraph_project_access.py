@@ -380,3 +380,90 @@ class RecoveryPointIntegrationTests(unittest.TestCase):
 
     def test_a_run_that_never_held_the_project_has_no_summary(self):
         self.assertIsNone(self.coord().summarize("never-ran"))
+
+
+class NonGitRecoveryTests(unittest.TestCase):
+    """A non-git project can have a way back now — a partial one, declared."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.project = self.root / "project"; self.project.mkdir()
+        (self.project / "important.conf").write_text("original\n")
+        (self.project / "unnamed.txt").write_text("nobody named me\n")
+        self.registry = ProjectOccupancyRegistry(self.root / "occ")
+
+    def coord(self):
+        return ProjectAccessCoordinator(
+            self.project, registry=self.registry, write_granted=True,
+        )
+
+    def test_it_picks_the_file_backup_strategy_off_git(self):
+        from orbit.workspace.recovery import FileBackupRecoveryPoints
+
+        self.assertIsInstance(
+            self.coord().recovery_points, FileBackupRecoveryPoints,
+        )
+
+    def test_without_protect_it_is_still_refused(self):
+        """Unchanged from before: no way back means no run (§6.2)."""
+
+        from orbit.workspace.recovery import RecoveryUnavailable
+
+        c = self.coord()
+        with self.assertRaises(RecoveryUnavailable):
+            c.acquire("r1", ProjectAccessNeed(required=True, write=True))
+        self.assertEqual(
+            [], [o for o in self.registry.occupancies() if o.run_id == "r1"],
+        )
+
+    def test_with_protect_the_run_may_proceed(self):
+        c = self.coord()
+        c.acquire("r1", ProjectAccessNeed(
+            required=True, write=True, protect=("important.conf",),
+        ))
+        self.addCleanup(c.release, "r1", "completed")
+
+        recovery = c.status("r1")["recovery"]
+        self.assertEqual("file_backup", recovery["kind"])
+        self.assertEqual(["important.conf"], recovery["covered"])
+        self.assertIn(
+            "every file the workflow did not name in workspace_access.protect",
+            recovery["uncovered"],
+        )
+
+    def test_the_declared_file_can_actually_be_put_back(self):
+        from orbit.workspace.recovery import FileBackupRecoveryPoints
+
+        c = self.coord()
+        c.acquire("r1", ProjectAccessNeed(
+            required=True, write=True, protect=("important.conf",),
+        ))
+        self.addCleanup(c.release, "r1", "completed")
+        (self.project / "important.conf").write_text("WRECKED\n")
+
+        points = FileBackupRecoveryPoints(self.project, self.project / ".orbit")
+        point = points.load("r1")
+        points.restore(point, points.plan_restore(point))
+
+        self.assertEqual(
+            "original\n", (self.project / "important.conf").read_text(),
+        )
+
+    def test_a_git_project_still_uses_git(self):
+        import subprocess
+        from orbit.workspace.recovery import GitRecoveryPoints
+
+        repo = self.root / "repo"; repo.mkdir()
+        for argv in (("git","init","--initial-branch=main"),
+                     ("git","config","user.email","t@e.com"),
+                     ("git","config","user.name","T")):
+            subprocess.run(argv, cwd=repo, capture_output=True, check=True)
+        (repo / "a.txt").write_text("a\n")
+        subprocess.run(("git","add","-A"), cwd=repo, capture_output=True, check=True)
+        subprocess.run(("git","commit","-m","i"), cwd=repo, capture_output=True, check=True)
+
+        coordinator = ProjectAccessCoordinator(
+            repo, registry=self.registry, write_granted=True,
+        )
+        self.assertIsInstance(coordinator.recovery_points, GitRecoveryPoints)

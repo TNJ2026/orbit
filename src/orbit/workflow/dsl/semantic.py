@@ -688,6 +688,38 @@ def analyze_dsl(
                     "way back into the project",
                     path + ("config", "isolation"),
                 ))
+            # What must be recoverable when git cannot provide a baseline.
+            # A non-git project has no equivalent of "everything tracked", so
+            # the author names the files whose loss would matter; §6.2 is
+            # explicit that the coverage is partial and has to be disclosed
+            # rather than implied.
+            protect = config.get("protect")
+            if protect is not None:
+                invalid = (
+                    not isinstance(protect, list)
+                    or not protect
+                    or not all(
+                        isinstance(item, str) and item.strip() for item in protect
+                    )
+                    or any(
+                        ".." in Path(item).parts or Path(item).is_absolute()
+                        for item in protect if isinstance(item, str)
+                    )
+                )
+                if invalid:
+                    diagnostics.append(_diagnostic(
+                        document, "DSL_POLICY_INVALID",
+                        "workspace_access protect must be a non-empty list of "
+                        "relative paths with no '..' segment",
+                        path + ("config", "protect"),
+                    ))
+                elif isolation != "none":
+                    diagnostics.append(_diagnostic(
+                        document, "DSL_POLICY_INVALID",
+                        "workspace_access protect applies to isolation 'none'; "
+                        "a disposable copy is already the way back",
+                        path + ("config", "protect"),
+                    ))
             if isolation == "none" and config.get("files") is not None:
                 diagnostics.append(_diagnostic(
                     document, "DSL_POLICY_INVALID",
