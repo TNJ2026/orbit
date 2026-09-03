@@ -2737,6 +2737,74 @@ export function createViews(context) {
     ]);
   }
 
+  /* What a run changed in the real project, when it worked in one.
+   *
+   * Two sources, drawn apart because they are not the same kind of claim:
+   * the git comparison is Orbit's own observation against the run's recovery
+   * point; everything else is the Agent's account of itself. Presenting one
+   * as the other is how "no changes shown" comes to mean both "nothing
+   * happened" and "nobody looked".
+   *
+   * Fetched on its own like the diagram below: the comparison scans a working
+   * tree, and a slow project must not hold up the rest of the drawer.
+   */
+  function goalChangesSection(body, run) {
+    const heading = el("h2", {
+      class: "goal-section-title", text: i18n.t("goal.heading.changes"),
+    });
+    const card = el("section", { class: "goal-card goal-changes-card" });
+    heading.hidden = true;
+    card.hidden = true;
+    body.append(heading, card);
+    (async () => {
+      let payload;
+      try {
+        payload = (await api.runChanges(run.run_id)).data;
+      } catch (error) {
+        return;  // Nothing to say is better than an error nobody asked for.
+      }
+      const summary = payload?.git;
+      if (!summary) return;
+      const rows = [];
+      if (summary.kind === "agent_report_only") {
+        rows.push(el("p", {
+          class: "muted", text: i18n.t("goal.changes.agentReportOnly"),
+        }));
+      } else {
+        for (const change of summary.content || []) {
+          rows.push(el("div", { class: "goal-change-row" }, [
+            el("span", {
+              class: `pill goal-change-${change.status}`, text: change.status,
+            }),
+            el("span", { class: "goal-change-path", text: change.path }),
+          ]));
+        }
+        if (!rows.length) {
+          rows.push(el("p", {
+            class: "muted", text: i18n.t("goal.changes.none"),
+          }));
+        }
+        if (summary.head_moved) {
+          rows.push(el("p", {
+            class: "muted", text: i18n.t("goal.changes.headMoved", {
+              branch: summary.branch_after || "",
+            }),
+          }));
+        }
+      }
+      // Never omitted, whatever was compared: this is not a filesystem diff,
+      // and a reader who assumes it is has been misled by us rather than by
+      // the Agent.
+      rows.push(el("p", {
+        class: "muted goal-changes-coverage",
+        text: i18n.t("goal.changes.partial"),
+      }));
+      card.append(...rows);
+      heading.hidden = false;
+      card.hidden = false;
+    })();
+  }
+
   function goalStepsCard(run, steps) {
     const card = el("section", { class: "goal-card goal-steps-card" });
     if (steps === null) {
@@ -2853,6 +2921,7 @@ export function createViews(context) {
           el("h2", { class: "goal-section-title", text: i18n.t("simplified.steps") }),
           goalStepsCard(run, steps),
         );
+        goalChangesSection(body, run);
         goalCanvasSection(body, run, steps || []);
         await appendRunArtifacts(body, run.run_id);
       } catch (error) {

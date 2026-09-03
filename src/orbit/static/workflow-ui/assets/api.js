@@ -125,6 +125,19 @@ export class Api {
     return this.get(`/api/v1/langgraph-runs/${encodeURIComponent(runId)}/steps`);
   }
 
+  /** What this run changed in the project, as far as anything can say.
+   *
+   * Two kinds of answer and they are not interchangeable: what Orbit
+   * compared for itself against the run's recovery point, and what only the
+   * Agent can account for. The payload keeps them apart; so does the card
+   * that draws it.
+   */
+  runChanges(runId) {
+    return this.get(
+      `/api/v1/langgraph-runs/${encodeURIComponent(runId)}/changes`,
+    );
+  }
+
   /** The definition this run executed — its own, not the workflow's latest. */
   runGraph(runId) {
     return this.get(`/api/v1/langgraph-runs/${encodeURIComponent(runId)}/graph`);
