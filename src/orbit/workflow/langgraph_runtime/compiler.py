@@ -42,6 +42,24 @@ class LangGraphRetryableError(RuntimeError):
     """A Handler explicitly classified a failure as safe to retry."""
 
 
+class AcceptanceNotMet(RuntimeError):
+    """A node finished and could not show the work it declared (§5).
+
+    An outcome, not a crash: the node ran, the run exists, and the reason is
+    written on it. Lives here rather than beside the adapter that raises it
+    because it has to be recognised in two other places — across the
+    execution-worker RPC boundary, and by the driver that settles the run —
+    and an exception those cannot name is one they report as a bare
+    RuntimeError and a blank HTTP 500.
+
+    Deliberately not a `LangGraphRetryableError`: §5 says not to retry
+    blindly, and an Agent that produced no evidence of its work has given no
+    reason to believe the same prompt would do better. Nothing here rolls
+    anything back either — the files stay as the Agent left them, and the
+    recovery point (§6) makes going back a decision somebody takes.
+    """
+
+
 class LangGraphRetryRequested(RuntimeError):
     def __init__(self, node_id, attempt_id, policy, cause, generation=1):
         self.node_id, self.attempt_id = node_id, attempt_id
@@ -77,6 +95,9 @@ class LangGraphExecutionContext:
     # cross-check already read out of `ir.policies`, handed down instead of
     # re-derived.
     workspace_access: Mapping[str, Any] | None = None
+    # The resolved `acceptance` policy's own `config`, or None. What this
+    # node has to be able to show for its work once it finishes (§5).
+    acceptance: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -977,6 +998,7 @@ def compile_workflow(
                 if policy.kind not in {
                     "route", "retry", "join", "loop", "rework", "completion",
                     "workspace_access",
+                    "acceptance",
                 }
                 or (
                     policy.kind == "join"
@@ -1255,6 +1277,10 @@ def compile_workflow(
                 policy for policy in ir.policies
                 if policy.id in current.policies and policy.kind == "workspace_access"
             ), None)
+            acceptance_policy = next((
+                policy for policy in ir.policies
+                if policy.id in current.policies and policy.kind == "acceptance"
+            ), None)
             if implementation is None:
                 if current.kind == "human":
                     resumed = interrupt({
@@ -1295,6 +1321,10 @@ def compile_workflow(
                         str(config.get("configurable", {}).get(
                             "actor", "system:langgraph"
                         )),
+                        acceptance=(
+                            to_primitive(acceptance_policy.config)
+                            if acceptance_policy is not None else None
+                        ),
                         workspace_access=(
                             to_primitive(workspace_policy.config)
                             if workspace_policy is not None else None

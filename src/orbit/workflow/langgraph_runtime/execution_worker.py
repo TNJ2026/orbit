@@ -12,7 +12,7 @@ import threading
 from typing import Any, Mapping, Sequence
 
 from .compiler import (
-    BoundHandler, HandlerOutcome, LangGraphHandlerRegistry,
+    AcceptanceNotMet, BoundHandler, HandlerOutcome, LangGraphHandlerRegistry,
     LangGraphRetryableError, LangGraphRunCancelled,
     LangGraphUnknownExternalResult,
 )
@@ -137,6 +137,12 @@ class ExecutionWorkerController:
             raise LangGraphRetryableError(error)
         if error_type == "LangGraphRunCancelled":
             raise LangGraphRunCancelled(error)
+        if error_type == "AcceptanceNotMet":
+            # Kept as itself across the boundary: the driver settles the run
+            # on this type, and a bare RuntimeError would reach it as a crash
+            # and answer a caller with a blank 500 about a run whose reason is
+            # written down.
+            raise AcceptanceNotMet(error)
         if error_type in {"LangGraphUnknownExternalResult", "UnknownExternalResultError"}:
             raise LangGraphUnknownExternalResult(error)
         raise RuntimeError(f"Execution Worker {error_type}: {error}")

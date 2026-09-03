@@ -24,7 +24,7 @@ from ..graph.conditions import ConditionEvaluationError
 from ..domain.serialization import canonical_json, definition_hash, to_primitive
 from ..domain.ir_schema import workflow_ir_from_primitive
 from .compiler import (
-    LangGraphCompileError, LangGraphCompletionUnsatisfied,
+    AcceptanceNotMet, LangGraphCompileError, LangGraphCompletionUnsatisfied,
     LangGraphHandlerRegistry, LangGraphJoinDeadlineExceeded,
     LangGraphRetryRequested, LangGraphUnknownExternalResult, compile_workflow,
     edge_is_selected, outgoing_edges, validate_human_response,
@@ -2543,6 +2543,13 @@ class LangGraphWorkflowService:
             # in the database with the reason written on it — and mapping it to
             # ValueError instead would be worse, because that boundary drops
             # the idempotency receipt and the same key would start a second run.
+            return self._settle(
+                run_id, "failed", error=f"{type(exc).__name__}: {exc}"
+            )
+        except AcceptanceNotMet as exc:
+            # The same shape as `LangGraphCompletionUnsatisfied` above, and
+            # settled the same way: the node ran, the run did not finish, and
+            # the reason belongs on the run rather than in a stack trace.
             return self._settle(
                 run_id, "failed", error=f"{type(exc).__name__}: {exc}"
             )

@@ -26,7 +26,8 @@ from ..persistence.workflow_versions import SQLiteWorkflowVersionStore
 from .artifacts import LangGraphArtifactStore
 from .console import AttemptConsole, AttemptConsoleSink
 from .compiler import (
-    BoundHandler, HandlerOutcome, LangGraphHandlerRegistry, LangGraphRetryableError,
+    AcceptanceNotMet, BoundHandler, HandlerOutcome, LangGraphHandlerRegistry,
+    LangGraphRetryableError,
     LangGraphRunCancelled, LangGraphUnknownExternalResult,
 )
 from .service import (
@@ -309,6 +310,45 @@ def _validate_secret_refs(inputs, context, manifest) -> None:
             )
 
 
+def _check_acceptance(implementation, context) -> None:
+    """Evaluate this node's declared acceptance against the real project."""
+
+    declared = getattr(context, "acceptance", None)
+    if not declared:
+        return
+    from ...workspace.acceptance import AcceptanceUnmet, evaluate
+
+    client = getattr(implementation, "client", None)
+    project_root = getattr(client, "project_root", None)
+    if project_root is None:
+        # Acceptance describes files in the project, and this node is not
+        # working in one. Refusing beats checking a scratch directory and
+        # calling the answer acceptance.
+        raise AcceptanceNotMet(
+            f"node {context.node_id!r} declares acceptance, which needs the "
+            "project directory this Runtime was not started to grant"
+        )
+    changed: tuple[str, ...] = ()
+    if declared.get("files_changed"):
+        # Asked of the run's own recovery point, so `files_changed` means
+        # "this run changed it" rather than "it looks right now". Durable and
+        # keyed by run id, so no coordinator has to be threaded down here.
+        from ...workspace.recovery import GitRecoveryPoints
+
+        points = GitRecoveryPoints(project_root)
+        point = points.load(context.run_id)
+        if point is not None:
+            changed = tuple(
+                item.path for item in points.summarize(point).content
+            )
+    result = evaluate(declared, project_root, changed_paths=changed)
+    if not result.passed:
+        raise AcceptanceNotMet(
+            f"node {context.node_id!r} did not meet its acceptance: "
+            + str(AcceptanceUnmet(result.failures))
+        )
+
+
 def _agent_adapter(
     implementation: AgentHandler, manifest, journal, artifact_store, secret_values,
     console: AttemptConsole | None = None,
@@ -467,6 +507,12 @@ def _agent_adapter(
                 raise ValueError(
                     "Agent artifact_refs must exactly match produced Artifacts"
                 )
+            # §5, between the Agent finishing and anything depending on it:
+            # a zero exit code is not task completion, and this is where a
+            # node has to be able to show what it was asked to show. Checked
+            # before the attempt is settled succeeded, so a node that cannot
+            # is not recorded as one that did.
+            _check_acceptance(implementation, context)
             artifacts.commit()
             journal.settle(context.attempt_id, "succeeded", output=output)
             return output
