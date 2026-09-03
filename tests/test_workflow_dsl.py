@@ -1352,3 +1352,105 @@ class ProjectAccessModeTests(unittest.TestCase):
             ))
         codes = {item.code for item in caught.exception.diagnostics}
         self.assertIn("DSL_POLICY_INVALID", codes)
+
+
+class AcceptancePolicyTests(unittest.TestCase):
+    """A node may declare what its work must look like (§5)."""
+
+    OBJ = "schema://object/1.0"
+
+    def setUp(self) -> None:
+        self.schemas = InMemorySchemaCatalog({self.OBJ: {"type": "object"}})
+        self.handlers = InMemoryHandlerCatalog([
+            HandlerManifest(
+                name="agent.opencode", version="1.18.16", node_kinds=("action",),
+                inputs={"prompt": self.OBJ}, outputs={"result": self.OBJ},
+                config_schema={"type": "object"},
+                execution_safety=ExecutionSafety.UNKNOWN_ON_LEASE_LOSS,
+                resource_profile=ResourceProfile(0, 0, 0, 60, 0, "agent-cli"),
+                result_schema_id=self.OBJ,
+            ),
+        ])
+
+    def compile(self, config):
+        document = {
+            "dsl_version": "1.3",
+            "metadata": {"id": "accepted", "name": "Accepted"},
+            "nodes": [
+                {
+                    "id": "work", "kind": "action",
+                    "inputs": [{"id": "prompt", "schema_id": self.OBJ}],
+                    "outputs": [{"id": "result", "schema_id": self.OBJ}],
+                    "handler": {"name": "agent.opencode", "version": "1.18.16"},
+                    "policies": ["accept"],
+                },
+                {
+                    "id": "done", "kind": "terminal",
+                    "inputs": [{"id": "result", "schema_id": self.OBJ}],
+                },
+            ],
+            "edges": [{
+                "id": "e", "from": {"node": "work", "port": "result"},
+                "to": {"node": "done", "port": "result"},
+            }],
+            "entry": ["work"], "terminals": ["done"],
+            "result": {"node": "work", "port": "result"},
+            "policies": [
+                {"id": "accept", "kind": "acceptance", "config": config},
+            ],
+        }
+        return compile_source(
+            json.dumps(document), self.handlers, self.schemas,
+            source_format="json",
+        )
+
+    def test_a_declared_check_is_accepted(self) -> None:
+        compiled = self.compile({"files_exist": ["report.md"]})
+        self.assertEqual("workflow:accepted", compiled.ir.workflow_id)
+
+    def test_several_checks_are_accepted(self) -> None:
+        compiled = self.compile({
+            "files_exist": ["report.md"],
+            "files_non_empty": ["report.md"],
+            "json_valid": ["data.json"],
+            "files_changed": ["report.md"],
+        })
+        self.assertEqual("workflow:accepted", compiled.ir.workflow_id)
+
+    def test_an_empty_policy_declares_nothing_and_is_refused(self) -> None:
+        with self.assertRaises(DiagnosticError) as caught:
+            self.compile({})
+        self.assertIn(
+            "must declare at least one check",
+            " ".join(item.message for item in caught.exception.diagnostics),
+        )
+
+    def test_a_command_shaped_check_is_refused(self) -> None:
+        """The rule the repository is built on: a workflow selects a reviewed
+        command, it never describes one."""
+
+        with self.assertRaises(DiagnosticError) as caught:
+            self.compile({"run": ["pytest -q"]})
+        message = " ".join(item.message for item in caught.exception.diagnostics)
+        self.assertIn("takes only", message)
+        self.assertIn("run", message)
+
+    def test_a_path_escaping_the_project_is_refused(self) -> None:
+        with self.assertRaises(DiagnosticError) as caught:
+            self.compile({"files_exist": ["../outside.md"]})
+        self.assertIn(
+            "no '..' segment",
+            " ".join(item.message for item in caught.exception.diagnostics),
+        )
+
+    def test_an_absolute_path_is_refused(self) -> None:
+        with self.assertRaises(DiagnosticError) as caught:
+            self.compile({"files_exist": ["/etc/passwd"]})
+        codes = {item.code for item in caught.exception.diagnostics}
+        self.assertIn("DSL_POLICY_INVALID", codes)
+
+    def test_an_empty_list_is_refused(self) -> None:
+        with self.assertRaises(DiagnosticError) as caught:
+            self.compile({"files_exist": []})
+        codes = {item.code for item in caught.exception.diagnostics}
+        self.assertIn("DSL_POLICY_INVALID", codes)

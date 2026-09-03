@@ -641,7 +641,8 @@ def analyze_dsl(
 
     policy_by_id = {item["id"]: item for item in policies}
     supported_policy_kinds = {
-        "route", "join", "retry", "rework", "loop", "completion", "workspace_access",
+        "route", "join", "retry", "rework", "loop", "completion",
+        "workspace_access", "acceptance",
     }
     for index, policy in enumerate(policies):
         kind = policy["kind"]
@@ -709,6 +710,58 @@ def analyze_dsl(
                         "workspace_access files must be a non-empty list of "
                         "relative paths with no '..' segment",
                         path + ("config", "files"),
+                    ))
+            continue
+        if kind == "acceptance":
+            # What a node must be able to show for its work before anything
+            # downstream is allowed to depend on it. A zero exit code is not
+            # that: an Agent that explained why it could not do the job exits
+            # zero and is recorded a success (§5).
+            #
+            # Declarative checks only, and deliberately no command to run.
+            # "the tests pass" is the example everybody reaches for, and it
+            # is exactly what a workflow may never say here — the rule this
+            # repository is built on is that a workflow can *select* a
+            # reviewed command and never *describe* one. Test-shaped
+            # acceptance belongs to the reviewed dev tools, which §3.2 keeps
+            # out of this mode; until those two are reconciled, acceptance is
+            # what can be checked by looking at the files.
+            known = {"files_exist", "files_changed", "files_non_empty", "json_valid"}
+            declared = {key for key in config if key in known}
+            unknown = sorted(set(config) - known)
+            if unknown:
+                diagnostics.append(_diagnostic(
+                    document, "DSL_POLICY_INVALID",
+                    "acceptance policy takes only "
+                    + ", ".join(sorted(known))
+                    + f"; got {', '.join(unknown)}",
+                    path + ("config",),
+                ))
+            if not declared:
+                diagnostics.append(_diagnostic(
+                    document, "DSL_POLICY_INVALID",
+                    "acceptance policy must declare at least one check",
+                    path + ("config",),
+                ))
+            for key in sorted(declared):
+                value = config.get(key)
+                invalid = (
+                    not isinstance(value, list)
+                    or not value
+                    or not all(
+                        isinstance(item, str) and item.strip() for item in value
+                    )
+                    or any(
+                        ".." in Path(item).parts or Path(item).is_absolute()
+                        for item in value if isinstance(item, str)
+                    )
+                )
+                if invalid:
+                    diagnostics.append(_diagnostic(
+                        document, "DSL_POLICY_INVALID",
+                        f"acceptance {key} must be a non-empty list of relative "
+                        "paths with no '..' segment",
+                        path + ("config", key),
                     ))
             continue
         positive_fields = {
