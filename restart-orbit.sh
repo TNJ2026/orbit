@@ -4,7 +4,7 @@
 #
 # The start half is deliberately not implemented here. `agent-app.json` already
 # declares the command, the ready URL and how long a cold start may take, and
-# `orbit agent-app ensure` — what `scripts/start-orbit.sh` runs — owns the
+# `orbit agent-app ensure` — what `start-orbit.sh` runs — owns the
 # `pid.json` that records which process holds the port. A restart that starts
 # the Hub itself leaves that file naming a process it killed, and the next
 # `ensure` then refuses to run at all: the port answers, the recorded PID is
@@ -14,16 +14,21 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 STATE_ROOT="${AGENT_APP_STATE_DIR:-${HOME}/.local/state/agent-apps}"
+RUNTIME_ROOT="${ORBIT_RUNTIME_ROOT:-${HOME}/.orbit}"
 DRY_RUN=0
+STOP_ONLY=0
 
-if [ "${1:-}" = "--dry-run" ]; then
-  DRY_RUN=1
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1 ;;
+    --stop-only) STOP_ONLY=1 ;;
+    *)
+      echo "usage: ./restart-orbit.sh [--dry-run] [--stop-only]" >&2
+      exit 2
+      ;;
+  esac
   shift
-fi
-if [ "$#" -ne 0 ]; then
-  echo "usage: ./restart-orbit.sh [--dry-run]" >&2
-  exit 2
-fi
+done
 
 if [ -x "$ROOT_DIR/.venv/bin/orbit" ]; then
   ORBIT=("$ROOT_DIR/.venv/bin/orbit")
@@ -44,7 +49,7 @@ pids="$temporary/pids"
 # a restart script destroys an unrelated program. `ps` is the only thing that
 # can say what a number is now, so nothing is signalled without asking it.
 "${ORBIT[@]}" runtimes --json > "$temporary/runtimes.json"
-python3 - "$temporary/runtimes.json" "$STATE_ROOT" "$ROOT_DIR/agent-app.json" > "$pids" <<'PYTHON'
+python3 - "$temporary/runtimes.json" "$STATE_ROOT" "$ROOT_DIR/agent-app.json" "$RUNTIME_ROOT" > "$pids" <<'PYTHON'
 import json
 import shutil
 import subprocess
@@ -52,7 +57,9 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
-runtimes_path, state_root, manifest_path = (Path(part) for part in sys.argv[1:4])
+runtimes_path, state_root, manifest_path, runtime_root = (
+    Path(part) for part in sys.argv[1:5]
+)
 
 
 def identity_of(pid: int) -> str:
@@ -121,6 +128,17 @@ for entry in listed if isinstance(listed, list) else []:
     except (KeyError, TypeError, ValueError):
         continue
 
+# Discovery intentionally reports only lock files whose OS lock is live. For
+# stopping, the recorded owner is still useful evidence when discovery is
+# degraded: it becomes a candidate, never authority, because the command and
+# start time are checked before every signal below.
+for lock_path in sorted(runtime_root.rglob("*.owner.lock")):
+    try:
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        candidates.append((int(payload["pid"]), "Orbit Runtime", "orbit serve"))
+    except (OSError, ValueError, KeyError, TypeError):
+        continue
+
 seen: set[int] = set()
 for pid, label, expected in candidates:
     if pid <= 1 or pid in seen:
@@ -187,7 +205,11 @@ else
 fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
-  echo "Dry run complete; nothing was stopped or started."
+  if [ "$STOP_ONLY" -eq 1 ]; then
+    echo "Dry run complete; nothing was stopped."
+  else
+    echo "Dry run complete; nothing was stopped or started."
+  fi
   exit 0
 fi
 
@@ -213,5 +235,10 @@ while IFS=$'\t' read -r pid label identity; do
   signal_if_unchanged "$pid" "$identity" KILL "$label"
 done <"$pids"
 
+if [ "$STOP_ONLY" -eq 1 ]; then
+  echo "Orbit Hub and all discovered Runtimes are stopped."
+  exit 0
+fi
+
 echo "Starting Orbit through the Agent App host..."
-exec "$ROOT_DIR/scripts/start-orbit.sh"
+exec "$ROOT_DIR/start-orbit.sh"

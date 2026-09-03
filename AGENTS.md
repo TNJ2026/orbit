@@ -4,7 +4,7 @@
 
 生产服务分为三层：固定端口 MCP Gateway、每工作区 Control Runtime、每 Runtime 一个可配置的独立 Execution Worker 进程池。Control Runtime 持有图状态、授权与 `allowed_commands[]`；Worker 只执行受信 Handler。Streamable HTTP 会话可通过 `list_workspaces`/`select_workspace` 按名称或绝对路径选择工作区。
 
-- 启动：`scripts/start-orbit.sh [项目路径]`（Hub 在 127.0.0.1:8848，工作区 Runtime 使用动态端口）
+- 启动：`./start-orbit.sh [项目路径]`（Hub 在 127.0.0.1:8848，工作区 Runtime 使用动态端口）
 - 测试：`.venv/bin/python -m unittest discover -s tests`
 - 详细约定见 [CLAUDE.md](./CLAUDE.md)。
 

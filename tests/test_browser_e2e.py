@@ -1958,10 +1958,15 @@ class GoalHomeTests(BrowserE2ETestCase):
         self.assertEqual(1, state.locator(".pill").count())
         cancel = state.locator("button.danger")
         self.assertTrue(cancel.is_visible())
-        # Above the run's own output, not after it.
+        # Above the run's own output, not after it. The raw interrupts JSON
+        # this hero card used to carry is gone now — the same array already
+        # drives the Approve/Reject button above, so the Steps section is the
+        # next thing the run actually produced.
+        steps_section = page.locator(".simplified-steps-section").first
+        steps_section.wait_for()
         self.assertLess(
             cancel.bounding_box()["y"],
-            hero.locator(".code-block").first.bounding_box()["y"],
+            steps_section.bounding_box()["y"],
         )
 
     def test_the_run_controls_speak_the_readers_language(self) -> None:

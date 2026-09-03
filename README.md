@@ -123,7 +123,7 @@ example to the App's MCP configuration format:
   "mcpServers": {
     "orbit": {
       "command": "bash",
-      "args": ["/absolute/path/to/orbit/scripts/start-mcp-proxy.sh"],
+      "args": ["/absolute/path/to/orbit/start-orbit.sh", "--mcp-proxy"],
       "env": {
         "ORBIT_AGENT_APP_WORKSPACE": "/absolute/path/to/project"
       }
@@ -187,10 +187,9 @@ orbit workflow publish <file> --catalog <catalog.json> --expected-version <n>
 ```
 
 `orbit serve` binds to `127.0.0.1` by default. Runtime state and Artifacts are
-project-scoped, including published Workflow definitions and Handler bindings.
-The Hub shares only reusable Workflow source templates and aggregates Agent
-statistics from live Workspace Runtimes; importing a template always compiles
-and publishes it through the selected Runtime.
+project-scoped; published Workflow definitions are host-wide and visible from
+every Workspace. The Hub also owns reusable Workflow source templates and
+aggregates Agent statistics from live Workspace Runtimes.
 
 ## Development
 

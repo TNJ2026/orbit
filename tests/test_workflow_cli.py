@@ -413,7 +413,7 @@ if __name__ == "__main__":
 
 
 class WorkflowLibraryResolutionTests(unittest.TestCase):
-    """Every surface resolves the same Workspace-local executable catalog."""
+    """Every Workspace resolves the same host-wide executable catalog."""
 
     def parse(self, *arguments: str):
         from orbit.__main__ import build_parser
@@ -427,20 +427,20 @@ class WorkflowLibraryResolutionTests(unittest.TestCase):
             self.parse(*arguments).db, project_root=project_root,
         )
 
-    def test_every_default_surface_resolves_the_workspace_database(self) -> None:
-        from orbit.platform.projects import project_db_path
+    def test_every_default_surface_resolves_the_shared_workflow_database(self) -> None:
+        from orbit.platform.projects import public_workflow_db_path
 
         with tempfile.TemporaryDirectory() as directory:
-            expected = str(project_db_path(directory))
+            expected = str(public_workflow_db_path())
             for command in (("serve",), ("mcp",), ("workflow", "inventory")):
                 with self.subTest(command=command):
                     self.assertEqual(
                         expected, self.resolved(*command, project_root=directory),
                     )
 
-    def test_different_workspaces_have_different_workflow_catalogs(self) -> None:
+    def test_different_workspaces_share_one_workflow_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
-            self.assertNotEqual(
+            self.assertEqual(
                 self.resolved("serve", project_root=first),
                 self.resolved("serve", project_root=second),
             )
@@ -455,20 +455,13 @@ class WorkflowLibraryResolutionTests(unittest.TestCase):
 
         self.assertEqual("/tmp/orbit-workspace", args.project_root)
 
-    def test_the_workflow_commands_can_name_the_workspace_serve_was_given(self) -> None:
-        """Otherwise the two resolve different databases and both succeed.
+    def test_workflow_commands_accept_a_workspace_but_use_the_shared_catalog(self) -> None:
+        """The Workspace selects runtime state, never a private definition DB."""
 
-        `serve` takes `--project-root`; `orbit workflow` had no way to say the
-        same thing, so it resolved from wherever it happened to be run. A
-        Workflow published from a terminal in one directory was then invisible
-        in the UI served from another — the split the shared resolver exists
-        to prevent, reintroduced through the command line.
-        """
-
-        from orbit.platform.projects import project_db_path
+        from orbit.platform.projects import public_workflow_db_path
 
         with tempfile.TemporaryDirectory() as directory:
-            expected = str(project_db_path(directory))
+            expected = str(public_workflow_db_path())
             for command in (
                 ("workflow", "inventory"),
                 ("workflow", "publish", "flow.json", "--catalog", "c.json",

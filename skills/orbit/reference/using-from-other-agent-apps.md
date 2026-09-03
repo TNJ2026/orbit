@@ -12,7 +12,7 @@ the field names to the App's MCP configuration format:
   "mcpServers": {
     "orbit": {
       "command": "bash",
-      "args": ["/absolute/path/to/orbit/scripts/start-mcp-proxy.sh"],
+      "args": ["/absolute/path/to/orbit/start-orbit.sh", "--mcp-proxy"],
       "env": {
         "ORBIT_AGENT_APP_WORKSPACE": "/absolute/path/to/the/project"
       }

@@ -253,6 +253,11 @@ async function render() {
     // Refresh capabilities with the view so a newly connected app can become
     // the initial writer without requiring a full browser reload.
     shellFacts = (await api.capabilities()).data;
+    const workspacePath = document.getElementById("workspacePath");
+    const currentPath = shellFacts?.runtime?.workspace_path || "";
+    workspacePath.textContent = currentPath;
+    workspacePath.title = currentPath;
+    workspacePath.hidden = !currentPath;
     mayStartRun = Boolean(shellFacts.permissions && shellFacts.permissions.start_run);
     views.update({ i18n, shellFacts, mayStartRun, route });
     const fresh = el("div", { class: "content" });

@@ -152,6 +152,12 @@
   display: flex; flex-direction: column; gap: 32px;
 }
 #liveRegion { width: min(1160px, 100%); margin: 16px auto 0; padding-inline: 32px; }
+.workspace-path {
+  width: 100%; margin: auto 0 0; padding: 16px 32px 8px 12px;
+  color: var(--muted-2); opacity: .45; font-size: 11px; line-height: 1.4;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  pointer-events: none; user-select: text;
+}
 
 @media (max-width: 860px) {
   .topbar { gap: 12px; padding: 10px 12px; }
@@ -172,5 +178,6 @@
   }
   .content { padding: 14px 12px; gap: 20px; }
   #liveRegion { margin: 12px auto 0; padding-inline: 12px; }
+  .workspace-path { padding: 12px 12px 8px; }
 }
 [hidden] { display: none !important; }

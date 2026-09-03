@@ -45,7 +45,7 @@ invocation and cancellation cross that private worker boundary.
 
 **Claude Code.** There is no plugin. The skill is reached through the
 `.claude/skills/orbit` symlink in the checkout, and the MCP server comes from
-the repo-root `.mcp.json`, which runs `scripts/start-mcp-proxy.sh`. When no
+the repo-root `.mcp.json`, which runs `start-orbit.sh --mcp-proxy`. When no
 workspace is supplied, the proxy uses `ORBIT_DEFAULT_WORKSPACE` or
 `~/.orbit/workspaces/default`; it does not guess from the process cwd.
 
@@ -134,7 +134,7 @@ The rule that outlives any of these: if the card did not appear, say so and
 offer the full UI rather than silently opening a second surface.
 
 When the Hub is not running and no MCP tool can reach it, start it with
-`scripts/start-orbit.sh <absolute-project-path>` and open the workspace URL it
+`./start-orbit.sh <absolute-project-path>` and open the workspace URL it
 prints. Port 8848 belongs to the Hub; workspace Runtimes use discovered dynamic
 ports and remain isolated from one another.
 

@@ -18,6 +18,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "restart-orbit.sh"
+STOP_SCRIPT = ROOT / "stop-orbit.sh"
 
 
 class RestartOrbitScriptTests(unittest.TestCase):
@@ -31,7 +32,6 @@ class RestartOrbitScriptTests(unittest.TestCase):
 
         bin_dir = root / "bin"
         bin_dir.mkdir()
-        (root / "scripts").mkdir()
         (root / "restart-orbit.sh").write_text(
             SCRIPT.read_text(encoding="utf-8"), encoding="utf-8",
         )
@@ -43,6 +43,7 @@ class RestartOrbitScriptTests(unittest.TestCase):
         (root / "state" / "orbit" / "global" / "pid.json").write_text(
             json.dumps({"pid": recorded, "app_id": "orbit"}), encoding="utf-8",
         )
+        (root / "runtime-root").mkdir()
 
         uv = bin_dir / "uv"
         uv.write_text(
@@ -80,7 +81,7 @@ class RestartOrbitScriptTests(unittest.TestCase):
         self.write_ps_table(root / "ps-after.txt", ps_answers)
 
         # The start half is somebody else's; a stub keeps `exec` from failing.
-        start = root / "scripts" / "start-orbit.sh"
+        start = root / "start-orbit.sh"
         start.write_text("#!/bin/sh\necho started\n", encoding="utf-8")
         start.chmod(0o755)
 
@@ -92,6 +93,7 @@ class RestartOrbitScriptTests(unittest.TestCase):
             **os.environ,
             "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
             "AGENT_APP_STATE_DIR": str(root / "state"),
+            "ORBIT_RUNTIME_ROOT": str(root / "runtime-root"),
             "ORBIT_TEST_RUNTIMES": str(root / "runtimes.json"),
             "ORBIT_TEST_PS": str(root / "ps.txt"),
             "ORBIT_TEST_PS_AFTER": str(root / "ps-after.txt"),
@@ -284,6 +286,50 @@ class RestartOrbitScriptTests(unittest.TestCase):
                 "Would stop Orbit Runtime (PID 6001)",
                 self.run_dry(environment, root).stdout,
             )
+
+    def test_stop_only_never_starts_orbit_again(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            environment = self.environment(
+                root, listed=[], recorded=9000,
+                ps_answers={9000: "python -m orbit hub serve"},
+            )
+            self.write_ps_table(root / "ps-after.txt", {})
+            environment["ORBIT_TEST_PS_SWITCH"] = "1"
+
+            result = subprocess.run(
+                ["bash", str(root / "restart-orbit.sh"), "--stop-only"],
+                cwd=root, env=environment, text=True, capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertNotIn("started", result.stdout)
+            self.assertIn("all discovered Runtimes are stopped", result.stdout)
+
+    def test_stop_script_delegates_to_the_safe_stop_only_path(self) -> None:
+        contents = STOP_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn('restart-orbit.sh" --stop-only "$@"', contents)
+
+    def test_owner_record_finds_a_runtime_missing_from_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            environment = self.environment(
+                root, listed=[], recorded=9100,
+                ps_answers={
+                    9100: "python -m orbit hub serve",
+                    9101: "python -m orbit serve --project-root /workspace",
+                },
+            )
+            lock = root / "runtime-root" / "projects" / "runtime.db.owner.lock"
+            lock.parent.mkdir(parents=True)
+            lock.write_text(json.dumps({"pid": 9101}), encoding="utf-8")
+
+            result = self.run_dry(environment, root)
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("Would stop Orbit Runtime (PID 9101)", result.stdout)
 
 
 if __name__ == "__main__":

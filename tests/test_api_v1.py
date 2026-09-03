@@ -2069,6 +2069,25 @@ class PublicWorkflowLibraryTests(unittest.TestCase):
 
 
 class CapabilityTests(ApiTestCase):
+    def test_capabilities_expose_the_current_workspace_path(self) -> None:
+        workspace = Path(self.temp.name) / "workspace"
+        workspace.mkdir()
+        app = create_app(
+            self.db,
+            handlers=[transform_registration()], schemas=SCHEMAS,
+            poll_seconds=0.02,
+            authenticator=lambda request: request.headers.get("x-orbit-actor"),
+            authorizer=Authorizer(lambda actor: self.scopes.get(actor, [])),
+            workspace_path=workspace,
+        )
+
+        with AsgiHarness(app) as client:
+            data = client.get(
+                "/api/v1/capabilities", actor="reader",
+            ).json()["data"]
+
+        self.assertEqual(str(workspace.resolve()), data["runtime"]["workspace_path"])
+
     def test_capabilities_declare_absence_with_a_reason(self) -> None:
         """Plan API-7: the client never learns 'not provided' from a 404."""
         with AsgiHarness(self.app) as client:

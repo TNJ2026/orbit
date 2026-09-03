@@ -25,7 +25,11 @@ class WorkspaceRegistryTests(unittest.TestCase):
         )
 
         self.assertEqual("global", manifest["scope"])
-        self.assertEqual(["uv", "run", "--project", "{manifest_dir}", "orbit", "hub", "serve"], manifest["service"]["command"])
+        self.assertEqual(
+            ["{manifest_dir}/start-orbit.sh", "--hub-service"],
+            manifest["service"]["command"],
+        )
+        self.assertIn("ORBIT_CLI", manifest["service"]["environment"])
         self.assertEqual("http://127.0.0.1:8848/health/ready", manifest["service"]["ready_url"])
         self.assertEqual("http://127.0.0.1:8848/mcp", manifest["mcp"]["url"])
 

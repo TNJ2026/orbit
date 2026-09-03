@@ -284,6 +284,7 @@ def build_routes(ctx) -> list[Route]:
             },
             "runtime": {
                 "status": "running",
+                "workspace_path": ctx.operational_config.get("workspace_path"),
                 "allowed_commands": ([{
                     "command": "runtime.shutdown",
                     "label": "Stop Orbit",

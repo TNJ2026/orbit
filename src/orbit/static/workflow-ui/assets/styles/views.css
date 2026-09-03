@@ -527,18 +527,23 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 }
 .run-modal-titlebar {
   display: flex; align-items: center; justify-content: space-between;
-  flex: none; padding: 8px 20px;
+  flex: none; padding: 4px 20px 4px 12px;
 }
 .run-modal-title { margin: 0; font-size: 16px; font-weight: 650; }
 .run-modal-scroll {
   --run-title-card-gap: 8px;
-  min-height: 0; overflow-y: auto; padding: 20px 28px 24px;
+  min-height: 0; overflow-y: auto; padding: 12px;
 }
-.run-modal-panel > .data-state { margin: 24px 28px; }
+.run-modal-panel > .data-state { margin: 12px; }
 /* `.page-modal-panel` already insets and already scrolls; a second inset
    here would double it and a second scroller would trap the wheel. */
+/* 20px, not a value of its own: `.run-modal-body`'s sections are already
+   this far apart (`gap: 20px` below), and the Goal block above `body` is
+   one more section in that same stack. It only looks separate because
+   `.run-modal-head` and `body` are plain siblings with no shared gap
+   property — this padding is what stands in for it, so it has to match. */
 .run-modal-head {
-  display: block; padding: 0 0 16px;
+  display: block; padding: 0 0 20px;
 }
 .run-modal-headline { display: grid; gap: 6px; width: 100%; min-width: 0; }
 .run-modal-headline .goal-text-clamp { --goal-line-box: 22.5px; }
