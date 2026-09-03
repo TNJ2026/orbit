@@ -142,6 +142,7 @@ class ProjectAccessCoordinator:
             )
         self.recovery_points = recovery_points
         self._claims: dict[str, ProjectClaim] = {}
+        self._final_summaries: dict[str, Mapping[str, Any]] = {}
 
     def held_by(self, run_id: str) -> bool:
         return run_id in self._claims
@@ -194,9 +195,21 @@ class ProjectAccessCoordinator:
             raise
         self._claims[run_id] = claim
 
-    def finalize(self, run_id: str, status: str) -> None:
+    def finalize(self, run_id: str, status: str) -> Mapping[str, Any] | None:
         if status in RELEASING_STATUSES and run_id in self._claims:
-            self.recovery_points.finalize(run_id)
+            if run_id not in self._final_summaries:
+                try:
+                    self.recovery_points.finalize(run_id)
+                    summary = self.recovery_points.final_summary(run_id)
+                    if summary is None:
+                        raise RuntimeError("final summary missing")
+                except Exception as exc:
+                    summary = {"kind": "unavailable", "scope": "run_cumulative",
+                               "content": [], "staged": [],
+                               "error": f"{type(exc).__name__}: {exc}"}
+                self._final_summaries[run_id] = summary
+            return self._final_summaries[run_id]
+        return None
 
     def release(self, run_id: str, status: str) -> None:
         """Give the project back once the run can no longer touch it."""
@@ -242,6 +255,8 @@ class ProjectAccessCoordinator:
         "what did that run change" is asked most often once it is over.
         """
 
+        if run_id in self._final_summaries:
+            return self._final_summaries[run_id]
         summary = self.recovery_points.final_summary(run_id)
         if summary is not None:
             return summary

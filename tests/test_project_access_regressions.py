@@ -14,6 +14,49 @@ from orbit.workspace.recovery import GitRecoveryPoints, FileBackupRecoveryPoints
 
 
 class RecoveryRegressions(unittest.TestCase):
+    def test_missing_project_settles_and_failure_survives_service_restart(self):
+        from tests.test_web_composition import publish_linear_workflow, transform_registration
+        from orbit.workflow.langgraph_runtime import build_service
+        db = self.root / "runtime.db"
+        publish_linear_workflow(db)
+        service = build_service(db, [transform_registration()],
+                                state_directory=self.root / "state")
+        run = service.start("workflow:linear", {"value": 1},
+                            idempotency_key="start", actor="local")
+        registry = ProjectOccupancyRegistry(self.root / "registry")
+        access = ProjectAccessCoordinator(self.project, registry=registry,
+            write_granted=True, recovery_points=self.points)
+        service.project_access = access
+        access.acquire(run.run_id, ProjectAccessNeed(required=True, write=True))
+        self.project.rename(self.root / "moved")
+        settled = service._settle(run.run_id, "completed", result=run.result)
+        self.assertEqual("completed", settled.status)
+        self.assertFalse(access.held_by(run.run_id))
+        reopened = build_service(db, [transform_registration()],
+                                 state_directory=self.root / "state")
+        self.assertEqual("unavailable", reopened.project_summary(run.run_id)["kind"])
+
+    def test_release_after_project_disappears(self):
+        registry = ProjectOccupancyRegistry(self.root / "registry")
+        c = ProjectAccessCoordinator(self.project, registry=registry,
+            write_granted=True, recovery_points=self.points)
+        c.acquire("run", ProjectAccessNeed(required=True, write=True))
+        self.project.rename(self.root / "moved")
+        c.release("run", "completed")
+        self.assertFalse(c.held_by("run"))
+        self.assertEqual((), registry.occupancies())
+        self.assertEqual("unavailable", c.summarize("run")["kind"])
+
+    def test_summary_write_failure_does_not_hold_project(self):
+        registry = ProjectOccupancyRegistry(self.root / "registry")
+        c = ProjectAccessCoordinator(self.project, registry=registry,
+            write_granted=True, recovery_points=self.points)
+        c.acquire("run", ProjectAccessNeed(required=True, write=True))
+        with patch("orbit.workspace.recovery._write_json", side_effect=OSError("disk full")):
+            c.release("run", "completed")
+        self.assertFalse(c.held_by("run"))
+        self.assertIn("disk full", c.summarize("run")["error"])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -113,6 +156,31 @@ class RecoveryRegressions(unittest.TestCase):
 
 
 class OccupancyRegressions(unittest.TestCase):
+    def test_corrupt_record_is_diagnosable_and_repair_checks_owner(self):
+        claim = self.registry.claim(self.project, run_id="run")
+        record = next((self.root / "registry").glob("*.json"))
+        record.write_text("{")
+        _, errors = self.registry.inspect(self.project)
+        self.assertEqual(record.name, errors[0]["record_id"])
+        with self.assertRaises(ProjectBusy):
+            self.registry.resolve("run")
+        claim._lock.release()
+        with self.assertRaises(ProjectNeedsRecovery):
+            self.registry.resolve_record(record.name)
+        self.registry.resolve_record(record.name, processes_stopped=True)
+        self.assertFalse(record.exists())
+        self.assertEqual("{", next((self.root / "registry" / "quarantine").iterdir()).read_text())
+        self.registry.claim(self.project, run_id="new").release()
+
+    def test_resolve_run_only_repairs_its_own_corrupt_record(self):
+        claim = self.registry.claim(self.project, run_id="run")
+        record = next((self.root / "registry").glob("*.json"))
+        record.write_text("{")
+        claim._lock.release()
+        self.assertEqual((), self.registry.resolve("different"))
+        self.assertTrue(record.exists())
+        self.assertEqual(("run",), self.registry.resolve("run"))
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

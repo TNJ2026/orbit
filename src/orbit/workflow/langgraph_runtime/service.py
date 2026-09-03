@@ -405,6 +405,10 @@ class LangGraphWorkflowService:
         with self._connect() as connection:
             connection.executescript(
                 """
+                CREATE TABLE IF NOT EXISTS langgraph_project_summaries (
+                    run_id TEXT PRIMARY KEY,
+                    summary_json TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS langgraph_runs (
                     run_id TEXT PRIMARY KEY,
                     workflow_id TEXT NOT NULL,
@@ -2626,6 +2630,18 @@ class LangGraphWorkflowService:
         self, run_id: str, status: str, *, result: Any = None,
         interrupts: tuple[Mapping[str, Any], ...] = (), error: str | None = None,
     ) -> LangGraphRun:
+        # Observe while still owning the project, but never while holding a
+        # SQLite write transaction. Even metadata/git failures are observations.
+        finalize = getattr(self.project_access, "finalize", None)
+        summary = None
+        if finalize is not None:
+            effective_status = "cancelled" if self.get(run_id).status == "cancelled" else status
+            try:
+                summary = finalize(run_id, effective_status)
+            except Exception as exc:
+                summary = {"kind": "unavailable", "scope": "run_cumulative",
+                           "content": [], "staged": [],
+                           "error": f"{type(exc).__name__}: {exc}"}
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             changed = connection.execute(
@@ -2659,18 +2675,48 @@ class LangGraphWorkflowService:
                 connection.rollback()
                 current = self.get(run_id)
                 if current.status == "cancelled":
+                    if summary is None and finalize is not None:
+                        # Cancellation may have raced the initial observation.
+                        # The transaction is already rolled back here.
+                        try:
+                            summary = finalize(run_id, "cancelled")
+                        except Exception as exc:
+                            summary = {"kind": "unavailable", "scope": "run_cumulative",
+                                       "content": [], "staged": [], "error": str(exc)}
+                    if summary is not None:
+                        connection.execute(
+                            "INSERT OR IGNORE INTO langgraph_project_summaries VALUES (?, ?)",
+                            (run_id, canonical_json(summary)),
+                        )
+                        connection.commit()
                     if self.project_access is not None:
                         self.project_access.release(run_id, "cancelled")
                     return current
                 raise LookupError(f"LangGraph run not found: {run_id}")
             self._append_event(connection, run_id)
-            finalize = getattr(self.project_access, "finalize", None)
-            if finalize is not None:
-                finalize(run_id, status)
+            if summary is not None:
+                connection.execute(
+                    "INSERT OR IGNORE INTO langgraph_project_summaries VALUES (?, ?)",
+                    (run_id, canonical_json(summary)),
+                )
             connection.commit()
         if self.project_access is not None:
             self.project_access.release(run_id, status)
         return self.get(run_id)
+
+    def project_summary(self, run_id: str) -> Mapping[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT summary_json FROM langgraph_project_summaries WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+        if row is not None:
+            return json.loads(row[0])
+        try:
+            return None if self.project_access is None else self.project_access.summarize(run_id)
+        except Exception as exc:
+            return {"kind": "unavailable", "scope": "run_cumulative",
+                    "content": [], "staged": [], "error": str(exc)}
 
     @staticmethod
     def _record(row: sqlite3.Row) -> LangGraphRun:

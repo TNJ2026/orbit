@@ -25,6 +25,20 @@ def git(root, *args):
 
 
 class ProjectAccessEndpointTests(unittest.TestCase):
+    def test_corrupt_record_is_reported_instead_of_500(self):
+        from orbit.platform.project_occupancy import ProjectOccupancyRegistry
+        app = self.app(discover_agents=True, agent_project_write=True)
+        access = app.state.runtime.langgraph_service.project_access
+        access.registry = ProjectOccupancyRegistry(self.root / "occupancy")
+        claim = access.registry.claim(self.project, run_id="broken")
+        record = next((self.root / "occupancy").glob("*.json"))
+        record.write_text("{")
+        claim._lock.release()
+        with AsgiHarness(app) as client:
+            response = client.get("/api/v1/project-access", actor="local")
+            self.assertEqual(200, response.status_code)
+            self.assertEqual(record.name, response.json()["data"]["corrupt_records"][0]["record_id"])
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.temp.cleanup)
@@ -41,7 +55,7 @@ class ProjectAccessEndpointTests(unittest.TestCase):
         git(self.project, "commit", "-m", "init")
 
     def app(self, **kwargs):
-        return create_app(
+        app = create_app(
             self.db, handlers=[transform_registration()], schemas=SCHEMAS,
             langgraph_state_directory=self.root / "langgraph",
             workspace_path=self.project,
@@ -49,6 +63,11 @@ class ProjectAccessEndpointTests(unittest.TestCase):
             authorizer=Authorizer(lambda actor: [READ_SCOPE, WRITE_SCOPE]),
             single_goal_mode=False, **kwargs,
         )
+        from orbit.platform.project_occupancy import ProjectOccupancyRegistry
+        access = app.state.runtime.langgraph_service.project_access
+        if access is not None:
+            access.registry = ProjectOccupancyRegistry(self.root / "occupancy")
+        return app
 
     def test_it_says_so_when_the_runtime_grants_nothing(self) -> None:
         with AsgiHarness(self.app()) as client:

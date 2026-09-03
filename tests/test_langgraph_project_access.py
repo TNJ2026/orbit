@@ -197,6 +197,27 @@ class ServiceSeamTests(unittest.TestCase):
         self.assertEqual([(run.run_id, "completed")], recorder.released)
         self.service._project_need = original
 
+    def test_settlement_observes_outside_transaction_and_persists_failure(self):
+        recorder = self.Recorder(ProjectAccessNeed())
+        def finalize(run_id, status):
+            # A second writer must be able to acquire SQLite immediately.
+            with self.service._connect() as connection:
+                connection.execute("PRAGMA busy_timeout=1")
+                connection.execute("BEGIN IMMEDIATE")
+                connection.rollback()
+            raise OSError("metadata unavailable")
+        recorder.finalize = finalize
+        self.service.project_access = recorder
+        self.service._project_need = lambda ir: None
+        run = self.service.start("workflow:linear", {"value": 1},
+                                 idempotency_key="settle-failure", actor="local")
+        self.assertEqual("completed", run.status)
+        self.assertEqual([(run.run_id, "completed")], recorder.released)
+        self.service.project_access = None
+        summary = self.service.project_summary(run.run_id)
+        self.assertEqual("unavailable", summary["kind"])
+        self.assertIn("metadata unavailable", summary["error"])
+
     def test_a_run_that_needs_the_project_claims_before_executing(self) -> None:
         need = ProjectAccessNeed(required=True, write=True, agent_nodes=("collect",))
         recorder = self.Recorder(need)

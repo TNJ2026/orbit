@@ -397,6 +397,7 @@ def build_routes(ctx, service) -> list[Route]:
                 "reason": "this Runtime grants no project-directory access",
             }))
         registry = access.registry
+        records, corrupt_records = registry.inspect(access.project_root)
         occupancies = [
             {
                 "run_id": item.run_id,
@@ -410,13 +411,17 @@ def build_routes(ctx, service) -> list[Route]:
                 "holder_live": registry.holder_is_live(item),
                 "recovery": item.recovery,
             }
-            for item in registry.blocked_by(access.project_root)
+            for item in records
         ]
         return JSONResponse(envelope({
             "enabled": True,
             "project_root": str(access.project_root),
             "write_granted": access.write_granted,
             "occupancies": occupancies,
+            "corrupt_records": list(corrupt_records),
+            "recovery_required": bool(corrupt_records) or any(
+                not item["holder_live"] for item in occupancies
+            ),
             "needs_recovery": [
                 item["run_id"] for item in occupancies
                 if not item["holder_live"]
@@ -441,8 +446,7 @@ def build_routes(ctx, service) -> list[Route]:
             service.get(run_id, actor=reading_actor(actor))
         except LookupError as exc:
             return error("not_found", str(exc), 404)
-        access = getattr(service, "project_access", None)
-        summary = None if access is None else access.summarize(run_id)
+        summary = service.project_summary(run_id)
         return JSONResponse(envelope({
             "run_id": run_id,
             "complete_record": False,
