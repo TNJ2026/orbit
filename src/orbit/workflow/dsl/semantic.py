@@ -658,11 +658,41 @@ def analyze_dsl(
             # actually satisfy a `files` allowlist is a fact about the
             # deployment, checked where the deployment is known, not here.
             mode = config.get("mode")
-            if mode != "read_only":
+            if mode not in {"read_only", "read_write"}:
                 diagnostics.append(_diagnostic(
                     document, "DSL_POLICY_INVALID",
-                    "workspace_access policy requires mode 'read_only'",
+                    "workspace_access policy requires mode 'read_only' or "
+                    "'read_write'",
                     path + ("config", "mode"),
+                ))
+            # `worktree` is the disposable copy this policy has always meant:
+            # a git worktree, or a file-allowlist copy off a non-git project,
+            # one per node. `none` is the real project directory itself —
+            # current content, shared, and written through. They are separate
+            # axes from `mode`, and only three of the four combinations mean
+            # anything: writing into a disposable copy would need a defined
+            # way back out, which is a design of its own and not this one.
+            isolation = config.get("isolation", "worktree")
+            if isolation not in {"worktree", "none"}:
+                diagnostics.append(_diagnostic(
+                    document, "DSL_POLICY_INVALID",
+                    "workspace_access isolation must be 'worktree' or 'none'",
+                    path + ("config", "isolation"),
+                ))
+            elif mode == "read_write" and isolation != "none":
+                diagnostics.append(_diagnostic(
+                    document, "DSL_POLICY_INVALID",
+                    "workspace_access mode 'read_write' requires isolation "
+                    "'none'; writing into a disposable copy has no defined "
+                    "way back into the project",
+                    path + ("config", "isolation"),
+                ))
+            if isolation == "none" and config.get("files") is not None:
+                diagnostics.append(_diagnostic(
+                    document, "DSL_POLICY_INVALID",
+                    "workspace_access files applies to isolation 'worktree' "
+                    "only; isolation 'none' is the project directory itself",
+                    path + ("config", "files"),
                 ))
             files = config.get("files")
             if files is not None:
@@ -835,6 +865,75 @@ def analyze_dsl(
                 stack.append(parent)
     for node_id in sorted(reachable - can_finish):
         diagnostics.append(_diagnostic(document, "DSL_GRAPH_NO_TERMINAL_PATH", f"node {node_id!r} has no path to a terminal", ("nodes", node_index[node_id], "id")))
+
+    # -- project-access mode: what the workflow alone decides ---------------
+    #
+    # These two refusals belong here, on the publish path, and not beside the
+    # capability gate in `langgraph_runtime.compiler`: that one runs when the
+    # IR is bound to a sealed registry, which happens at start and recovery
+    # but never at publish. Both questions below are answerable from the
+    # document alone, so they must be answered once, at publish, with the
+    # same result on every machine. See docs/project-file-access-design.md
+    # §2.1.
+    direct = {
+        policy["id"] for policy in policies
+        if policy["kind"] == "workspace_access"
+        and policy["config"].get("isolation") == "none"
+    }
+    if direct:
+        # `isolation: none` is the real project directory: one directory, all
+        # Agents in the run, written through. Two Agents in it at once means
+        # two CLIs with full permissions editing the same files, so the run
+        # serializes them — and a graph that asks for two at once is asking
+        # for something this mode will not do.
+        agents = {
+            node_id for node_id, manifest in resolved.items()
+            if manifest.name.startswith("agent.")
+        }
+        for node in nodes:
+            if (node.get("route_mode") or "exclusive") != "parallel":
+                continue
+            branches = [
+                edge for edge in edges
+                if (edge.get("from") or {}).get("node") == node["id"]
+                and not edge.get("back_edge")
+            ]
+            # One branch's reach is what stays reachable through its own edge
+            # alone; two branches that each reach an Agent can have both
+            # running at once, however far downstream those Agents sit.
+            reaches = [
+                (edge["id"], _reachable_from(
+                    (edge.get("to") or {}).get("node"), edges,
+                ) & agents)
+                for edge in branches
+            ]
+            overlapping = sorted(
+                {agent for _edge, found in reaches for agent in found}
+            )
+            if sum(1 for _edge, found in reaches if found) > 1:
+                diagnostics.append(_diagnostic(
+                    document, "DSL_POLICY_INVALID",
+                    f"node {node['id']!r} fans out in parallel to Agent nodes "
+                    f"({', '.join(overlapping)}), which cannot run together "
+                    "while the workflow holds the project directory "
+                    "(workspace_access isolation 'none'); make the fan-out "
+                    "sequential or drop the project access",
+                    ("nodes", node_index[node["id"]], "route_mode"),
+                ))
+        # The dev tools answer about, and write into, a disposable worktree —
+        # a different directory from the one this run works in. Their answers
+        # would describe somewhere else, and `git.integrate` merging into the
+        # project branch while an Agent has the working tree dirty is a
+        # conflict waiting to happen.
+        for node_id, manifest in sorted(resolved.items()):
+            if manifest.name in {"dev_tool", "dev_tool_write"}:
+                diagnostics.append(_diagnostic(
+                    document, "DSL_POLICY_INVALID",
+                    f"node {node_id!r} uses {manifest.name!r}, which works in "
+                    "its own worktree, not the project directory this "
+                    "workflow asked for (workspace_access isolation 'none')",
+                    ("nodes", node_index[node_id], "handler"),
+                ))
 
     if diagnostics:
         raise DiagnosticError(sorted_diagnostics(diagnostics))

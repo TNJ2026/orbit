@@ -1163,3 +1163,192 @@ class WorkspaceAccessPolicyTests(unittest.TestCase):
             self.analyze({"mode": "read_only", "files": [123]})
         codes = {item.code for item in caught.exception.diagnostics}
         self.assertIn("DSL_POLICY_INVALID", codes)
+
+
+class ProjectAccessModeTests(unittest.TestCase):
+    """`workspace_access` with `isolation: none` — the real project directory.
+
+    Both refusals here are decided by the document alone, so they belong on
+    the publish path and must give the same answer on every machine. The
+    capability gate that asks whether *this* Runtime granted the access lives
+    elsewhere on purpose (`langgraph_runtime.compiler`, which only runs when
+    the IR is bound at start), and is not exercised here. See
+    docs/project-file-access-design.md §2.1.
+    """
+
+    OBJ = "schema://object/1.0"
+
+    def setUp(self) -> None:
+        self.schemas = InMemorySchemaCatalog({self.OBJ: {"type": "object"}})
+        self.handlers = InMemoryHandlerCatalog([
+            HandlerManifest(
+                name="agent.opencode", version="1.18.16", node_kinds=("action",),
+                inputs={"prompt": self.OBJ}, outputs={"result": self.OBJ},
+                config_schema={"type": "object"},
+                execution_safety=ExecutionSafety.UNKNOWN_ON_LEASE_LOSS,
+                resource_profile=ResourceProfile(0, 0, 0, 60, 0, "agent-cli"),
+                result_schema_id=self.OBJ,
+            ),
+            HandlerManifest(
+                name="dev_tool", version="1.0.0", node_kinds=("action",),
+                inputs={"workspace_ref": self.OBJ}, outputs={"result": self.OBJ},
+                config_schema={"type": "object"},
+                execution_safety=ExecutionSafety.REPLAY_SAFE,
+                resource_profile=ResourceProfile(0, 0, 0, 60, 0, "dev-tool"),
+                result_schema_id=self.OBJ,
+            ),
+        ])
+
+    def agent(self, node_id, *, parallel=False):
+        node = {
+            "id": node_id, "kind": "action",
+            "inputs": [{"id": "prompt", "schema_id": self.OBJ}],
+            "outputs": [{"id": "result", "schema_id": self.OBJ}],
+            "handler": {"name": "agent.opencode", "version": "1.18.16"},
+        }
+        if parallel:
+            node["route_mode"] = "parallel"
+        return node
+
+    def terminal(self, node_id):
+        return {
+            "id": node_id, "kind": "terminal",
+            "inputs": [{"id": "result", "schema_id": self.OBJ}],
+        }
+
+    def edge(self, edge_id, source, target, port="prompt"):
+        return {
+            "id": edge_id, "from": {"node": source, "port": "result"},
+            "to": {"node": target, "port": port},
+        }
+
+    def document(self, nodes, edges, *, entry, terminals, result, config, holder):
+        for node in nodes:
+            if node["id"] == holder:
+                node["policies"] = ["project"]
+        return {
+            "dsl_version": "1.3",
+            "metadata": {"id": "project_access", "name": "Project access"},
+            "nodes": nodes, "edges": edges, "entry": entry,
+            "terminals": terminals, "result": result,
+            "policies": [
+                {"id": "project", "kind": "workspace_access", "config": config},
+            ],
+        }
+
+    def compile(self, document):
+        return compile_source(
+            json.dumps(document), self.handlers, self.schemas,
+            source_format="json",
+        )
+
+    def fan_out(self, config):
+        return self.document(
+            [
+                self.agent("fan", parallel=True), self.agent("left"),
+                self.agent("right"), self.terminal("d1"), self.terminal("d2"),
+            ],
+            [
+                self.edge("e1", "fan", "left"), self.edge("e2", "fan", "right"),
+                self.edge("e3", "left", "d1", "result"),
+                self.edge("e4", "right", "d2", "result"),
+            ],
+            entry=["fan"], terminals=["d1", "d2"],
+            result={"node": "fan", "port": "result"},
+            config=config, holder="fan",
+        )
+
+    def test_parallel_agents_are_refused_when_the_project_is_held_directly(self) -> None:
+        with self.assertRaises(DiagnosticError) as caught:
+            self.compile(self.fan_out(
+                {"mode": "read_write", "isolation": "none"},
+            ))
+        message = " ".join(item.message for item in caught.exception.diagnostics)
+        self.assertIn("fans out in parallel to Agent nodes", message)
+        self.assertIn("left", message)
+        self.assertIn("right", message)
+
+    def test_the_same_fan_out_is_fine_with_a_disposable_copy(self) -> None:
+        """Under `worktree` each node gets its own copy, so nothing overlaps."""
+
+        compiled = self.compile(self.fan_out(
+            {"mode": "read_only", "isolation": "worktree"},
+        ))
+        self.assertEqual("workflow:project_access", compiled.ir.workflow_id)
+
+    def test_a_sequential_agent_chain_is_accepted(self) -> None:
+        compiled = self.compile(self.document(
+            [self.agent("first"), self.agent("second"), self.terminal("done")],
+            [
+                self.edge("e1", "first", "second"),
+                self.edge("e2", "second", "done", "result"),
+            ],
+            entry=["first"], terminals=["done"],
+            result={"node": "second", "port": "result"},
+            config={"mode": "read_write", "isolation": "none"}, holder="first",
+        ))
+        self.assertEqual("workflow:project_access", compiled.ir.workflow_id)
+
+    def test_a_dev_tool_node_is_refused_when_the_project_is_held_directly(self) -> None:
+        tool = {
+            "id": "tool", "kind": "action",
+            "inputs": [{"id": "workspace_ref", "schema_id": self.OBJ}],
+            "outputs": [{"id": "result", "schema_id": self.OBJ}],
+            "handler": {"name": "dev_tool", "version": "1.0.0"},
+        }
+        with self.assertRaises(DiagnosticError) as caught:
+            self.compile(self.document(
+                [self.agent("first"), tool, self.terminal("done")],
+                [
+                    self.edge("e1", "first", "tool", "workspace_ref"),
+                    self.edge("e2", "tool", "done", "result"),
+                ],
+                entry=["first"], terminals=["done"],
+                result={"node": "first", "port": "result"},
+                config={"mode": "read_write", "isolation": "none"},
+                holder="first",
+            ))
+        message = " ".join(item.message for item in caught.exception.diagnostics)
+        self.assertIn("works in its own worktree", message)
+
+    def test_read_write_requires_isolation_none(self) -> None:
+        with self.assertRaises(DiagnosticError) as caught:
+            self.compile(self.document(
+                [self.agent("first"), self.terminal("done")],
+                [self.edge("e1", "first", "done", "result")],
+                entry=["first"], terminals=["done"],
+                result={"node": "first", "port": "result"},
+                config={"mode": "read_write", "isolation": "worktree"},
+                holder="first",
+            ))
+        message = " ".join(item.message for item in caught.exception.diagnostics)
+        self.assertIn("requires isolation 'none'", message)
+
+    def test_files_is_refused_alongside_isolation_none(self) -> None:
+        with self.assertRaises(DiagnosticError) as caught:
+            self.compile(self.document(
+                [self.agent("first"), self.terminal("done")],
+                [self.edge("e1", "first", "done", "result")],
+                entry=["first"], terminals=["done"],
+                result={"node": "first", "port": "result"},
+                config={
+                    "mode": "read_only", "isolation": "none",
+                    "files": ["README.md"],
+                },
+                holder="first",
+            ))
+        message = " ".join(item.message for item in caught.exception.diagnostics)
+        self.assertIn("isolation 'worktree' only", message)
+
+    def test_an_unknown_isolation_is_refused(self) -> None:
+        with self.assertRaises(DiagnosticError) as caught:
+            self.compile(self.document(
+                [self.agent("first"), self.terminal("done")],
+                [self.edge("e1", "first", "done", "result")],
+                entry=["first"], terminals=["done"],
+                result={"node": "first", "port": "result"},
+                config={"mode": "read_only", "isolation": "sandbox"},
+                holder="first",
+            ))
+        codes = {item.code for item in caught.exception.diagnostics}
+        self.assertIn("DSL_POLICY_INVALID", codes)
