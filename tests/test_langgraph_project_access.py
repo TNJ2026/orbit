@@ -55,8 +55,19 @@ class NeedTests(unittest.TestCase):
 
 class CoordinatorTests(unittest.TestCase):
     def setUp(self):
+        import subprocess
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name); self.project = self.root/"project"; self.project.mkdir()
+        # A git project: acquiring one establishes a recovery point first
+        # (§6), and a project that cannot have one is refused rather than run
+        # unprotected — see `test_a_non_git_project_is_refused`.
+        for argv in (("git","init","--initial-branch=main"),
+                     ("git","config","user.email","t@e.com"),
+                     ("git","config","user.name","T")):
+            subprocess.run(argv, cwd=self.project, capture_output=True, check=True)
+        (self.project/"seed.txt").write_text("seed\n")
+        subprocess.run(("git","add","-A"), cwd=self.project, capture_output=True, check=True)
+        subprocess.run(("git","commit","-m","init"), cwd=self.project, capture_output=True, check=True)
         self.registry = ProjectOccupancyRegistry(self.root/"occ")
 
     def coord(self, *, write=True):
@@ -206,9 +217,23 @@ class ServiceSeamTests(unittest.TestCase):
         )
         from pathlib import Path
 
+        import subprocess
+
         root = Path(self.temp.name)
         project = root / "project"
         project.mkdir()
+        for argv in (
+            ("git", "init", "--initial-branch=main"),
+            ("git", "config", "user.email", "t@e.com"),
+            ("git", "config", "user.name", "T"),
+        ):
+            subprocess.run(argv, cwd=project, capture_output=True, check=True)
+        (project / "seed.txt").write_text("seed\n")
+        subprocess.run(("git", "add", "-A"), cwd=project, capture_output=True, check=True)
+        subprocess.run(
+            ("git", "commit", "-m", "init"), cwd=project,
+            capture_output=True, check=True,
+        )
         registry = ProjectOccupancyRegistry(root / "occ")
         holder = ProjectAccessCoordinator(
             project, registry=registry, write_granted=True,
@@ -258,3 +283,81 @@ class ServiceSeamTests(unittest.TestCase):
             )
         self.assertIn("--agent-project-write", str(caught.exception))
         self.assertEqual([], list(self.service.list_runs()))
+
+
+class RecoveryPointIntegrationTests(unittest.TestCase):
+    """Taking the project also establishes the way back out of it (§6)."""
+
+    def setUp(self):
+        import subprocess
+        self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.project = self.root / "project"; self.project.mkdir()
+        for argv in (("git","init","--initial-branch=main"),
+                     ("git","config","user.email","t@e.com"),
+                     ("git","config","user.name","T")):
+            subprocess.run(argv, cwd=self.project, capture_output=True, check=True)
+        (self.project/"tracked.txt").write_text("before\n")
+        subprocess.run(("git","add","-A"), cwd=self.project, capture_output=True, check=True)
+        subprocess.run(("git","commit","-m","init"), cwd=self.project, capture_output=True, check=True)
+        (self.project/"untracked.txt").write_text("also before\n")
+        self.registry = ProjectOccupancyRegistry(self.root / "occ")
+
+    def coord(self):
+        return ProjectAccessCoordinator(
+            self.project, registry=self.registry, write_granted=True,
+        )
+
+    def test_a_recovery_point_is_established_when_the_project_is_taken(self):
+        c = self.coord()
+        c.acquire("r1", ProjectAccessNeed(required=True, write=True))
+        self.addCleanup(c.release, "r1", "completed")
+
+        status = c.status("r1")
+        self.assertEqual("git", status["recovery"]["kind"])
+        self.assertTrue(status["recovery"]["worktree_tree"])
+
+    def test_the_claim_that_outlives_a_crash_carries_the_way_back(self):
+        """A crash is exactly when somebody needs to be told what can be
+        restored, and the occupancy record is the thing built to survive one."""
+
+        c = self.coord()
+        c.acquire("r1", ProjectAccessNeed(required=True, write=True))
+        c.abandon("r1")  # as a Runtime stopping mid-run leaves it
+
+        left = [o for o in self.registry.occupancies() if o.run_id == "r1"]
+        self.assertEqual(1, len(left))
+        self.assertTrue(left[0].recovery["worktree_tree"])
+        self.assertIn("untracked files git is not ignoring", left[0].recovery["covered"])
+
+    def test_the_baseline_can_actually_put_the_project_back(self):
+        from orbit.workspace.recovery import GitRecoveryPoints, RecoveryPoint
+
+        c = self.coord()
+        c.acquire("r1", ProjectAccessNeed(required=True, write=True))
+        self.addCleanup(c.release, "r1", "completed")
+        (self.project / "tracked.txt").write_text("AGENT WROTE THIS\n")
+
+        facts = c.status("r1")["recovery"]
+        points = GitRecoveryPoints(self.project)
+        point = RecoveryPoint(
+            run_id="r1", project_root=self.project, kind="git",
+            created_at=facts["created_at"], head=facts["head"],
+            worktree_tree=facts["worktree_tree"], ref=facts["ref"],
+        )
+        points.restore(point, points.plan_restore(point))
+
+        self.assertEqual("before\n", (self.project / "tracked.txt").read_text())
+
+    def test_a_non_git_project_is_refused_rather_than_run_unprotected(self):
+        from orbit.workspace.recovery import RecoveryUnavailable
+
+        plain = self.root / "plain"; plain.mkdir()
+        c = ProjectAccessCoordinator(
+            plain, registry=self.registry, write_granted=True,
+        )
+        with self.assertRaises(RecoveryUnavailable):
+            c.acquire("r1", ProjectAccessNeed(required=True, write=True))
+        # And the project was handed straight back, not left held by a run
+        # that never started.
+        self.assertEqual([], [o for o in self.registry.occupancies() if o.run_id == "r1"])

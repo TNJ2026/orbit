@@ -28,7 +28,7 @@ takeover check starts, never proof the project is free.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -267,6 +267,11 @@ class Occupancy:
     runtime_pid: int
     claimed_at: str
     state: str = "active"
+    # Where this run's way back is, what it covers, and what it does not.
+    # Kept here rather than with the run because this is the record designed
+    # to outlive a crashed Runtime — and a crash is when somebody most needs
+    # to be told what can be restored before they resolve the claim.
+    recovery: dict | None = None
 
     def to_primitive(self) -> dict[str, object]:
         return {
@@ -275,16 +280,19 @@ class Occupancy:
             "runtime_pid": self.runtime_pid,
             "claimed_at": self.claimed_at,
             "state": self.state,
+            "recovery": self.recovery,
         }
 
     @classmethod
     def from_primitive(cls, value: dict) -> "Occupancy":
+        recovery = value.get("recovery")
         return cls(
             str(value.get("run_id", "")),
             ProjectIdentity.from_primitive(value.get("identity") or {}),
             int(value.get("runtime_pid") or 0),
             str(value.get("claimed_at", "")),
             str(value.get("state", "active")),
+            recovery if isinstance(recovery, dict) else None,
         )
 
 
@@ -306,6 +314,12 @@ class ProjectClaim:
     @property
     def run_id(self) -> str:
         return self.occupancy.run_id
+
+    def record_recovery(self, facts: dict) -> None:
+        """Note this run's way back on the claim that outlives it."""
+
+        self.occupancy = replace(self.occupancy, recovery=dict(facts))
+        self.registry._rewrite(self.occupancy)  # noqa: SLF001
 
     def release(self) -> None:
         """Give the project back, in the one order that cannot deadlock.
@@ -440,6 +454,15 @@ class ProjectOccupancyRegistry:
                 lock.release()
                 raise
         return ProjectClaim(self, occupancy, lock)
+
+    def _rewrite(self, occupancy: Occupancy) -> None:
+        with _FileLock(self.root / REGISTRY_LOCK_NAME):
+            for path, found in self._records():
+                if found.run_id == occupancy.run_id:
+                    path.write_text(
+                        json.dumps(occupancy.to_primitive(), sort_keys=True),
+                        encoding="utf-8",
+                    )
 
     def _forget(self, occupancy: Occupancy) -> None:
         with _FileLock(self.root / REGISTRY_LOCK_NAME):

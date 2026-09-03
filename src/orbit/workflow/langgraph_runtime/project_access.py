@@ -100,10 +100,21 @@ class ProjectAccessCoordinator:
         *,
         registry: ProjectOccupancyRegistry | None = None,
         write_granted: bool = False,
+        recovery_points: Any = None,
     ) -> None:
         self.project_root = Path(project_root)
         self.registry = registry or ProjectOccupancyRegistry()
         self.write_granted = write_granted
+        # Where this run can be put back from, established between taking the
+        # project and running anything in it. `None` disables it, which is for
+        # tests: a real Runtime builds one, because §6.2 refuses to run a
+        # workflow whose recovery point cannot be established rather than
+        # running it unprotected.
+        if recovery_points is None:
+            from ...workspace.recovery import GitRecoveryPoints
+
+            recovery_points = GitRecoveryPoints(self.project_root)
+        self.recovery_points = recovery_points
         self._claims: dict[str, ProjectClaim] = {}
 
     def held_by(self, run_id: str) -> bool:
@@ -124,9 +135,18 @@ class ProjectAccessCoordinator:
                 "workflow asks to write the project directory but this "
                 "Runtime was not started with --agent-project-write"
             )
-        self._claims[run_id] = self.registry.claim(
-            self.project_root, run_id=run_id,
-        )
+        claim = self.registry.claim(self.project_root, run_id=run_id)
+        # Between holding the project and letting anything run in it — §6.
+        # Before the claim is handed out, so a run that cannot be undone is
+        # never started: on failure the project goes straight back rather than
+        # being held by a run nobody can rescue.
+        try:
+            point = self.recovery_points.create(run_id)
+        except BaseException:
+            claim.release()
+            raise
+        claim.record_recovery(point.to_primitive())
+        self._claims[run_id] = claim
 
     def release(self, run_id: str, status: str) -> None:
         """Give the project back once the run can no longer touch it."""
@@ -157,4 +177,7 @@ class ProjectAccessCoordinator:
             "run_id": run_id,
             "project_root": str(claim.path),
             "write_granted": self.write_granted,
+            # §7 wants the coverage and the gaps on the page, not only the
+            # fact that a recovery point exists.
+            "recovery": claim.occupancy.recovery,
         }
