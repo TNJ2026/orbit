@@ -618,10 +618,19 @@ export function createViews(context) {
           ].filter(Boolean)),
         ]),
       ]),
-      run.interrupts?.length ? el("pre", {
-        class: "code-block", text: JSON.stringify(run.interrupts, null, 2),
-      }) : null,
-      run.result !== null && run.result !== undefined ? el("pre", {
+      // `run.interrupts` is LangGraph's own record of what this run is
+      // waiting on — which node, what it was given, its participants and
+      // quorum, which port a reply goes on — not something a person reads.
+      // `resumeActions` below already turns the same array into an Approve
+      // or Reject button, built from `interrupt.id` and `.value.node_id`
+      // directly, so nothing here required the raw form to be on screen.
+      // An artifact-ref result is `{artifact_id, schema_id, content_type,
+      // checksum, size_bytes}` — an internal handle, not something a person
+      // reads. `appendRunArtifacts` below already draws the same artifact as
+      // a card with a preview and a download link, so the raw reference here
+      // would only be the id restated in JSON.
+      run.result !== null && run.result !== undefined
+        && typeof run.result.artifact_id !== "string" ? el("pre", {
         class: "code-block", text: JSON.stringify(run.result, null, 2),
       }) : null,
       run.error ? el("div", { class: "banner error", text: run.error }) : null,
@@ -2703,16 +2712,26 @@ export function createViews(context) {
    * status, and the result document under one code block. */
   function goalResultCard(run) {
     const lines = [run.workflow_id, run.run_id, "", run.status];
-    if (run.result !== null && run.result !== undefined) {
+    // An artifact-ref result is `{artifact_id, schema_id, content_type,
+    // checksum, size_bytes}` — an internal handle, not something a person
+    // reads. `appendRunArtifacts`, called for this same drawer once the
+    // steps card is drawn, already shows the same artifact as a card with a
+    // preview and a download link, so restating the raw reference here would
+    // only be the id said twice, once as an unreadable handle.
+    if (
+      run.result !== null && run.result !== undefined
+      && typeof run.result.artifact_id !== "string"
+    ) {
       lines.push(JSON.stringify(run.result, null, 2));
     }
     const actions = runActionButtons(run);
     return el("section", { class: "goal-card goal-result-card" }, [
       goalStatusPill(run.status),
       el("pre", { class: "goal-result-code", text: lines.join("\n") }),
-      run.interrupts?.length ? el("pre", {
-        class: "goal-result-code", text: JSON.stringify(run.interrupts, null, 2),
-      }) : null,
+      // Not the run's own result: an interrupt is LangGraph's resume-payload
+      // shape for whichever step is waiting, meant for the API that answers
+      // it rather than for reading. The step card below already says which
+      // step is waiting and offers the way to answer it.
       run.error ? el("div", { class: "banner error", text: run.error }) : null,
       actions.length ? el("div", { class: "actions" }, actions) : null,
     ]);
