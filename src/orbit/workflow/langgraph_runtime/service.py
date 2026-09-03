@@ -2428,11 +2428,16 @@ class LangGraphWorkflowService:
         never run from leaving a durable Run behind to explain itself.
         """
 
-        if need.write and not self.project_access.write_granted:
-            raise LangGraphRunConflict(
-                "workflow asks to write the project directory but this "
-                "Runtime was not started with --agent-project-write"
-            )
+        from ...workspace.recovery import RecoveryPointError
+        from .project_access import ProjectAccessUnavailable
+
+        # Including whether a way back can be established at all: §6.2
+        # refuses a run that cannot have one, and refusing here means no Run
+        # is created to be refused.
+        try:
+            self.project_access.preflight(need)
+        except (RecoveryPointError, ProjectAccessUnavailable) as exc:
+            raise LangGraphRunConflict(str(exc)) from exc
         blockers = self.project_access.registry.blocked_by(
             self.project_access.project_root
         )
@@ -2448,10 +2453,18 @@ class LangGraphWorkflowService:
         if need is None:
             return
         from ...platform.project_occupancy import ProjectOccupancyError
+        from ...workspace.recovery import RecoveryPointError
+        from .project_access import ProjectAccessUnavailable
 
         try:
             self.project_access.acquire(run_id, need)
-        except ProjectOccupancyError as exc:
+        except (ProjectOccupancyError, RecoveryPointError) as exc:
+            # Both are outcomes rather than crashes: the project is held by
+            # somebody, or it cannot be given a way back. §6.2 refuses the run
+            # in the second case, and a refusal a caller cannot read is a
+            # blank 500 about a decision that had a perfectly good reason.
+            raise LangGraphRunConflict(str(exc)) from exc
+        except ProjectAccessUnavailable as exc:
             raise LangGraphRunConflict(str(exc)) from exc
 
     def _execute(self, run_id: str, ir, *, inputs=..., resume=...) -> LangGraphRun:

@@ -252,6 +252,16 @@ class GitRecoveryPoints:
     def available(self) -> bool:
         return is_git_repo(self.project_root)
 
+    def preflight(self, *, protect: Sequence[str] = ()) -> None:
+        """Whether a point could be made here, asked before a Run exists."""
+
+        if not self.available():
+            raise RecoveryUnavailable(
+                f"{self.project_root} is not a git repository; a git recovery "
+                "point cannot be established here"
+            )
+        self._check_space()
+
     def create(
         self, run_id: str, *, protect: Sequence[str] = (),
     ) -> RecoveryPoint:
@@ -615,6 +625,20 @@ class FileBackupRecoveryPoints:
 
     def available(self) -> bool:
         return self.project_root.is_dir()
+
+    def preflight(self, *, protect: Sequence[str] = ()) -> None:
+        """Whether a point could be made here, asked before a Run exists.
+
+        The same refusal `create` would give, arriving early enough that a
+        workflow which can never run here leaves no Run behind to explain it.
+        """
+
+        if not protect:
+            raise RecoveryUnavailable(
+                f"{self.project_root} is not a git repository, so a recovery "
+                "point can only cover files the workflow names; declare "
+                "workspace_access.protect or run somewhere git can answer"
+            )
 
     def _home(self, run_id: str) -> Path:
         safe = "".join(

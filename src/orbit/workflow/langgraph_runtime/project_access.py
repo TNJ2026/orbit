@@ -146,6 +146,27 @@ class ProjectAccessCoordinator:
     def held_by(self, run_id: str) -> bool:
         return run_id in self._claims
 
+    def preflight(self, need: ProjectAccessNeed) -> None:
+        """Ask whether this run could have a way back, without making one.
+
+        Asked before the durable Run exists, so a workflow that can never run
+        here does not leave one behind — and, in single-goal mode, does not
+        leave one occupying the slot. `acquire` asks the same questions again
+        for real; this only exists so the answer arrives early enough to be
+        useful.
+        """
+
+        if not need.required:
+            return
+        if need.write and not self.write_granted:
+            raise ProjectAccessUnavailable(
+                "workflow asks to write the project directory but this "
+                "Runtime was not started with --agent-project-write"
+            )
+        check = getattr(self.recovery_points, "preflight", None)
+        if check is not None:
+            check(protect=need.protect)
+
     def acquire(self, run_id: str, need: ProjectAccessNeed) -> None:
         """Take the project for this run, or refuse the run outright.
 

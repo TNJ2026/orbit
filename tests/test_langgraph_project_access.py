@@ -171,6 +171,9 @@ class ServiceSeamTests(unittest.TestCase):
             self.project_root = "/tmp/project"
             self.registry = self._FreeRegistry()
 
+        def preflight(self, need):
+            pass
+
         def acquire(self, run_id, need):
             self.acquired.append(run_id)
 
@@ -467,3 +470,39 @@ class NonGitRecoveryTests(unittest.TestCase):
             repo, registry=self.registry, write_granted=True,
         )
         self.assertIsInstance(coordinator.recovery_points, GitRecoveryPoints)
+
+    def test_a_project_that_can_have_no_way_back_leaves_no_run_behind(self):
+        """Found by running it, not by reading it.
+
+        The refusal was already right — §6.2 will not run a workflow it
+        cannot undo — but it happened inside `_execute`, after the durable
+        Run existed. So a refused start left a Run stuck `running`, and in
+        single-goal mode that Run then occupied the slot and blocked every
+        later start with `active_goal_exists`. Asked before the Run exists
+        now, which is what `_require_project_available` is for.
+        """
+
+        from orbit.workflow.langgraph_runtime import build_service
+        from orbit.workflow.langgraph_runtime.service import LangGraphRunConflict
+        from tests.test_web_composition import (
+            publish_linear_workflow, transform_registration,
+        )
+
+        publish_linear_workflow(self.root / "runtime.db")
+        service = build_service(
+            self.root / "runtime.db", [transform_registration()],
+            state_directory=self.root / "langgraph",
+            project_access=self.coord(),
+        )
+        service._project_need = lambda ir: ProjectAccessNeed(
+            required=True, write=True,  # no `protect`, and not a git project
+        )
+
+        with self.assertRaises(LangGraphRunConflict) as caught:
+            service.start(
+                "workflow:linear", {"value": 1}, idempotency_key="k",
+                actor="local",
+            )
+
+        self.assertIn("workspace_access.protect", str(caught.exception))
+        self.assertEqual([], list(service.list_runs()))
