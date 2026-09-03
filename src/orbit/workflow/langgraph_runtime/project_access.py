@@ -170,9 +170,8 @@ class ProjectAccessCoordinator:
     def acquire(self, run_id: str, need: ProjectAccessNeed) -> None:
         """Take the project for this run, or refuse the run outright.
 
-        Idempotent for one run: a resumed or recovered run re-enters through
-        here, and the registry treats a claim by the same run id as the claim
-        it already has rather than as a competitor.
+        Idempotent only while this coordinator still owns the claim. A
+        restarted process must explicitly resolve an abandoned claim first.
         """
 
         if not need.required or run_id in self._claims:
@@ -189,17 +188,22 @@ class ProjectAccessCoordinator:
         # being held by a run nobody can rescue.
         try:
             point = self.recovery_points.create(run_id, protect=need.protect)
+            claim.record_recovery(point.to_primitive())
         except BaseException:
             claim.release()
             raise
-        claim.record_recovery(point.to_primitive())
         self._claims[run_id] = claim
+
+    def finalize(self, run_id: str, status: str) -> None:
+        if status in RELEASING_STATUSES and run_id in self._claims:
+            self.recovery_points.finalize(run_id)
 
     def release(self, run_id: str, status: str) -> None:
         """Give the project back once the run can no longer touch it."""
 
         if status not in RELEASING_STATUSES:
             return
+        self.finalize(run_id, status)
         claim = self._claims.pop(run_id, None)
         if claim is not None:
             claim.release()
@@ -238,9 +242,16 @@ class ProjectAccessCoordinator:
         "what did that run change" is asked most often once it is over.
         """
 
+        summary = self.recovery_points.final_summary(run_id)
+        if summary is not None:
+            return summary
         point = self.recovery_points.load(run_id)
         if point is None:
             return None
+        if run_id not in self._claims:
+            return {"kind": "unavailable", "scope": "run_cumulative",
+                    "content": [], "staged": [],
+                    "error": "No final observation was saved for this run"}
         return self.recovery_points.summarize(point).to_primitive()
 
     def status(self, run_id: str) -> Mapping[str, Any] | None:

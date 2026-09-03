@@ -2655,16 +2655,21 @@ class LangGraphWorkflowService:
             # The project goes back here and nowhere else: this is the single
             # funnel every status change passes through, and `unknown` is
             # deliberately not among the statuses that release it.
-            if self.project_access is not None:
-                self.project_access.release(run_id, status)
             if changed != 1:
                 connection.rollback()
                 current = self.get(run_id)
                 if current.status == "cancelled":
+                    if self.project_access is not None:
+                        self.project_access.release(run_id, "cancelled")
                     return current
                 raise LookupError(f"LangGraph run not found: {run_id}")
             self._append_event(connection, run_id)
+            finalize = getattr(self.project_access, "finalize", None)
+            if finalize is not None:
+                finalize(run_id, status)
             connection.commit()
+        if self.project_access is not None:
+            self.project_access.release(run_id, status)
         return self.get(run_id)
 
     @staticmethod

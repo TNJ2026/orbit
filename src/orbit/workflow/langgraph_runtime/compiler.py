@@ -1110,6 +1110,24 @@ def compile_workflow(
         for node in ir.nodes
         if node.handler is not None
     }
+    from .project_access import project_access_need
+
+    project_need = project_access_need(ir)
+    run_workspace_access = None
+    if project_need:
+        run_workspace_access = {
+            "isolation": "none",
+            "mode": "read_write" if project_need.write else "read_only",
+        }
+        required = {"workspace.project.read"}
+        if project_need.write:
+            required.add("workspace.project.write")
+        for node_id in project_need.agent_nodes:
+            if not required.issubset(bound[node_id].capabilities):
+                raise LangGraphCompileError(
+                    f"Agent node {node_id!r} lacks the capabilities required "
+                    "by the run-wide project-directory grant"
+                )
     for node in ir.nodes:
         # A decision belongs here too, and its absence made every workflow
         # containing one impossible to run: the DSL layer refuses a handler on
@@ -1172,7 +1190,11 @@ def compile_workflow(
             # already come from avoids threading a second, deployment-kind
             # parameter through every `compile_workflow` call site.
             granted = bound[node.id].capabilities if node.id in bound else frozenset()
-            config = workspace_policies[0].config or {}
+            config = (
+                run_workspace_access
+                if run_workspace_access is not None and node.id in project_need.agent_nodes
+                else workspace_policies[0].config or {}
+            )
             if config.get("isolation") == "none":
                 # The real project directory, not a copy of it. A separate
                 # grant from the disposable-copy ones below, and separate
@@ -1326,7 +1348,10 @@ def compile_workflow(
                             if acceptance_policy is not None else None
                         ),
                         workspace_access=(
-                            to_primitive(workspace_policy.config)
+                            dict(run_workspace_access)
+                            if run_workspace_access is not None
+                            and current.id in project_need.agent_nodes
+                            else to_primitive(workspace_policy.config)
                             if workspace_policy is not None else None
                         ),
                     )

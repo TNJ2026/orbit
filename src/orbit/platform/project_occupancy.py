@@ -35,6 +35,7 @@ import json
 import os
 from pathlib import Path
 import threading
+import tempfile
 from typing import Iterable, TextIO
 import weakref
 
@@ -59,6 +60,20 @@ class ProjectNeedsRecovery(ProjectOccupancyError):
     behind this would wait forever; stepping over it would let a new run write
     the same files as a process that may still be writing them.
     """
+
+
+def _write_record(path: Path, value: dict) -> None:
+    """Publish a complete record without truncating the last good copy."""
+
+    descriptor, temporary = tempfile.mkstemp(prefix=".claim-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, sort_keys=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 # A fork handler cannot be unregistered, so one is installed per process and
@@ -368,10 +383,17 @@ class ProjectOccupancyRegistry:
         for path in sorted(self.root.glob("*.json")):
             try:
                 value = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            if isinstance(value, dict) and value.get("run_id"):
-                found.append((path, Occupancy.from_primitive(value)))
+                if not isinstance(value, dict) or not value.get("run_id"):
+                    raise ValueError("missing run identity")
+                occupancy = Occupancy.from_primitive(value)
+                if not occupancy.identity.real_path.is_absolute():
+                    raise ValueError("missing absolute project path")
+            except (OSError, ValueError, TypeError, AttributeError) as exc:
+                raise ProjectNeedsRecovery(
+                    f"cannot safely read project occupancy {path}: {exc}; "
+                    "refusing new claims until the record is repaired"
+                ) from exc
+            found.append((path, occupancy))
         return tuple(found)
 
     def occupancies(self) -> tuple[Occupancy, ...]:
@@ -418,8 +440,8 @@ class ProjectOccupancyRegistry:
         lock = self._project_lock(identity)
         with _FileLock(self.root / REGISTRY_LOCK_NAME):
             for existing in self.occupancies():
-                if existing.run_id == run_id:
-                    continue
+                # Only the coordinator already holding a claim can reuse it.
+                # A matching run id on disk is not evidence its old Agent died.
                 if not existing.identity.overlaps(identity):
                     continue
                 if existing.state != "active" or not self.holder_is_live(existing):
@@ -446,10 +468,7 @@ class ProjectOccupancyRegistry:
                     "claim on record; refusing rather than writing beside it"
                 )
             try:
-                self._record_path(occupancy).write_text(
-                    json.dumps(occupancy.to_primitive(), sort_keys=True),
-                    encoding="utf-8",
-                )
+                _write_record(self._record_path(occupancy), occupancy.to_primitive())
             except OSError:
                 lock.release()
                 raise
@@ -459,10 +478,7 @@ class ProjectOccupancyRegistry:
         with _FileLock(self.root / REGISTRY_LOCK_NAME):
             for path, found in self._records():
                 if found.run_id == occupancy.run_id:
-                    path.write_text(
-                        json.dumps(occupancy.to_primitive(), sort_keys=True),
-                        encoding="utf-8",
-                    )
+                    _write_record(path, occupancy.to_primitive())
 
     def _forget(self, occupancy: Occupancy) -> None:
         with _FileLock(self.root / REGISTRY_LOCK_NAME):
@@ -484,6 +500,8 @@ class ProjectOccupancyRegistry:
             for path, occupancy in self._records():
                 if occupancy.run_id != run_id:
                     continue
+                if self.holder_is_live(occupancy):
+                    raise ProjectBusy(f"run {run_id!r} still holds the project")
                 path.unlink(missing_ok=True)
                 cleared.append(occupancy.run_id)
         return tuple(cleared)

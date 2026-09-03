@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import json
 import os
 from pathlib import Path
 import shutil
@@ -86,6 +87,71 @@ class RecoveryPoint:
             "covered": list(self.covered),
             "uncovered": list(self.uncovered),
         }
+
+    @classmethod
+    def from_primitive(cls, value: Mapping) -> "RecoveryPoint":
+        return cls(
+            run_id=value["run_id"], project_root=Path(value["project_root"]),
+            kind=value["kind"], created_at=value["created_at"],
+            head=value.get("head"), worktree_tree=value.get("worktree_tree"),
+            index_tree=value.get("index_tree"), ref=value.get("ref"),
+            covered=tuple(value.get("covered", ())),
+            uncovered=tuple(value.get("uncovered", ())),
+        )
+
+
+def _write_json(path: Path, value: Mapping) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=".recovery-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(value, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+class _RecoveryHistory:
+    """Durable point metadata and the immutable end-of-run observation."""
+
+    def _history_path(self, run_id: str) -> Path:
+        raise NotImplementedError
+
+    def _history(self, run_id: str) -> dict:
+        try:
+            value = json.loads(self._history_path(run_id).read_text(encoding="utf-8"))
+            if not isinstance(value, dict):
+                raise ValueError("expected recovery metadata object")
+            return value
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as exc:
+            raise RecoveryPointError(f"cannot read recovery metadata: {exc}") from exc
+
+    def finalize(self, run_id: str) -> None:
+        history = self._history(run_id)
+        if "summary" in history:
+            return
+        point = self.load(run_id)
+        if point is None:
+            raise RecoveryPointError(f"recovery point missing for {run_id}")
+        try:
+            history["summary"] = self.summarize(point).to_primitive()
+        except (RecoveryPointError, OSError) as exc:
+            # Failure to compare is a final observation too, never permission
+            # to attribute a later run's work to this one on the next GET.
+            history["summary"] = {
+                "kind": "unavailable", "scope": "run_cumulative",
+                "content": [], "staged": [], "error": str(exc),
+                "uncovered": list(point.uncovered),
+            }
+        history.setdefault("point", point.to_primitive())
+        _write_json(self._history_path(run_id), history)
+
+    def final_summary(self, run_id: str) -> Mapping | None:
+        return self._history(run_id).get("summary")
 
 
 @dataclass(frozen=True)
@@ -154,12 +220,12 @@ class ChangeSummary:
 def _parse_name_status(text: str) -> tuple[FileChange, ...]:
     statuses = FileChange._statuses()  # noqa: SLF001
     changes: list[FileChange] = []
-    for line in text.splitlines():
-        if not line.strip():
-            continue
-        parts = line.split("\t")
-        code = parts[0][:1]
-        path = parts[-1]
+    parts = iter(text.rstrip("\0").split("\0") if text else ())
+    for status in parts:
+        code = status[:1]
+        path = next(parts)
+        if code in {"R", "C"}:
+            path = next(parts)  # destination of a rename/copy
         changes.append(FileChange(path, statuses.get(code, code.lower())))
     return tuple(sorted(changes, key=lambda item: item.path))
 
@@ -202,28 +268,72 @@ class RestorePlan:
         return bool(self.conflicts)
 
 
-def _run_git(root: Path, *args: str, index: Path | None = None):
+def _run_git(root: Path, *args: str, index: Path | None = None, binary: bool = False):
     """git, optionally against an index file that is not the user's."""
 
     environment = dict(os.environ)
     if index is not None:
         environment["GIT_INDEX_FILE"] = str(index)
     try:
-        return subprocess.run(
+        result = subprocess.run(
             ["git", "-C", str(root), *args],
-            capture_output=True, text=True, check=False,
+            capture_output=True, check=False,
             timeout=GIT_TIMEOUT_SECONDS, env=environment,
         )
+        if not binary:
+            # TextIOWrapper's universal-newline conversion also corrupts
+            # literal CR/CRLF in NUL-delimited filenames.
+            result.stdout = result.stdout.decode("utf-8", errors="surrogateescape")
+            result.stderr = result.stderr.decode("utf-8", errors="surrogateescape")
+        return result
     except (OSError, subprocess.SubprocessError) as exc:
         raise RecoveryPointError(f"git failed: {' '.join(args)}: {exc}") from exc
 
 
-def _checked(result, what: str) -> str:
+def _checked(result, what: str, *, strip: bool = True):
     if result.returncode != 0:
         raise RecoveryPointError(
             f"{what} failed: {(result.stderr or result.stdout).strip()}"
         )
-    return result.stdout.strip()
+    return result.stdout.strip() if strip else result.stdout
+
+
+def _restore_target(root: Path, relative: str) -> Path:
+    """Never follow a changed parent symlink out of the recovery scope."""
+
+    path = Path(relative)
+    if path.is_absolute() or not path.parts or ".." in path.parts:
+        raise RecoveryPointError(f"invalid recovery path: {relative!r}")
+    parent = root
+    for part in path.parts[:-1]:
+        parent = parent / part
+        if parent.is_symlink() or (parent.exists() and not parent.is_dir()):
+            raise RecoveryPointError(f"unsafe recovery parent: {parent}")
+    target = root / path
+    if target.is_dir() and not target.is_symlink():
+        raise RecoveryPointError(f"directory conflicts with recovery file: {target}")
+    return target
+
+
+def _restore_bytes(root: Path, relative: str, data: bytes, mode: str) -> None:
+    target = _restore_target(root, relative)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=".orbit-restore-", dir=target.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            if mode != "120000":
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+        if mode == "120000":
+            Path(temporary).unlink()
+            os.symlink(os.fsdecode(data), temporary)
+        else:
+            os.chmod(temporary, 0o755 if mode == "100755" else 0o644)
+        _restore_target(root, relative)  # recheck immediately before replacement
+        os.replace(temporary, target)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def _stamp() -> str:
@@ -232,7 +342,7 @@ def _stamp() -> str:
     ).replace("+00:00", "Z")
 
 
-class GitRecoveryPoints:
+class GitRecoveryPoints(_RecoveryHistory):
     """Recovery points for a git project, kept on an Orbit-owned ref."""
 
     def __init__(
@@ -251,6 +361,13 @@ class GitRecoveryPoints:
 
     def available(self) -> bool:
         return is_git_repo(self.project_root)
+
+    def _history_path(self, run_id: str) -> Path:
+        directory = _checked(
+            _run_git(self.project_root, "rev-parse", "--git-path", "orbit-recovery"),
+            "locating recovery metadata",
+        )
+        return self.project_root / directory / (self.ref_for(run_id).rsplit("/", 1)[-1] + ".json")
 
     def preflight(self, *, protect: Sequence[str] = ()) -> None:
         """Whether a point could be made here, asked before a Run exists."""
@@ -281,6 +398,9 @@ class GitRecoveryPoints:
                 f"{self.project_root} is not a git repository; a git recovery "
                 "point cannot be established here"
             )
+        existing = self.load(run_id)
+        if existing is not None:
+            return existing
         self._check_space()
         head = self._head()
         with tempfile.TemporaryDirectory() as scratch:
@@ -302,8 +422,8 @@ class GitRecoveryPoints:
             "writing the staged baseline",
         ) if head is not None else None
         ref = self.ref_for(run_id)
-        self._anchor(ref, worktree_tree, head, run_id)
-        return RecoveryPoint(
+        self._anchor(ref, worktree_tree, head, run_id, index_tree=index_tree)
+        point = RecoveryPoint(
             run_id=run_id,
             project_root=self.project_root,
             kind="git",
@@ -318,6 +438,8 @@ class GitRecoveryPoints:
             ),
             uncovered=self._uncovered(),
         )
+        _write_json(self._history_path(run_id), {"point": point.to_primitive()})
+        return point
 
     def _head(self) -> str | None:
         result = _run_git(self.project_root, "rev-parse", "--verify", "-q", "HEAD")
@@ -325,6 +447,7 @@ class GitRecoveryPoints:
 
     def _anchor(
         self, ref: str, tree: str, head: str | None, run_id: str,
+        *, index_tree: str | None = None,
     ) -> None:
         """Point an Orbit ref at a commit for the baseline tree.
 
@@ -336,11 +459,17 @@ class GitRecoveryPoints:
         args = ["commit-tree", tree, "-m", f"orbit recovery point for {run_id}"]
         if head is not None:
             args.extend(["-p", head])
+        if index_tree is not None:
+            index_commit = _checked(
+                _run_git(self.project_root, "commit-tree", index_tree, "-m", "Orbit index baseline"),
+                "anchoring staged baseline",
+            )
+            args.extend(["-p", index_commit])
         commit = _checked(
             _run_git(self.project_root, *args), "anchoring the recovery point",
         )
         _checked(
-            _run_git(self.project_root, "update-ref", ref, commit),
+            _run_git(self.project_root, "update-ref", ref, commit, ""),
             "recording the recovery point ref",
         )
 
@@ -380,21 +509,14 @@ class GitRecoveryPoints:
 
         if point.worktree_tree is None:
             raise RecoveryPointError("recovery point carries no baseline tree")
-        listing = _checked(
-            _run_git(
-                self.project_root, "ls-tree", "-r", "--name-only",
-                point.worktree_tree,
-            ),
-            "reading the recovery point",
-        )
-        covered = [line for line in listing.splitlines() if line]
+        covered = self._tree_entries(point)
         entries: list[RestoreEntry] = []
         for relative in covered:
-            target = self.project_root / relative
-            if target.is_dir() and not target.is_symlink():
+            try:
+                _restore_target(self.project_root, relative)
+            except RecoveryPointError as exc:
                 entries.append(RestoreEntry(
-                    relative, "conflict",
-                    "a directory now stands where this file was",
+                    relative, "conflict", str(exc),
                 ))
             else:
                 entries.append(RestoreEntry(relative, "restore"))
@@ -403,6 +525,20 @@ class GitRecoveryPoints:
                 relative, "keep", "added during the run; not deleted",
             ))
         return RestorePlan(point, tuple(entries))
+
+    def _tree_entries(self, point: RecoveryPoint) -> dict[str, tuple[str, str]]:
+        listing = _checked(_run_git(
+            self.project_root, "ls-tree", "-rz", "--full-tree", point.worktree_tree,
+        ), "reading baseline entries", strip=False)
+        result = {}
+        for entry in listing.split("\0"):
+            if not entry:
+                continue
+            header, relative = entry.split("\t", 1)
+            mode, kind, oid = header.split()
+            if kind == "blob":
+                result[relative] = (mode, oid)
+        return result
 
     def _added_since(self, point: RecoveryPoint) -> tuple[str, ...]:
         """Paths present now that the baseline does not carry."""
@@ -419,12 +555,12 @@ class GitRecoveryPoints:
             )
         listing = _checked(
             _run_git(
-                self.project_root, "diff", "--name-only", "--diff-filter=A",
+                self.project_root, "diff", "--name-only", "-z", "--diff-filter=A",
                 point.worktree_tree, current,
             ),
-            "comparing against the recovery point",
+            "comparing against the recovery point", strip=False,
         )
-        return tuple(line for line in listing.splitlines() if line)
+        return tuple(line for line in listing.split("\0") if line)
 
     def restore(self, point: RecoveryPoint, plan: RestorePlan) -> tuple[str, ...]:
         """Put the covered paths back. Refuses while the plan is blocked."""
@@ -435,16 +571,20 @@ class GitRecoveryPoints:
                 + ", ".join(item.path for item in plan.conflicts)
             )
         restored: list[str] = []
+        entries = self._tree_entries(point)
+        if plan.point != point:
+            raise RecoveryPointError("restore plan belongs to another point")
         for entry in plan.restores:
-            blob = _run_git(
+            if entry.path not in entries:
+                raise RecoveryPointError("restore path is not in baseline")
+            _restore_target(self.project_root, entry.path)
+        for entry in plan.restores:
+            mode, oid = entries[entry.path]
+            blob = _checked(_run_git(
                 self.project_root, "cat-file", "blob",
-                f"{point.worktree_tree}:{entry.path}",
-            )
-            if blob.returncode != 0:
-                continue
-            target = self.project_root / entry.path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(blob.stdout, encoding="utf-8")
+                oid, binary=True,
+            ), "reading baseline blob", strip=False)
+            _restore_bytes(self.project_root, entry.path, blob, mode)
             restored.append(entry.path)
         return tuple(restored)
 
@@ -457,12 +597,20 @@ class GitRecoveryPoints:
         """
 
         ref = self.ref_for(run_id)
+        history = self._history(run_id)
         commit = _run_git(self.project_root, "rev-parse", "--verify", "-q", ref)
         if commit.returncode != 0:
+            if history:
+                raise RecoveryPointError("recovery metadata exists but its ref is missing")
             return None
         tree = _run_git(self.project_root, "rev-parse", f"{ref}^{{tree}}")
         if tree.returncode != 0:
-            return None
+            raise RecoveryPointError("cannot read baseline tree")
+        if "point" in history:
+            point = RecoveryPoint.from_primitive(history["point"])
+            if point.worktree_tree != tree.stdout.strip():
+                raise RecoveryPointError("baseline ref and metadata disagree")
+            return point
         parent = _run_git(self.project_root, "rev-parse", "--verify", "-q", f"{ref}^")
         return RecoveryPoint(
             run_id=run_id,
@@ -501,10 +649,10 @@ class GitRecoveryPoints:
             )
         content = _parse_name_status(_checked(
             _run_git(
-                self.project_root, "diff", "--name-status",
+                self.project_root, "diff", "--name-status", "-z",
                 point.worktree_tree, current_tree,
             ),
-            "comparing content against the recovery point",
+            "comparing content against the recovery point", strip=False,
         ))
         staged: tuple[FileChange, ...] = ()
         if point.index_tree is not None:
@@ -512,10 +660,10 @@ class GitRecoveryPoints:
             if current_index.returncode == 0:
                 staged = _parse_name_status(_checked(
                     _run_git(
-                        self.project_root, "diff", "--name-status",
+                        self.project_root, "diff", "--name-status", "-z",
                         point.index_tree, current_index.stdout.strip(),
                     ),
-                    "comparing the staged state against the recovery point",
+                    "comparing the staged state against the recovery point", strip=False,
                 ))
         branch = _run_git(self.project_root, "rev-parse", "--abbrev-ref", "HEAD")
         return ChangeSummary(
@@ -538,6 +686,7 @@ class GitRecoveryPoints:
 
         if point.ref:
             _run_git(self.project_root, "update-ref", "-d", point.ref)
+            self._history_path(point.run_id).unlink(missing_ok=True)
 
     def points(self) -> tuple[tuple[str, str, float], ...]:
         """Every recovery ref here: name, run id, and when it was written."""
@@ -590,11 +739,12 @@ class GitRecoveryPoints:
                 continue
             result = _run_git(self.project_root, "update-ref", "-d", ref)
             if result.returncode == 0:
+                self._history_path(_run_id).unlink(missing_ok=True)
                 reclaimed.append(ref)
         return tuple(reclaimed)
 
 
-class FileBackupRecoveryPoints:
+class FileBackupRecoveryPoints(_RecoveryHistory):
     """A way back for a project git cannot give one for (§6.2).
 
     Outside git there is no "everything tracked" to lean on, and copying the
@@ -639,6 +789,8 @@ class FileBackupRecoveryPoints:
                 "point can only cover files the workflow names; declare "
                 "workspace_access.protect or run somewhere git can answer"
             )
+        matches = self._matches(protect)
+        self._check_space(sum(source.stat().st_size for source, _ in matches))
 
     def _home(self, run_id: str) -> Path:
         safe = "".join(
@@ -647,9 +799,36 @@ class FileBackupRecoveryPoints:
         ).strip("-.") or "run"
         return self._root / safe
 
+    def _history_path(self, run_id: str) -> Path:
+        return self._home(run_id) / "recovery.json"
+
     def create(
         self, run_id: str, *, protect: Sequence[str] = (),
     ) -> RecoveryPoint:
+        existing = self.load(run_id)
+        if existing is not None:
+            return existing
+        matches = self._matches(protect)
+        self._check_space(sum(source.stat().st_size for source, _ in matches))
+        home = self._home(run_id)
+        point = RecoveryPoint(
+            run_id=run_id, project_root=self.project_root, kind="file_backup",
+            created_at=_stamp(), ref=str(home),
+            covered=tuple(str(relative) for _, relative in matches),
+            uncovered=("every file the workflow did not name in workspace_access.protect",),
+        )
+        self._root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=self.state_dir, prefix="recovery-staging-") as staging:
+            staged = Path(staging) / "point"
+            for source, relative in matches:
+                target = staged / "files" / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+            _write_json(staged / "recovery.json", {"point": point.to_primitive()})
+            os.rename(staged, home)
+        return point
+
+    def _matches(self, protect: Sequence[str]) -> list[tuple[Path, Path]]:
         if not protect:
             raise RecoveryUnavailable(
                 f"{self.project_root} is not a git repository, so a recovery "
@@ -658,6 +837,7 @@ class FileBackupRecoveryPoints:
             )
         matches: list[tuple[Path, Path]] = []
         for pattern in protect:
+            matched = False
             for candidate in sorted(self.project_root.glob(pattern)):
                 if not candidate.is_file():
                     continue
@@ -669,30 +849,13 @@ class FileBackupRecoveryPoints:
                         f"{pattern!r} matched {candidate}, which resolves "
                         f"outside {self.project_root}"
                     ) from None
+                if self._root.resolve() in resolved.parents:
+                    continue
+                matched = True
                 matches.append((resolved, relative))
-        self._check_space(sum(source.stat().st_size for source, _ in matches))
-        home = self._home(run_id)
-        if home.exists():
-            shutil.rmtree(home, ignore_errors=True)
-        for source, relative in matches:
-            target = home / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
-        home.mkdir(parents=True, exist_ok=True)
-        return RecoveryPoint(
-            run_id=run_id,
-            project_root=self.project_root,
-            kind="file_backup",
-            created_at=_stamp(),
-            ref=str(home),
-            covered=tuple(
-                sorted(str(relative) for _source, relative in matches)
-            ),
-            uncovered=(
-                "every file the workflow did not name in "
-                "workspace_access.protect",
-            ),
-        )
+            if not matched:
+                raise RecoveryUnavailable(f"protect pattern {pattern!r} matches no files")
+        return sorted(set(matches))
 
     def _check_space(self, needed: int) -> None:
         try:
@@ -713,28 +876,25 @@ class FileBackupRecoveryPoints:
         home = self._home(run_id)
         if not home.is_dir():
             return None
-        covered = sorted(
-            str(item.relative_to(home))
-            for item in home.rglob("*") if item.is_file()
-        )
-        return RecoveryPoint(
-            run_id=run_id, project_root=self.project_root, kind="file_backup",
-            created_at="", ref=str(home), covered=tuple(covered),
-            uncovered=(
-                "every file the workflow did not name in "
-                "workspace_access.protect",
-            ),
-        )
+        history = self._history(run_id)
+        if "point" not in history:
+            raise RecoveryPointError("backup has no complete recovery metadata")
+        point = RecoveryPoint.from_primitive(history["point"])
+        for relative in point.covered:
+            source = _restore_target(home / "files", relative)
+            if not source.is_file():
+                raise RecoveryPointError(f"backup file missing: {relative}")
+        return point
 
     def plan_restore(self, point: RecoveryPoint) -> RestorePlan:
         home = Path(point.ref or "")
         entries: list[RestoreEntry] = []
         for relative in point.covered:
-            target = self.project_root / relative
-            if target.is_dir() and not target.is_symlink():
+            try:
+                _restore_target(self.project_root, relative)
+            except RecoveryPointError as exc:
                 entries.append(RestoreEntry(
-                    relative, "conflict",
-                    "a directory now stands where this file was",
+                    relative, "conflict", str(exc),
                 ))
             else:
                 entries.append(RestoreEntry(relative, "restore"))
@@ -752,13 +912,18 @@ class FileBackupRecoveryPoints:
             )
         home = Path(point.ref or "")
         restored: list[str] = []
+        if plan.point != point:
+            raise RecoveryPointError("restore plan belongs to another point")
         for entry in plan.restores:
-            source = home / entry.path
+            if entry.path not in point.covered:
+                raise RecoveryPointError("restore path is not in baseline")
+            _restore_target(self.project_root, entry.path)
+        for entry in plan.restores:
+            source = home / "files" / entry.path
             if not source.is_file():
-                continue
-            target = self.project_root / entry.path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
+                raise RecoveryPointError(f"backup file missing: {entry.path}")
+            _restore_bytes(self.project_root, entry.path, source.read_bytes(),
+                           "100755" if source.stat().st_mode & 0o111 else "100644")
             restored.append(entry.path)
         return tuple(restored)
 
