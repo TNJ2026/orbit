@@ -726,6 +726,15 @@ def trusted_handlers(
     secret_values = dict(secret_values or {})
     for registration in registrations:
         manifest = registration.manifest
+        # The manifest's own capabilities plus whatever this deployment
+        # granted on top (`--agent-project-access`'s "workspace.read"). The
+        # grant is kept off the manifest on purpose — it would otherwise
+        # change the fingerprint a published Workflow was compiled against —
+        # so this is the one place the two are put back together, for the
+        # compiler's `workspace_access` gate to read off the binding.
+        capabilities = frozenset(manifest.capabilities) | frozenset(
+            getattr(registration, "granted_capabilities", ()) or ()
+        )
         if isinstance(registration.implementation, TransformHandler):
             handlers.append(BoundHandler(
                 manifest.name,
@@ -733,7 +742,7 @@ def trusted_handlers(
                 manifest.fingerprint,
                 _transform,
                 retry_safe=True,
-                capabilities=frozenset(manifest.capabilities),
+                capabilities=capabilities,
                 legacy_manifest_fingerprint=manifest.legacy_fingerprint,
             ))
         elif (
@@ -755,7 +764,7 @@ def trusted_handlers(
                 supported_transports=frozenset({
                     "inline", "artifact_ref", "secret_ref",
                 }),
-                capabilities=frozenset(manifest.capabilities),
+                capabilities=capabilities,
                 finish_run=finish_run,
                 cancel_attempts=cancel_attempts,
                 legacy_manifest_fingerprint=manifest.legacy_fingerprint,
@@ -779,7 +788,7 @@ def trusted_handlers(
                 retry_safe=(
                     manifest.execution_safety is ExecutionSafety.REPLAY_SAFE
                 ),
-                capabilities=frozenset(manifest.capabilities),
+                capabilities=capabilities,
                 finish_run=finish_run,
                 cancel_attempts=cancel_attempts,
                 legacy_manifest_fingerprint=manifest.legacy_fingerprint,

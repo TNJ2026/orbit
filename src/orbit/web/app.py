@@ -124,6 +124,17 @@ class HandlerRegistration:
     manifest: Any
     implementation: Any
     implementation_id: str
+    # Capabilities this *deployment* granted on top of the ones the Handler's
+    # own manifest declares — `--agent-project-access`'s "workspace.read", so
+    # far. Deliberately not folded into the manifest: capabilities are part of
+    # `HandlerManifest.fingerprint`, which a published Workflow records and
+    # binding matches exactly, so granting one there would change every agent
+    # Handler's fingerprint and break every Workflow already published against
+    # it the moment an operator flipped the switch. A grant is a fact about
+    # where this Runtime runs, not about the contract a Workflow was compiled
+    # against, so it travels beside the manifest and reaches the compiler
+    # through `BoundHandler.capabilities` instead.
+    granted_capabilities: frozenset[str] = frozenset()
 
 
 class RuntimeComposition:

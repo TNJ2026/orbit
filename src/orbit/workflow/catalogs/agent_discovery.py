@@ -458,7 +458,6 @@ def agent_manifest(
     *,
     input_schema_id: str = "schema://object/1.0",
     result_schema_id: str = "schema://object/1.0",
-    grant_capabilities: frozenset[str] = frozenset(),
 ) -> HandlerManifest:
     """The immutable manifest a discovered Agent is registered under.
 
@@ -515,13 +514,15 @@ def agent_manifest(
         ExecutionSafety.UNKNOWN_ON_LEASE_LOSS,
         ResourceProfile(0, 0, 0, agent.spec.max_duration_seconds, 0, agent.spec.cost_class),
         result_schema_id,
-        # Additive, not the CLI's own: what the deployment granted (e.g.
-        # `--agent-project-access`'s "workspace.read") is a property of where
-        # this Runtime runs, not of the agent spec, so it is unioned in here
-        # rather than folded into `agent.spec.capabilities` itself.
-        # `HandlerManifest.__post_init__` dedupes and sorts, so a plain
-        # concatenation is enough.
-        agent.spec.capabilities + tuple(grant_capabilities),
+        # The CLI's own, and only its own. A capability this *deployment*
+        # granted (`--agent-project-access`'s "workspace.read") deliberately
+        # does not belong here: capabilities are part of
+        # `HandlerManifest.fingerprint`, and a published Workflow records the
+        # fingerprint it was compiled against, so granting one here would
+        # change every agent Handler's fingerprint and break every Workflow
+        # already published against it. Grants travel on
+        # `HandlerRegistration.granted_capabilities` instead.
+        agent.spec.capabilities,
         agent.spec.required_secrets,
         True,
         False,
@@ -532,7 +533,6 @@ def registrable_agents(
     agents: Iterable[DiscoveredAgent],
     *,
     allowed_capabilities: Sequence[str] | None = None,
-    grant_capabilities: frozenset[str] = frozenset(),
 ) -> tuple[tuple[DiscoveredAgent, HandlerManifest], ...]:
     """Discovery result filtered through capability policy, ready to register.
 
@@ -543,12 +543,9 @@ def registrable_agents(
     make the fingerprint a lie.
 
     `allowed_capabilities` only ever subtracts (an agent whose own spec claims
-    a capability this deployment did not allow is dropped). `grant_capabilities`
-    is the opposite and orthogonal direction — capabilities this deployment
-    adds on top, such as `--agent-project-access`'s `"workspace.read"` — so it
-    is checked against the filter and added to the manifest, not filtered
-    itself: a grant is what the operator decided, not something an agent spec
-    could have asked for.
+    a capability this deployment did not allow is dropped). Capabilities a
+    deployment *adds* — `--agent-project-access`'s `"workspace.read"` — never
+    reach a manifest at all; see `agent_manifest` for why.
     """
 
     permitted = None if allowed_capabilities is None else set(allowed_capabilities)
@@ -560,7 +557,7 @@ def registrable_agents(
             continue
         if permitted is not None and not permitted.issuperset(agent.spec.capabilities):
             continue
-        pairs.append((agent, agent_manifest(agent, grant_capabilities=grant_capabilities)))
+        pairs.append((agent, agent_manifest(agent)))
     return tuple(pairs)
 
 

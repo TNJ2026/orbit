@@ -429,6 +429,70 @@ class AcquireFailureNeverFallsBackTests(unittest.TestCase):
         self.assertEqual([], list(scratch.iterdir()))
 
 
+class GrantDoesNotMoveTheFingerprintTests(unittest.TestCase):
+    """Turning the switch on must not invalidate published Workflows.
+
+    Capabilities are part of `HandlerManifest.fingerprint`, and a published
+    Workflow records the fingerprint it was compiled against — `resolve()`
+    matches it exactly. So a deployment-granted capability folded into the
+    manifest would change every agent Handler's fingerprint, and every
+    Workflow already published against one would stop binding ("handler
+    manifest mismatch") the moment an operator passed
+    `--agent-project-access`. The grant travels on the registration instead,
+    and is put back together with the manifest's own capabilities only where
+    the compiler reads it: `BoundHandler.capabilities`.
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        executable = shutil.which("true") or "/usr/bin/true"
+        self.agent = DiscoveredAgent(
+            AgentCliSpec(
+                "opencode", "opencode",
+                invocation=AgentInvocation(prompt_flag="-p"),
+            ),
+            executable, "1.18.16",
+        )
+
+    def registrations(self, grant):
+        from orbit.web.builtin_handlers import agent_handlers
+
+        registrations, _names = agent_handlers(
+            [self.agent], grant_capabilities=grant,
+        )
+        return registrations
+
+    def bound(self, registrations):
+        from orbit.workflow.langgraph_runtime.artifacts import LangGraphArtifactStore
+        from orbit.workflow.langgraph_runtime.wiring import trusted_handlers
+
+        db = Path(self.temp.name) / "runs.sqlite3"
+        store = LangGraphArtifactStore(db, Path(self.temp.name) / "artifacts")
+        registry = trusted_handlers(
+            registrations, attempt_db_path=db, artifact_store=store,
+        )
+        return registry._entries["agent.opencode"]  # noqa: SLF001
+
+    def test_the_grant_leaves_the_manifest_fingerprint_untouched(self) -> None:
+        without = self.registrations(frozenset())[0].manifest
+        granted = self.registrations(frozenset({"workspace.read"}))[0].manifest
+
+        self.assertEqual(without.fingerprint, granted.fingerprint)
+        self.assertEqual(without.capabilities, granted.capabilities)
+
+    def test_the_grant_still_reaches_the_compilers_gate(self) -> None:
+        granted = self.bound(self.registrations(frozenset({"workspace.read"})))
+        ungranted = self.bound(self.registrations(frozenset()))
+
+        self.assertIn("workspace.read", granted.capabilities)
+        self.assertNotIn("workspace.read", ungranted.capabilities)
+        # Same Handler either way, as far as a published Workflow can tell.
+        self.assertEqual(
+            granted.manifest_fingerprint, ungranted.manifest_fingerprint,
+        )
+
+
 class MultiprocessCompatibilityTests(unittest.TestCase):
     """Both grants must survive being handed to a worker process.
 

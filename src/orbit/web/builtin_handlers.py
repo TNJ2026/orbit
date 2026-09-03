@@ -77,18 +77,23 @@ def agent_handlers(
     workflow, plan or planner can contribute an argument to it.
 
     `grant_capabilities` and `project_workspace` travel together: the former
-    is what makes the manifest compiler-visible as eligible for a
-    `workspace_access` policy, the latter is what the client actually acquires
-    a directory from when a node asks. `--agent-project-access` off (the
-    default) leaves both at their empty defaults and every agent registers and
-    runs exactly as before the feature existed.
+    is what makes a node eligible for a `workspace_access` policy at compile
+    time, the latter is what the client actually acquires a directory from
+    when a node asks. `--agent-project-access` off (the default) leaves both
+    at their empty defaults and every agent registers and runs exactly as
+    before the feature existed.
+
+    The grant rides on the registration, never on the manifest: capabilities
+    are part of `HandlerManifest.fingerprint`, which a published Workflow
+    records and binding matches exactly, so putting it there would change
+    every agent Handler's fingerprint and stop every already-published
+    Workflow from binding the moment an operator turned the switch on.
     """
 
     registrations: list[HandlerRegistration] = []
     names: list[str] = []
     for agent, manifest in registrable_agents(
         agents, allowed_capabilities=allowed_capabilities,
-        grant_capabilities=grant_capabilities,
     ):
         registrations.append(
             HandlerRegistration(
@@ -99,6 +104,7 @@ def agent_handlers(
                     project_workspace=project_workspace,
                 )),
                 f"{manifest.name}@{manifest.version}",
+                granted_capabilities=grant_capabilities,
             )
         )
         names.append(manifest.name)
