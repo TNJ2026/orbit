@@ -580,3 +580,45 @@ class BoundaryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_a_project_access_coordinator_brings_the_retention_loop(self) -> None:
+        """Recovery refs accumulate in the user's own repository, so
+        something has to reclaim the settled ones (§6.3)."""
+
+        swept = []
+        composition = RuntimeComposition(
+            self.db, handlers=[transform_registration()], schemas=SCHEMAS,
+            langgraph_service=SimpleNamespace(
+                recover_due=lambda limit: (),
+                live_run_ids=lambda: frozenset({"run-1"}),
+            ),
+            project_access=SimpleNamespace(
+                sweep_recovery_points=lambda live: swept.append(live) or (),
+            ),
+        )
+        composition.start()
+        try:
+            self.assertIn(
+                "recovery-point-retention",
+                [loop.name for loop in composition.loops],
+            )
+        finally:
+            self.assertEqual([], composition.stop())
+        self.assertIn(frozenset({"run-1"}), swept)
+
+    def test_no_retention_loop_without_project_access(self) -> None:
+        composition = RuntimeComposition(
+            self.db, handlers=[transform_registration()], schemas=SCHEMAS,
+            langgraph_service=SimpleNamespace(
+                recover_due=lambda limit: (),
+                live_run_ids=lambda: frozenset(),
+            ),
+        )
+        composition.start()
+        try:
+            self.assertNotIn(
+                "recovery-point-retention",
+                [loop.name for loop in composition.loops],
+            )
+        finally:
+            self.assertEqual([], composition.stop())

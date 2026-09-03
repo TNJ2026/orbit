@@ -296,3 +296,62 @@ class ChangeSummaryTests(GitRecoveryPointTests):
         summary = self.points.summarize(point)
 
         self.assertEqual([], [c for c in summary.content if "ignored/" in c.path])
+
+
+class RetentionTests(GitRecoveryPointTests):
+    """Recovery refs live in the user's repository and pin a tree of their
+    whole project, so never reclaiming them is growth in somebody else's
+    .git. §6.3 puts two conditions on removing one, and both are required."""
+
+    def test_a_live_runs_way_back_is_never_reclaimed(self) -> None:
+        point = self.points.create("run-1")
+
+        reclaimed = self.points.sweep(
+            {"run-1"}, older_than_seconds=0, now=2 ** 40,
+        )
+
+        self.assertEqual((), reclaimed)
+        self.assertIsNotNone(self.points.load("run-1"))
+
+    def test_a_settled_run_inside_the_retention_period_is_kept(self) -> None:
+        """A run finishing is not the moment somebody stops wanting to undo
+        it — the morning after is a very common one."""
+
+        self.points.create("run-1")
+
+        reclaimed = self.points.sweep((), older_than_seconds=7 * 24 * 3600)
+
+        self.assertEqual((), reclaimed)
+        self.assertIsNotNone(self.points.load("run-1"))
+
+    def test_a_settled_run_past_the_retention_period_is_reclaimed(self) -> None:
+        point = self.points.create("run-1")
+
+        reclaimed = self.points.sweep(
+            (), older_than_seconds=1, now=2 ** 40,
+        )
+
+        self.assertEqual([point.ref], list(reclaimed))
+        self.assertIsNone(self.points.load("run-1"))
+
+    def test_it_reclaims_only_orbits_own_refs(self) -> None:
+        self.points.create("run-1")
+        before = git(self.project, "rev-parse", "HEAD")
+
+        self.points.sweep((), older_than_seconds=1, now=2 ** 40)
+
+        # Project history, branches and files are untouched.
+        self.assertEqual(before, git(self.project, "rev-parse", "HEAD"))
+        self.assertTrue((self.project / "tracked.txt").exists())
+        self.assertTrue((self.project / "untracked.txt").exists())
+
+    def test_one_runs_reclamation_leaves_anothers_alone(self) -> None:
+        self.points.create("old-run")
+        self.points.create("live-run")
+
+        self.points.sweep(
+            {"live-run"}, older_than_seconds=1, now=2 ** 40,
+        )
+
+        self.assertIsNone(self.points.load("old-run"))
+        self.assertIsNotNone(self.points.load("live-run"))

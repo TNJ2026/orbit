@@ -158,6 +158,7 @@ class RuntimeComposition:
         langgraph_service: Any = None,
         run_retention_days: int | None = None,
         project_workspace_grant: Any = None,
+        project_access: Any = None,
     ) -> None:
         self.db_path = Path(db_path)
         self.workflow_db_path = Path(workflow_db_path or db_path)
@@ -179,6 +180,9 @@ class RuntimeComposition:
         # drive the cleanup loop below — the grant itself was already handed
         # to the Agent client that acquires from it.
         self.project_workspace_grant = project_workspace_grant
+        # The coordinator holding project directories, when this Runtime
+        # grants them. Drives the recovery-point retention loop below.
+        self.project_access = project_access
 
         # A file carrying legacy tables is refused before anything is wired:
         # continuing would mean serving a database whose semantics are half
@@ -254,6 +258,13 @@ class RuntimeComposition:
                 "agent-project-access-cleanup", self._sweep_project_workspace_once,
                 max(self.poll_seconds, 300.0),
             ))
+        if self.project_access is not None and callable(
+            getattr(self.langgraph_service, "live_run_ids", None)
+        ):
+            loops.append(BackgroundLoop(
+                "recovery-point-retention", self._sweep_recovery_points_once,
+                max(self.poll_seconds, 300.0),
+            ))
         return loops
 
     def _sweep_project_workspace_once(self) -> bool:
@@ -270,6 +281,20 @@ class RuntimeComposition:
         live_refs = self.langgraph_service.live_workspace_refs()
         reclaimed = self.project_workspace_grant.sweep(live_refs)
         return bool(reclaimed)
+
+    def _sweep_recovery_points_once(self) -> bool:
+        """Reclaim the ways back nobody can still need (§6.3).
+
+        These refs live in the *user's* repository and each pins a tree of
+        their whole project, so never reclaiming them is real growth in
+        somebody else's .git rather than in Orbit's own state. Two conditions
+        guard it, both required: the run is settled, and the point has
+        outlived the retention period — because a run finishing is not the
+        moment somebody stops wanting to undo it.
+        """
+
+        live = self.langgraph_service.live_run_ids()
+        return bool(self.project_access.sweep_recovery_points(live))
 
     def _prune_once(self) -> bool:
         """Forget runs that ended longer ago than the operator keeps them."""
@@ -792,6 +817,7 @@ def create_app(
         langgraph_service=langgraph_service,
         run_retention_days=run_retention_days,
         project_workspace_grant=project_workspace,
+        project_access=getattr(langgraph_service, "project_access", None),
     )
     if composition.workflow_db_path != composition.db_path:
         from ..workflow.persistence.workflow_versions import merge_workflow_library

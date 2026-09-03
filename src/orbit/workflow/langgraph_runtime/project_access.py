@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from ...platform.project_occupancy import (
     ProjectClaim, ProjectOccupancyRegistry,
@@ -32,6 +32,10 @@ from ...platform.project_occupancy import (
 # project to the next run while a process may still be editing its files;
 # the claim stays, and §4's recovery path is what clears it.
 RELEASING_STATUSES = frozenset({"completed", "failed", "cancelled"})
+# How long a settled run's way back is kept. A run finishing is not the
+# moment somebody stops wanting to undo it — the morning after is a very
+# common one — so this is days rather than minutes.
+DEFAULT_RECOVERY_RETENTION_SECONDS = 7 * 24 * 60 * 60.0
 
 
 class ProjectAccessUnavailable(RuntimeError):
@@ -168,6 +172,16 @@ class ProjectAccessCoordinator:
         claim = self._claims.pop(run_id, None)
         if claim is not None:
             claim._lock.release()  # noqa: SLF001 - record stays on purpose
+
+    def sweep_recovery_points(
+        self, live_run_ids: Iterable[str], *,
+        older_than_seconds: float = DEFAULT_RECOVERY_RETENTION_SECONDS,
+    ) -> tuple[str, ...]:
+        """Reclaim recovery refs for settled runs past the retention period."""
+
+        return self.recovery_points.sweep(
+            live_run_ids, older_than_seconds=older_than_seconds,
+        )
 
     def summarize(self, run_id: str) -> Mapping[str, Any] | None:
         """What this run has changed so far, or None if it holds no project.

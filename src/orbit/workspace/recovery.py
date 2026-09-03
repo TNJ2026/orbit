@@ -32,6 +32,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 from typing import Iterable, Mapping
 
 from .git import GIT_TIMEOUT_SECONDS, WorkspaceError, _git, is_git_repo
@@ -520,3 +521,57 @@ class GitRecoveryPoints:
 
         if point.ref:
             _run_git(self.project_root, "update-ref", "-d", point.ref)
+
+    def points(self) -> tuple[tuple[str, str, float], ...]:
+        """Every recovery ref here: name, run id, and when it was written."""
+
+        listing = _run_git(
+            self.project_root, "for-each-ref", RECOVERY_REF_PREFIX,
+            "--format=%(refname)%09%(committerdate:unix)",
+        )
+        if listing.returncode != 0:
+            return ()
+        found: list[tuple[str, str, float]] = []
+        for line in listing.stdout.splitlines():
+            if "\t" not in line:
+                continue
+            ref, _, stamp = line.partition("\t")
+            try:
+                written = float(stamp)
+            except ValueError:
+                continue
+            found.append((ref, ref[len(RECOVERY_REF_PREFIX) + 1:], written))
+        return tuple(found)
+
+    def sweep(
+        self, live_run_ids: Iterable[str], *, older_than_seconds: float,
+        now: float | None = None,
+    ) -> tuple[str, ...]:
+        """Reclaim the ways back nobody can still need.
+
+        Two conditions, both required (§6.3). The run must be over — a live
+        run's way back is the whole point of having one — and the point must
+        have outlived the retention period, because "the run finished" is not
+        the moment somebody stops wanting to undo it. Between them they mean
+        this only ever removes Orbit's own recovery data for settled runs; it
+        never touches project files.
+
+        These refs pin a tree of the whole project, so leaving them forever
+        is real growth inside somebody's repository, not just bookkeeping.
+        """
+
+        moment = time.time() if now is None else now
+        live = {str(item) for item in live_run_ids}
+        # Ref names are sanitised run ids, so a live run is matched by the
+        # name its point would have rather than by string equality.
+        live_refs = {self.ref_for(item) for item in live}
+        reclaimed: list[str] = []
+        for ref, _run_id, written in self.points():
+            if ref in live_refs:
+                continue
+            if moment - written < older_than_seconds:
+                continue
+            result = _run_git(self.project_root, "update-ref", "-d", ref)
+            if result.returncode == 0:
+                reclaimed.append(ref)
+        return tuple(reclaimed)

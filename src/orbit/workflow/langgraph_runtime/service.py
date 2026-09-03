@@ -1582,6 +1582,25 @@ class LangGraphWorkflowService:
             for node_id in self._latest_state(run_id).get("execution_order", ())
         )
 
+    def live_run_ids(self) -> frozenset[str]:
+        """Runs that have not settled, for anything reclaiming their leftovers.
+
+        No `limit`, for the same reason `live_workspace_refs` has none: the
+        live set is bounded by what is in flight, and missing one would mean
+        reclaiming something still in use.
+        """
+
+        placeholders = ",".join("?" for _ in self.PRUNABLE_STATUSES)
+        with self._connect() as connection:
+            return frozenset(
+                str(row["run_id"])
+                for row in connection.execute(
+                    "SELECT run_id FROM langgraph_runs"
+                    f" WHERE status NOT IN ({placeholders})",
+                    self.PRUNABLE_STATUSES,
+                )
+            )
+
     def live_workspace_refs(self) -> frozenset[str]:
         """Every `run_id:node_id` pair a still-open run could hold a lease on.
 
