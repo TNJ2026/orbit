@@ -378,7 +378,89 @@ def build_routes(ctx, service) -> list[Route]:
             return error("not_found", str(exc), 404)
         return JSONResponse(envelope(graph))
 
+    async def project_access(request: Request) -> JSONResponse:
+        """Who holds the project directory, and what the way back covers.
+
+        §7. Everything here already existed — in a coordinator's memory, in
+        an occupancy record, in a git ref — and nowhere a person could see
+        it. A project held by a run somebody has to go and answer is the
+        thing most worth being able to look up.
+        """
+
+        actor = ctx.authenticate(request, READ_SCOPE)
+        if isinstance(actor, JSONResponse):
+            return actor
+        access = getattr(service, "project_access", None)
+        if access is None:
+            return JSONResponse(envelope({
+                "enabled": False,
+                "reason": "this Runtime grants no project-directory access",
+            }))
+        registry = access.registry
+        occupancies = [
+            {
+                "run_id": item.run_id,
+                "project_root": str(item.identity.real_path),
+                "claimed_at": item.claimed_at,
+                "state": item.state,
+                # Whether a Runtime still holds it, asked of the lock rather
+                # than of the recorded pid. False here is not "free": it is a
+                # claim whose Runtime is gone, which §4 requires somebody to
+                # resolve rather than step over.
+                "holder_live": registry.holder_is_live(item),
+                "recovery": item.recovery,
+            }
+            for item in registry.blocked_by(access.project_root)
+        ]
+        return JSONResponse(envelope({
+            "enabled": True,
+            "project_root": str(access.project_root),
+            "write_granted": access.write_granted,
+            "occupancies": occupancies,
+            "needs_recovery": [
+                item["run_id"] for item in occupancies
+                if not item["holder_live"]
+            ],
+        }))
+
+    async def run_changes(request: Request) -> JSONResponse:
+        """What one run changed, in the two kinds of answer there are (§5).
+
+        `git` is what Orbit compared for itself against the run's recovery
+        point. Everything outside that comparison — a non-git project,
+        ignored files, submodule working trees — can only come from what the
+        Agent said it did, so the payload keeps them apart and marks the whole
+        thing as covering a limited range rather than being a filesystem diff.
+        """
+
+        actor = ctx.authenticate(request, READ_SCOPE)
+        if isinstance(actor, JSONResponse):
+            return actor
+        run_id = request.path_params["run_id"]
+        try:
+            service.get(run_id, actor=reading_actor(actor))
+        except LookupError as exc:
+            return error("not_found", str(exc), 404)
+        access = getattr(service, "project_access", None)
+        summary = None if access is None else access.summarize(run_id)
+        return JSONResponse(envelope({
+            "run_id": run_id,
+            "complete_record": False,
+            "git": summary,
+            "note": (
+                "Paths the git comparison covers are Orbit's own observation. "
+                "Anything outside it — a non-git project, ignored files, "
+                "submodule working trees — is only what the Agent reported, "
+                "and this is not a complete filesystem diff."
+            ),
+        }))
+
     routes = [
+        Route("/api/v1/project-access", project_access, methods=["GET"]),
+        Route(
+            "/api/v1/langgraph-runs/{run_id}/changes", run_changes,
+            methods=["GET"],
+        ),
         Route("/api/v1/langgraph-runs", list_runs, methods=["GET"]),
         Route(
             "/api/v1/langgraph-runs/{run_id}/replay",
