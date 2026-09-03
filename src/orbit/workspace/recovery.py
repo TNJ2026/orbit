@@ -789,7 +789,7 @@ class FileBackupRecoveryPoints(_RecoveryHistory):
                 "point can only cover files the workflow names; declare "
                 "workspace_access.protect or run somewhere git can answer"
             )
-        matches = self._matches(protect)
+        matches, _unmatched = self._matches(protect)
         self._check_space(sum(source.stat().st_size for source, _ in matches))
 
     def _home(self, run_id: str) -> Path:
@@ -808,14 +808,21 @@ class FileBackupRecoveryPoints(_RecoveryHistory):
         existing = self.load(run_id)
         if existing is not None:
             return existing
-        matches = self._matches(protect)
+        matches, unmatched = self._matches(protect)
         self._check_space(sum(source.stat().st_size for source, _ in matches))
         home = self._home(run_id)
         point = RecoveryPoint(
             run_id=run_id, project_root=self.project_root, kind="file_backup",
             created_at=_stamp(), ref=str(home),
             covered=tuple(str(relative) for _, relative in matches),
-            uncovered=("every file the workflow did not name in workspace_access.protect",),
+            uncovered=(
+                "every file the workflow did not name in workspace_access.protect",
+                *(
+                    f"workspace_access.protect {pattern!r} matched no file, so "
+                    "nothing was copied for it"
+                    for pattern in unmatched
+                ),
+            ),
         )
         self._root.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=self.state_dir, prefix="recovery-staging-") as staging:
@@ -828,7 +835,21 @@ class FileBackupRecoveryPoints(_RecoveryHistory):
             os.rename(staged, home)
         return point
 
-    def _matches(self, protect: Sequence[str]) -> list[tuple[Path, Path]]:
+    def _matches(
+        self, protect: Sequence[str],
+    ) -> tuple[list[tuple[Path, Path]], tuple[str, ...]]:
+        """The files `protect` names, and the patterns that named none.
+
+        A pattern matching nothing is not a refusal on its own: naming a file
+        the run is about to write is a reasonable thing for a workflow to do,
+        and there is nothing to copy for it *yet*. What it is, is a gap in the
+        way back — so it goes where every other gap goes, into `uncovered`,
+        which §6.2 already requires an operator to be shown before the run.
+
+        Matching nothing at all is a refusal, because then the point covers
+        nothing and there is no way back to establish.
+        """
+
         if not protect:
             raise RecoveryUnavailable(
                 f"{self.project_root} is not a git repository, so a recovery "
@@ -836,6 +857,7 @@ class FileBackupRecoveryPoints(_RecoveryHistory):
                 "workspace_access.protect or run somewhere git can answer"
             )
         matches: list[tuple[Path, Path]] = []
+        unmatched: list[str] = []
         for pattern in protect:
             matched = False
             for candidate in sorted(self.project_root.glob(pattern)):
@@ -853,9 +875,15 @@ class FileBackupRecoveryPoints(_RecoveryHistory):
                     continue
                 matched = True
                 matches.append((resolved, relative))
-            if not matched:
-                raise RecoveryUnavailable(f"protect pattern {pattern!r} matches no files")
-        return sorted(set(matches))
+            if not matched and pattern not in unmatched:
+                unmatched.append(pattern)
+        if not matches:
+            raise RecoveryUnavailable(
+                "workspace_access.protect matched no files at all "
+                f"({', '.join(repr(item) for item in protect)}), so this run "
+                "would have no way back"
+            )
+        return sorted(set(matches)), tuple(unmatched)
 
     def _check_space(self, needed: int) -> None:
         try:

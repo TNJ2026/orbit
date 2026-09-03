@@ -14,6 +14,20 @@ from orbit.workspace.recovery import GitRecoveryPoints, FileBackupRecoveryPoints
 
 
 class RecoveryRegressions(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.project = self.root / "project"
+        self.project.mkdir()
+        git(self.project, "init", "--initial-branch=main")
+        git(self.project, "config", "user.name", "Test")
+        git(self.project, "config", "user.email", "test@example.org")
+        (self.project / "seed").write_text("seed")
+        git(self.project, "add", "-A")
+        git(self.project, "commit", "-m", "initial")
+        self.points = GitRecoveryPoints(self.project, min_free_bytes=0)
+
     def test_missing_project_settles_and_failure_survives_service_restart(self):
         from tests.test_web_composition import publish_linear_workflow, transform_registration
         from orbit.workflow.langgraph_runtime import build_service
@@ -56,20 +70,6 @@ class RecoveryRegressions(unittest.TestCase):
             c.release("run", "completed")
         self.assertFalse(c.held_by("run"))
         self.assertIn("disk full", c.summarize("run")["error"])
-
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
-        self.project = self.root / "project"
-        self.project.mkdir()
-        git(self.project, "init", "--initial-branch=main")
-        git(self.project, "config", "user.name", "Test")
-        git(self.project, "config", "user.email", "test@example.org")
-        (self.project / "seed").write_text("seed")
-        git(self.project, "add", "-A")
-        git(self.project, "commit", "-m", "initial")
-        self.points = GitRecoveryPoints(self.project, min_free_bytes=0)
 
     def test_restore_preserves_binary_crlf_unicode_and_mode(self):
         names = ["报告.txt", "tab\tname", "line\nname", "cr\r\nname", "binary"]
@@ -156,6 +156,14 @@ class RecoveryRegressions(unittest.TestCase):
 
 
 class OccupancyRegressions(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.project = self.root / "project"
+        (self.project / "child").mkdir(parents=True)
+        self.registry = ProjectOccupancyRegistry(self.root / "registry")
+
     def test_corrupt_record_is_diagnosable_and_repair_checks_owner(self):
         claim = self.registry.claim(self.project, run_id="run")
         record = next((self.root / "registry").glob("*.json"))
@@ -179,15 +187,42 @@ class OccupancyRegressions(unittest.TestCase):
         claim._lock.release()
         self.assertEqual((), self.registry.resolve("different"))
         self.assertTrue(record.exists())
-        self.assertEqual(("run",), self.registry.resolve("run"))
+        # Naming the run proves nothing extra about a record nobody can read
+        # — the match is on the file name either way — so this door asks for
+        # the same promise `resolve_record` asks for.
+        with self.assertRaises(ProjectNeedsRecovery):
+            self.registry.resolve("run")
+        self.assertTrue(record.exists())
+        self.assertEqual(
+            ("run",), self.registry.resolve("run", processes_stopped=True),
+        )
 
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
-        self.project = self.root / "project"
-        (self.project / "child").mkdir(parents=True)
-        self.registry = ProjectOccupancyRegistry(self.root / "registry")
+    def test_inspect_still_answers_when_the_project_is_gone(self):
+        # A vanished directory is one of the ways a run gets stuck holding it,
+        # so this is exactly when the page has to work.
+        claim = self.registry.claim(self.project, run_id="run")
+        claim._lock.release()
+        (self.project / "child").rmdir()
+        self.project.rename(self.root / "moved")
+        self.assertEqual(
+            ["run"], [item.run_id for item in self.registry.inspect(self.project)[0]],
+        )
+
+    def test_inspect_identifies_the_project_the_way_the_gate_does(self):
+        # Two spellings of one directory: the claim gate matches on device and
+        # inode, and the page that explains the refusal has to agree with it.
+        real = self.root / "Cased"
+        real.mkdir()
+        alias = self.root / "cased"
+        if not alias.exists():             # a case-sensitive volume
+            alias = self.root / "alias"
+            alias.symlink_to(real)
+        claim = self.registry.claim(real, run_id="run")
+        self.addCleanup(claim.release)
+        self.assertEqual(
+            [item.run_id for item in self.registry.blocked_by(alias)],
+            [item.run_id for item in self.registry.inspect(alias)[0]],
+        )
 
     def test_same_run_stale_claim_requires_explicit_resolution(self):
         claim = self.registry.claim(self.project, run_id="run")
@@ -221,16 +256,36 @@ class OccupancyRegressions(unittest.TestCase):
 
 
 class FileBackupRegressions(unittest.TestCase):
+    def points(self, root):
+        (root / "data").write_bytes(b"original\x00")
+        return FileBackupRecoveryPoints(root, root / ".orbit", min_free_bytes=0)
+
+    def test_protect_matching_nothing_at_all_refuses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            points = self.points(Path(tmp))
+            with self.assertRaises(RecoveryUnavailable):
+                points.preflight(protect=("missing*",))
+            with self.assertRaises(RecoveryUnavailable):
+                points.create("invalid", protect=("missing*", "also-missing"))
+
+    def test_one_pattern_matching_nothing_is_reported_not_refused(self):
+        # Protecting the file a run is about to write is a reasonable thing
+        # for a workflow to say. It is a gap in the way back, so it goes where
+        # §6.2 puts every other gap — into `uncovered` — rather than refusing
+        # a run that has a way back for everything else it named.
+        with tempfile.TemporaryDirectory() as tmp:
+            points = self.points(Path(tmp))
+            points.preflight(protect=("data", "report.md"))
+            point = points.create("run", protect=("data", "report.md"))
+            self.assertEqual(("data",), point.covered)
+            self.assertTrue(
+                any("report.md" in item for item in point.uncovered), point,
+            )
+
     def test_unmatched_patterns_refuse_and_baseline_is_immutable(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "data").write_bytes(b"original\x00")
-            points = FileBackupRecoveryPoints(root, root / ".orbit", min_free_bytes=0)
-            for patterns in [("missing*",), ("data", "missing*")]:
-                with self.assertRaises(RecoveryUnavailable):
-                    points.preflight(protect=patterns)
-                with self.assertRaises(RecoveryUnavailable):
-                    points.create("invalid", protect=patterns)
+            points = self.points(root)
             point = points.create("run", protect=("data", "data"))
             self.assertEqual(("data",), point.covered)
             (root / "data").write_bytes(b"changed")
@@ -267,3 +322,35 @@ class RunWideGrantRegressions(unittest.TestCase):
             compile_workflow(ir, LangGraphHandlerRegistry([
                 binding(first.id, invoke, capabilities=caps), binding(second.id, invoke),
             ]))
+
+    def test_the_missing_capability_is_named_read_apart_from_write(self):
+        """Which switch to turn on is the whole of what the author can act on.
+
+        Reading a developer's files and editing them are separate grants, so
+        one message covering both would send somebody to the wrong flag.
+        """
+
+        from dataclasses import replace
+        from tests.test_workflow_langgraph_runtime import node, edge, workflow, binding
+        from orbit.workflow.domain.definitions import IRPolicy
+        from orbit.workflow.langgraph_runtime import compile_workflow, LangGraphHandlerRegistry
+        first = replace(node("agent.first", inputs=("value",), outputs=("value",)),
+                        policies=("access",))
+        second = node("agent.second", inputs=("value",), outputs=("value",))
+        def invoke(values, config, context):
+            return values
+
+        def compiled(mode, capabilities):
+            ir = workflow((first, second), (edge("next", first.id, second.id),),
+                entry=(first.id,), terminals=(second.id,), result=(second.id, "value"),
+                policies=(IRPolicy("access", "workspace_access",
+                                   {"mode": mode, "isolation": "none"}),))
+            return compile_workflow(ir, LangGraphHandlerRegistry([
+                binding(first.id, invoke, capabilities=capabilities),
+                binding(second.id, invoke, capabilities=capabilities),
+            ]))
+
+        with self.assertRaisesRegex(ValueError, "works in the project directory"):
+            compiled("read_only", frozenset())
+        with self.assertRaisesRegex(ValueError, "asks to write the project"):
+            compiled("read_write", frozenset({"workspace.project.read"}))

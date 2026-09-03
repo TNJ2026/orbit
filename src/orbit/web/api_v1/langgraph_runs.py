@@ -8,6 +8,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
+from ...platform.project_occupancy import ProjectOccupancyError
 from ...workflow.api.dto import (
     CursorError, decode_cursor, encode_cursor, envelope, page_size,
 )
@@ -459,8 +460,67 @@ def build_routes(ctx, service) -> list[Route]:
             ),
         }))
 
+    async def resolve_project_access(request: Request) -> JSONResponse:
+        """Clear a claim whose Runtime is gone, once a person has checked.
+
+        §4 requires an abandoned claim to be resolved rather than stepped
+        over, and the registry could do it from the first commit — but only
+        from a Python prompt, which is not somewhere an operator reading
+        `GET /api/v1/project-access` can go. This is that page's other half.
+
+        `processes_stopped` is the whole point of the endpoint rather than
+        ceremony around it. Nothing in this process can tell whether the Agent
+        subprocess the claim was standing in front of has actually stopped: a
+        released lock only means the Runtime that held it is gone, and
+        `abandon` releases it deliberately. Clearing the record is what lets
+        the next run write the files that process may still be writing, so the
+        caller has to say it looked.
+        """
+
+        def command(body: Mapping[str, Any], actor: str, key: str):
+            access = getattr(service, "project_access", None)
+            if access is None:
+                raise ValueError(
+                    "this Runtime grants no project-directory access"
+                )
+            run_id = str(body.get("run_id") or "").strip()
+            # For a record too broken to read, its own run id is not something
+            # anybody can recover — the page reports the file name instead.
+            record_id = str(body.get("record_id") or "").strip()
+            if bool(run_id) == bool(record_id):
+                raise ValueError("give exactly one of run_id or record_id")
+            if body.get("processes_stopped") is not True:
+                raise ValueError(
+                    "processes_stopped must be true: confirm the run's Agent "
+                    "processes have stopped before its claim is cleared"
+                )
+            try:
+                if run_id:
+                    cleared = access.registry.resolve(
+                        run_id, processes_stopped=True,
+                    )
+                else:
+                    access.registry.resolve_record(
+                        record_id, processes_stopped=True,
+                    )
+                    cleared = (record_id,)
+            except ProjectOccupancyError as exc:
+                # `ProjectBusy` and `ProjectNeedsRecovery` both land here: a
+                # refusal to clear is a 409 with the registry's own sentence,
+                # which already says which of the two it was.
+                raise ValueError(str(exc)) from None
+            return {"resolved": list(cleared)}
+
+        return await ctx.mutate(
+            request, OPS_WRITE_SCOPE, "project_access.resolve", command,
+        )
+
     routes = [
         Route("/api/v1/project-access", project_access, methods=["GET"]),
+        Route(
+            "/api/v1/project-access/resolve", resolve_project_access,
+            methods=["POST"],
+        ),
         Route(
             "/api/v1/langgraph-runs/{run_id}/changes", run_changes,
             methods=["GET"],

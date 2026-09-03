@@ -1502,7 +1502,8 @@ class LangGraphWorkflowService:
             for table in (
                 "langgraph_attempt_output", "langgraph_handler_attempts",
                 "langgraph_run_events", "langgraph_timers",
-                "langgraph_run_receipts", "langgraph_runs",
+                "langgraph_run_receipts", "langgraph_project_summaries",
+                "langgraph_runs",
             ):
                 connection.execute(
                     f"DELETE FROM {table} WHERE run_id IN ({marks})", doomed,
@@ -2632,9 +2633,14 @@ class LangGraphWorkflowService:
     ) -> LangGraphRun:
         # Observe while still owning the project, but never while holding a
         # SQLite write transaction. Even metadata/git failures are observations.
+        from .project_access import RELEASING_STATUSES
+
         finalize = getattr(self.project_access, "finalize", None)
         summary = None
-        if finalize is not None:
+        if finalize is not None and status in RELEASING_STATUSES:
+            # Only the statuses that give the project back reach `finalize` at
+            # all, so the extra read this needs is not paid on every `waiting`
+            # a retry timer settles.
             effective_status = "cancelled" if self.get(run_id).status == "cancelled" else status
             try:
                 summary = finalize(run_id, effective_status)
@@ -2685,7 +2691,8 @@ class LangGraphWorkflowService:
                                        "content": [], "staged": [], "error": str(exc)}
                     if summary is not None:
                         connection.execute(
-                            "INSERT OR IGNORE INTO langgraph_project_summaries VALUES (?, ?)",
+                            "INSERT OR IGNORE INTO langgraph_project_summaries("
+                            "run_id,summary_json) VALUES (?,?)",
                             (run_id, canonical_json(summary)),
                         )
                         connection.commit()
@@ -2696,7 +2703,8 @@ class LangGraphWorkflowService:
             self._append_event(connection, run_id)
             if summary is not None:
                 connection.execute(
-                    "INSERT OR IGNORE INTO langgraph_project_summaries VALUES (?, ?)",
+                    "INSERT OR IGNORE INTO langgraph_project_summaries("
+                    "run_id,summary_json) VALUES (?,?)",
                     (run_id, canonical_json(summary)),
                 )
             connection.commit()

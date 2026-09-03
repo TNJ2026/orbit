@@ -1119,14 +1119,23 @@ def compile_workflow(
             "isolation": "none",
             "mode": "read_write" if project_need.write else "read_only",
         }
-        required = {"workspace.project.read"}
-        if project_need.write:
-            required.add("workspace.project.write")
+        # Which capability is missing is the whole of what the author has to
+        # act on, so it is said here rather than collapsed into one message:
+        # reading a developer's files and editing them are different things to
+        # consent to, and the two switches are separate. Named for every Agent
+        # node, including the ones that never declared the policy — under
+        # `isolation: none` the grant is the run's, so they work there too.
         for node_id in project_need.agent_nodes:
-            if not required.issubset(bound[node_id].capabilities):
+            granted = bound[node_id].capabilities
+            if "workspace.project.read" not in granted:
                 raise LangGraphCompileError(
-                    f"Agent node {node_id!r} lacks the capabilities required "
-                    "by the run-wide project-directory grant"
+                    f"node {node_id!r} works in the project directory this "
+                    "run takes, which this Runtime was not started to grant"
+                )
+            if project_need.write and "workspace.project.write" not in granted:
+                raise LangGraphCompileError(
+                    f"node {node_id!r} asks to write the project directory, "
+                    "which this Runtime was not started to grant"
                 )
     for node in ir.nodes:
         # A decision belongs here too, and its absence made every workflow

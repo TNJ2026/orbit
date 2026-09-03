@@ -16,6 +16,7 @@ This module answers two questions and holds nothing else:
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -36,6 +37,12 @@ RELEASING_STATUSES = frozenset({"completed", "failed", "cancelled"})
 # moment somebody stops wanting to undo it — the morning after is a very
 # common one — so this is days rather than minutes.
 DEFAULT_RECOVERY_RETENTION_SECONDS = 7 * 24 * 60 * 60.0
+# The frozen observations kept in memory. The durable copy is the Runtime's
+# own `langgraph_project_summaries` row, written as the run settles; this is
+# only what lets a second `finalize` in the same settle — and a `summarize`
+# between settling and the row being read back — answer without asking git
+# again. Bounded, because a Runtime settles runs for as long as it is up.
+FINAL_SUMMARY_CACHE_SIZE = 256
 
 
 class ProjectAccessUnavailable(RuntimeError):
@@ -142,7 +149,7 @@ class ProjectAccessCoordinator:
             )
         self.recovery_points = recovery_points
         self._claims: dict[str, ProjectClaim] = {}
-        self._final_summaries: dict[str, Mapping[str, Any]] = {}
+        self._final_summaries: OrderedDict[str, Mapping[str, Any]] = OrderedDict()
 
     def held_by(self, run_id: str) -> bool:
         return run_id in self._claims
@@ -208,6 +215,9 @@ class ProjectAccessCoordinator:
                                "content": [], "staged": [],
                                "error": f"{type(exc).__name__}: {exc}"}
                 self._final_summaries[run_id] = summary
+                while len(self._final_summaries) > FINAL_SUMMARY_CACHE_SIZE:
+                    self._final_summaries.popitem(last=False)
+            self._final_summaries.move_to_end(run_id)
             return self._final_summaries[run_id]
         return None
 
@@ -256,6 +266,7 @@ class ProjectAccessCoordinator:
         """
 
         if run_id in self._final_summaries:
+            self._final_summaries.move_to_end(run_id)
             return self._final_summaries[run_id]
         summary = self.recovery_points.final_summary(run_id)
         if summary is not None:

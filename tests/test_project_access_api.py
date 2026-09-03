@@ -16,7 +16,9 @@ import unittest
 from tests.test_web_composition import (
     AsgiHarness, SCHEMAS, publish_linear_workflow, transform_registration,
 )
-from orbit.web.api_v1 import READ_SCOPE, WRITE_SCOPE, Authorizer
+from orbit.web.api_v1 import (
+    OPS_WRITE_SCOPE, READ_SCOPE, WRITE_SCOPE, Authorizer,
+)
 from orbit.web.app import create_app
 
 
@@ -25,20 +27,6 @@ def git(root, *args):
 
 
 class ProjectAccessEndpointTests(unittest.TestCase):
-    def test_corrupt_record_is_reported_instead_of_500(self):
-        from orbit.platform.project_occupancy import ProjectOccupancyRegistry
-        app = self.app(discover_agents=True, agent_project_write=True)
-        access = app.state.runtime.langgraph_service.project_access
-        access.registry = ProjectOccupancyRegistry(self.root / "occupancy")
-        claim = access.registry.claim(self.project, run_id="broken")
-        record = next((self.root / "occupancy").glob("*.json"))
-        record.write_text("{")
-        claim._lock.release()
-        with AsgiHarness(app) as client:
-            response = client.get("/api/v1/project-access", actor="local")
-            self.assertEqual(200, response.status_code)
-            self.assertEqual(record.name, response.json()["data"]["corrupt_records"][0]["record_id"])
-
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.temp.cleanup)
@@ -60,7 +48,9 @@ class ProjectAccessEndpointTests(unittest.TestCase):
             langgraph_state_directory=self.root / "langgraph",
             workspace_path=self.project,
             authenticator=lambda request: request.headers.get("x-orbit-actor"),
-            authorizer=Authorizer(lambda actor: [READ_SCOPE, WRITE_SCOPE]),
+            authorizer=Authorizer(
+                lambda actor: [READ_SCOPE, WRITE_SCOPE, OPS_WRITE_SCOPE]
+            ),
             single_goal_mode=False, **kwargs,
         )
         from orbit.platform.project_occupancy import ProjectOccupancyRegistry
@@ -68,6 +58,78 @@ class ProjectAccessEndpointTests(unittest.TestCase):
         if access is not None:
             access.registry = ProjectOccupancyRegistry(self.root / "occupancy")
         return app
+
+    def test_corrupt_record_is_reported_instead_of_500(self):
+        from orbit.platform.project_occupancy import ProjectOccupancyRegistry
+        app = self.app(discover_agents=True, agent_project_write=True)
+        access = app.state.runtime.langgraph_service.project_access
+        access.registry = ProjectOccupancyRegistry(self.root / "occupancy")
+        claim = access.registry.claim(self.project, run_id="broken")
+        record = next((self.root / "occupancy").glob("*.json"))
+        record.write_text("{")
+        claim._lock.release()
+        with AsgiHarness(app) as client:
+            response = client.get("/api/v1/project-access", actor="local")
+            self.assertEqual(200, response.status_code)
+            self.assertEqual(record.name, response.json()["data"]["corrupt_records"][0]["record_id"])
+
+    def test_an_abandoned_claim_can_be_resolved_from_the_page(self) -> None:
+        """The other half of §7: seeing it and being able to clear it.
+
+        The registry could always resolve one, but only from a Python prompt
+        — which is not somewhere the operator reading the page can go.
+        """
+
+        app = self.app(discover_agents=True, agent_project_write=True)
+        access = app.state.runtime.langgraph_service.project_access
+        from orbit.workflow.langgraph_runtime.project_access import ProjectAccessNeed
+
+        access.acquire("run-1", ProjectAccessNeed(required=True, write=True))
+        with AsgiHarness(app) as client:
+            # While a Runtime still holds it, no confirmation clears it.
+            access_held = client.post(
+                "/api/v1/project-access/resolve", key="a", actor="local",
+                body={"run_id": "run-1", "processes_stopped": True},
+            )
+            self.assertEqual(409, access_held.status_code)
+
+            access.abandon("run-1")  # as a stopped Runtime leaves it
+            unconfirmed = client.post(
+                "/api/v1/project-access/resolve", key="b", actor="local",
+                body={"run_id": "run-1"},
+            )
+            self.assertEqual(409, unconfirmed.status_code)
+            self.assertIn("processes_stopped", unconfirmed.json()["error"]["message"])
+
+            resolved = client.post(
+                "/api/v1/project-access/resolve", key="c", actor="local",
+                body={"run_id": "run-1", "processes_stopped": True},
+            )
+            self.assertEqual(["run-1"], resolved.json()["data"]["resolved"])
+            after = client.get("/api/v1/project-access", actor="local").json()["data"]
+        self.assertEqual([], after["occupancies"])
+        self.assertFalse(after["recovery_required"])
+
+    def test_a_corrupt_record_can_be_resolved_by_its_file_name(self) -> None:
+        app = self.app(discover_agents=True, agent_project_write=True)
+        access = app.state.runtime.langgraph_service.project_access
+        claim = access.registry.claim(self.project, run_id="broken")
+        record = next((self.root / "occupancy").glob("*.json"))
+        record.write_text("{")
+        claim._lock.release()
+        with AsgiHarness(app) as client:
+            listed = client.get("/api/v1/project-access", actor="local").json()["data"]
+            self.assertTrue(listed["recovery_required"])
+            response = client.post(
+                "/api/v1/project-access/resolve", key="a", actor="local",
+                body={
+                    "record_id": listed["corrupt_records"][0]["record_id"],
+                    "processes_stopped": True,
+                },
+            )
+        self.assertEqual(200, response.status_code)
+        self.assertFalse(record.exists())
+        access.registry.claim(self.project, run_id="next").release()
 
     def test_it_says_so_when_the_runtime_grants_nothing(self) -> None:
         with AsgiHarness(self.app()) as client:

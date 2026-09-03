@@ -914,6 +914,26 @@ class RetentionTests(unittest.TestCase):
         with self.assertRaises(LookupError):
             self.engine.get(run.run_id)
 
+    def test_what_the_run_changed_in_the_project_goes_with_it(self) -> None:
+        """It is a list of the developer's own file paths.
+
+        Kept past the retention window it is both an unbounded table and a
+        record of somebody's project outliving the run it belonged to — which
+        is exactly what "whole ones, and only whole ones" rules out.
+        """
+
+        run = self.finished("old")
+        with self.engine._connect() as connection:
+            connection.execute(
+                "INSERT INTO langgraph_project_summaries(run_id,summary_json)"
+                " VALUES (?,?)",
+                (run.run_id, '{"kind":"git","content":[]}'),
+            )
+            connection.commit()
+        self.assertEqual(1, self.rows("langgraph_project_summaries"))
+        self.engine.prune(before="2999-01-01")
+        self.assertEqual(0, self.rows("langgraph_project_summaries"))
+
     def test_the_checkpoints_go_with_it(self) -> None:
         """They are the heaviest half of a run that no longer exists."""
 
