@@ -169,6 +169,23 @@ class ProjectAccessCoordinator:
         if claim is not None:
             claim._lock.release()  # noqa: SLF001 - record stays on purpose
 
+    def summarize(self, run_id: str) -> Mapping[str, Any] | None:
+        """What this run has changed so far, or None if it holds no project.
+
+        On demand rather than per node, which is §5's rule and not an
+        optimisation: the comparison scans the working tree and writes a tree
+        object, so a summary after every write node is a full scan per node
+        on a large repository.
+
+        Answers for a settled run too, by rebuilding the point from its ref —
+        "what did that run change" is asked most often once it is over.
+        """
+
+        point = self.recovery_points.load(run_id)
+        if point is None:
+            return None
+        return self.recovery_points.summarize(point).to_primitive()
+
     def status(self, run_id: str) -> Mapping[str, Any] | None:
         claim = self._claims.get(run_id)
         if claim is None:

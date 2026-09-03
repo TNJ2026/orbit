@@ -88,6 +88,82 @@ class RecoveryPoint:
 
 
 @dataclass(frozen=True)
+class FileChange:
+    """One path the run changed, relative to what was there before it."""
+
+    path: str
+    status: str  # added | modified | deleted | renamed | typechanged
+
+    @staticmethod
+    def _statuses() -> Mapping[str, str]:
+        return {
+            "A": "added", "M": "modified", "D": "deleted",
+            "R": "renamed", "T": "typechanged", "C": "copied",
+        }
+
+
+@dataclass(frozen=True)
+class ChangeSummary:
+    """What a run did to the project, as far as git can independently say.
+
+    Three separate answers, because collapsing them loses the difference
+    (§5). An Agent may commit its work, switch branch, or stage things; the
+    file content the project now carries is a different question from what
+    HEAD points at, and reporting the second in place of the first is how a
+    run that committed everything comes to look like a run that changed
+    nothing.
+
+    `scope` is `run_cumulative`: this is everything since the recovery point,
+    not the work of one node. Attributing it to a node would need a tree
+    saved at every node boundary, which is not done by default — so it is
+    named here rather than left for a reader to assume.
+    """
+
+    kind: str
+    scope: str
+    content: tuple[FileChange, ...] = ()
+    staged: tuple[FileChange, ...] = ()
+    head_before: str | None = None
+    head_after: str | None = None
+    branch_after: str | None = None
+    uncovered: tuple[str, ...] = ()
+
+    @property
+    def head_moved(self) -> bool:
+        return self.head_before != self.head_after
+
+    def to_primitive(self) -> dict[str, object]:
+        return {
+            "kind": self.kind,
+            "scope": self.scope,
+            "content": [
+                {"path": item.path, "status": item.status} for item in self.content
+            ],
+            "staged": [
+                {"path": item.path, "status": item.status} for item in self.staged
+            ],
+            "head_before": self.head_before,
+            "head_after": self.head_after,
+            "branch_after": self.branch_after,
+            "head_moved": self.head_moved,
+            "uncovered": list(self.uncovered),
+        }
+
+
+def _parse_name_status(text: str) -> tuple[FileChange, ...]:
+    statuses = FileChange._statuses()  # noqa: SLF001
+    changes: list[FileChange] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        code = parts[0][:1]
+        path = parts[-1]
+        changes.append(FileChange(path, statuses.get(code, code.lower())))
+    return tuple(sorted(changes, key=lambda item: item.path))
+
+
+@dataclass(frozen=True)
 class RestoreEntry:
     """One path a restore would touch, and what it would do to it."""
 
@@ -353,6 +429,91 @@ class GitRecoveryPoints:
             target.write_text(blob.stdout, encoding="utf-8")
             restored.append(entry.path)
         return tuple(restored)
+
+    def load(self, run_id: str) -> RecoveryPoint | None:
+        """Rebuild a run's recovery point from the ref it left behind.
+
+        So a summary or a restore is still answerable after the Runtime that
+        made the point has gone: the ref is durable, the in-memory claim is
+        not, and "what did that run change" outlives the process that ran it.
+        """
+
+        ref = self.ref_for(run_id)
+        commit = _run_git(self.project_root, "rev-parse", "--verify", "-q", ref)
+        if commit.returncode != 0:
+            return None
+        tree = _run_git(self.project_root, "rev-parse", f"{ref}^{{tree}}")
+        if tree.returncode != 0:
+            return None
+        parent = _run_git(self.project_root, "rev-parse", "--verify", "-q", f"{ref}^")
+        return RecoveryPoint(
+            run_id=run_id,
+            project_root=self.project_root,
+            kind="git",
+            created_at="",
+            head=parent.stdout.strip() if parent.returncode == 0 else None,
+            worktree_tree=tree.stdout.strip(),
+            ref=ref,
+            uncovered=self._uncovered(),
+        )
+
+    def summarize(self, point: RecoveryPoint) -> ChangeSummary:
+        """What the run changed, measured against the point it started from.
+
+        Not cheap: it scans the working tree and writes a tree object, so
+        callers ask for it when something needs it — acceptance, a page being
+        read, a run settling — rather than after every node. §5.
+
+        The current side is built through its own index for the same reason
+        the baseline was: a plain worktree diff cannot see files that are new
+        *and* untracked, which is most of what an Agent creates.
+        """
+
+        if point.worktree_tree is None:
+            raise RecoveryPointError("recovery point carries no baseline tree")
+        with tempfile.TemporaryDirectory() as scratch:
+            index = Path(scratch) / "orbit-summary-index"
+            _checked(
+                _run_git(self.project_root, "add", "-A", index=index),
+                "staging the working tree for a change summary",
+            )
+            current_tree = _checked(
+                _run_git(self.project_root, "write-tree", index=index),
+                "writing the current tree",
+            )
+        content = _parse_name_status(_checked(
+            _run_git(
+                self.project_root, "diff", "--name-status",
+                point.worktree_tree, current_tree,
+            ),
+            "comparing content against the recovery point",
+        ))
+        staged: tuple[FileChange, ...] = ()
+        if point.index_tree is not None:
+            current_index = _run_git(self.project_root, "write-tree")
+            if current_index.returncode == 0:
+                staged = _parse_name_status(_checked(
+                    _run_git(
+                        self.project_root, "diff", "--name-status",
+                        point.index_tree, current_index.stdout.strip(),
+                    ),
+                    "comparing the staged state against the recovery point",
+                ))
+        branch = _run_git(self.project_root, "rev-parse", "--abbrev-ref", "HEAD")
+        return ChangeSummary(
+            kind="git",
+            # Named, not assumed: without a tree per node boundary there is
+            # nothing that could attribute this to one step.
+            scope="run_cumulative",
+            content=content,
+            staged=staged,
+            head_before=point.head,
+            head_after=self._head(),
+            branch_after=(
+                branch.stdout.strip() if branch.returncode == 0 else None
+            ),
+            uncovered=point.uncovered,
+        )
 
     def forget(self, point: RecoveryPoint) -> None:
         """Drop the ref once nothing needs the way back any more."""

@@ -180,3 +180,119 @@ class RestoreTests(GitRecoveryPointTests):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ChangeSummaryTests(GitRecoveryPointTests):
+    """What a run did, as far as git can independently say (§5).
+
+    The property that motivates the whole shape: the answer must not change
+    because the Agent committed, staged or switched branch. Those are
+    separate facts, and reporting one in place of another is how a run that
+    committed everything comes to look like a run that changed nothing.
+    """
+
+    def test_a_modified_file_is_reported_against_the_baseline(self) -> None:
+        point = self.points.create("run-1")
+        (self.project / "tracked.txt").write_text("AGENT WROTE\n")
+
+        summary = self.points.summarize(point)
+
+        self.assertEqual(
+            [("tracked.txt", "modified")],
+            [(c.path, c.status) for c in summary.content],
+        )
+        self.assertFalse(summary.head_moved)
+
+    def test_a_new_untracked_file_is_reported_as_added(self) -> None:
+        """A plain worktree diff cannot see this, which is most of what an
+        Agent creates."""
+
+        point = self.points.create("run-1")
+        (self.project / "made-by-agent.txt").write_text("new\n")
+
+        summary = self.points.summarize(point)
+
+        self.assertIn(
+            ("made-by-agent.txt", "added"),
+            [(c.path, c.status) for c in summary.content],
+        )
+
+    def test_a_deleted_file_is_reported_as_deleted(self) -> None:
+        point = self.points.create("run-1")
+        (self.project / "untracked.txt").unlink()
+
+        summary = self.points.summarize(point)
+
+        self.assertIn(
+            ("untracked.txt", "deleted"),
+            [(c.path, c.status) for c in summary.content],
+        )
+
+    def test_files_already_there_are_not_reported_as_this_runs_work(self) -> None:
+        """The misattribution the untracked-covering baseline exists to stop."""
+
+        point = self.points.create("run-1")
+
+        summary = self.points.summarize(point)
+
+        self.assertEqual((), summary.content)
+
+    def test_committing_the_work_does_not_hide_it(self) -> None:
+        """HEAD moves and the working tree goes clean; the content changed
+        all the same, and a summary built on HEAD would say it did not."""
+
+        point = self.points.create("run-1")
+        (self.project / "tracked.txt").write_text("AGENT WROTE\n")
+        git(self.project, "add", "-A")
+        git(self.project, "commit", "-m", "agent commit")
+
+        summary = self.points.summarize(point)
+
+        self.assertIn(
+            ("tracked.txt", "modified"),
+            [(c.path, c.status) for c in summary.content],
+        )
+        self.assertTrue(summary.head_moved)
+        self.assertEqual("", git(self.project, "status", "--porcelain"))
+
+    def test_switching_branch_is_reported_separately_from_content(self) -> None:
+        point = self.points.create("run-1")
+        git(self.project, "checkout", "-q", "-b", "agent-branch")
+        (self.project / "tracked.txt").write_text("ON A BRANCH\n")
+
+        summary = self.points.summarize(point)
+
+        self.assertEqual("agent-branch", summary.branch_after)
+        self.assertIn(
+            ("tracked.txt", "modified"),
+            [(c.path, c.status) for c in summary.content],
+        )
+
+    def test_staging_is_its_own_answer(self) -> None:
+        point = self.points.create("run-1")
+        (self.project / "tracked.txt").write_text("STAGED BY AGENT\n")
+        git(self.project, "add", "tracked.txt")
+
+        summary = self.points.summarize(point)
+
+        self.assertIn("tracked.txt", [c.path for c in summary.staged])
+        self.assertIn("tracked.txt", [c.path for c in summary.content])
+
+    def test_the_summary_says_it_is_cumulative_and_what_it_misses(self) -> None:
+        point = self.points.create("run-1")
+
+        summary = self.points.summarize(point)
+
+        self.assertEqual("run_cumulative", summary.scope)
+        self.assertIn(
+            "files git is ignoring (build output, dependencies, caches)",
+            summary.uncovered,
+        )
+
+    def test_ignored_files_never_appear_in_the_summary(self) -> None:
+        point = self.points.create("run-1")
+        (self.project / "ignored" / "new-build-output.bin").write_text("junk\n")
+
+        summary = self.points.summarize(point)
+
+        self.assertEqual([], [c for c in summary.content if "ignored/" in c.path])

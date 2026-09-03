@@ -361,3 +361,22 @@ class RecoveryPointIntegrationTests(unittest.TestCase):
         # And the project was handed straight back, not left held by a run
         # that never started.
         self.assertEqual([], [o for o in self.registry.occupancies() if o.run_id == "r1"])
+
+    def test_a_summary_is_answerable_after_the_run_settled(self):
+        """"What did that run change" is asked most often once it is over,
+        so it is rebuilt from the ref rather than from a live claim."""
+
+        c = self.coord()
+        c.acquire("r1", ProjectAccessNeed(required=True, write=True))
+        (self.project / "tracked.txt").write_text("AGENT WROTE\n")
+        c.release("r1", "completed")
+
+        summary = c.summarize("r1")
+
+        self.assertEqual("run_cumulative", summary["scope"])
+        self.assertIn(
+            {"path": "tracked.txt", "status": "modified"}, summary["content"],
+        )
+
+    def test_a_run_that_never_held_the_project_has_no_summary(self):
+        self.assertIsNone(self.coord().summarize("never-ran"))
