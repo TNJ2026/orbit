@@ -806,6 +806,7 @@ def build_service(
     single_goal: bool = False,
     rebind: Any = None,
     execution_workers: int = 0,
+    project_access: Any = None,
 ) -> LangGraphWorkflowService:
     """Build the isolated service and its two adapter-owned databases."""
 
@@ -840,6 +841,7 @@ def build_service(
         schema_catalog=InMemorySchemaCatalog(schemas or {}),
         single_goal=single_goal,
         rebind=rebind,
+        project_access=project_access,
     )
     service.execution_worker = worker
     return service

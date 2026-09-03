@@ -468,6 +468,8 @@ def create_app(
     agent_project_access_max_bytes: int | None = None,
     agent_project_access_min_free_bytes: int | None = None,
     agent_project_access_min_free_fraction: float | None = None,
+    agent_project_read: bool = False,
+    agent_project_write: bool = False,
 ) -> Starlette:
     """Build the Runtime application.
 
@@ -494,6 +496,10 @@ def create_app(
     # true; stays `None` otherwise so the composition below always has a
     # value to pass, and the cleanup loop it drives simply never registers.
     project_workspace: Any = None
+    # The real project directory, when this Runtime grants it. Set inside the
+    # discovery block below; declared here because the service is built
+    # outside it and must be told either way.
+    project_root_for_agents: Path | None = None
     if discover_agents:
         from ..workflow.catalogs.agent_discovery import (
             catalog_entries, discover_agent_clis_cached,
@@ -590,11 +596,51 @@ def create_app(
                     project_root, state_dir, **quota_kwargs
                 )
                 grant_capabilities = frozenset({"workspace.read.files"})
+        # The other axis: the project directory itself, rather than a copy of
+        # it. Its own switches, because its own consent — reading a
+        # developer's actual files is not what `--agent-project-access`
+        # asked about, and writing them is not what reading them asked
+        # about. Write implies read; neither implies the copy grants above.
+        if agent_project_read or agent_project_write:
+            if workspace_path is None:
+                raise ValueError(
+                    "--agent-project-read/--agent-project-write require "
+                    "workspace_path to be set explicitly; they never default "
+                    "to the Runtime's own working directory"
+                )
+            project_root_for_agents = Path(workspace_path).expanduser().resolve()
+            if not project_root_for_agents.is_dir():
+                raise ValueError(
+                    f"project directory does not exist: {project_root_for_agents}"
+                )
+            grant_capabilities = grant_capabilities | {"workspace.project.read"}
+            if agent_project_write:
+                grant_capabilities = grant_capabilities | {"workspace.project.write"}
+            # Agents working in the project are told to put scratch files
+            # under its state directory (`_run_scratch`), which is only a
+            # tidier place than the project root if git is actually ignoring
+            # it. Ensured here, once, at startup — §2. Idempotent, and one
+            # line in .gitignore is a great deal less invasive than the
+            # editing this switch has already consented to.
+            from ..workspace.git import GitWorkspaceProvider, is_git_repo
+
+            if is_git_repo(project_root_for_agents):
+                try:
+                    GitWorkspaceProvider(
+                        project_root_for_agents,
+                        project_root_for_agents / ".orbit",
+                    ).ensure_state_dir_ignored()
+                except OSError as exc:
+                    raise ValueError(
+                        f"could not ensure {project_root_for_agents}/.gitignore "
+                        f"covers the Orbit state directory: {exc}"
+                    ) from exc
         agent_registrations, _names = agent_handlers(
             invokable_agents,
             allowed_capabilities=agent_capabilities,
             workspace_root=workspace_root,
             grant_capabilities=grant_capabilities,
+            project_root=project_root_for_agents,
             project_workspace=project_workspace,
         )
         registrations.extend(agent_registrations)
@@ -708,6 +754,9 @@ def create_app(
                 "provide langgraph_service or langgraph_state_directory, not both"
             )
         from ..workflow.langgraph_runtime import build_service
+        from ..workflow.langgraph_runtime.project_access import (
+            ProjectAccessCoordinator,
+        )
 
         langgraph_service = build_service(
             workflow_db_path or db_path,
@@ -720,6 +769,15 @@ def create_app(
             single_goal=single_goal_mode,
             rebind=agent_rebind,
             execution_workers=execution_workers,
+            # Only when this Runtime grants the project directory. Without
+            # it the service holds nothing and every run takes the path it
+            # took before the feature existed.
+            project_access=(
+                None if project_root_for_agents is None
+                else ProjectAccessCoordinator(
+                    project_root_for_agents, write_granted=agent_project_write,
+                )
+            ),
         )
 
     composition = RuntimeComposition(

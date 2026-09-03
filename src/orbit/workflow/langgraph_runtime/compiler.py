@@ -1150,10 +1150,30 @@ def compile_workflow(
             # already come from avoids threading a second, deployment-kind
             # parameter through every `compile_workflow` call site.
             granted = bound[node.id].capabilities if node.id in bound else frozenset()
-            if "workspace.read" in granted:
+            config = workspace_policies[0].config or {}
+            if config.get("isolation") == "none":
+                # The real project directory, not a copy of it. A separate
+                # grant from the disposable-copy ones below, and separate
+                # again for writing: reading a developer's actual files and
+                # editing them are different things to consent to, and the
+                # switch that allows one must not quietly allow the other.
+                if "workspace.project.read" not in granted:
+                    raise LangGraphCompileError(
+                        f"node {node.id!r} asks for the project directory "
+                        "itself, which this Runtime was not started to grant"
+                    )
+                if (
+                    config.get("mode") == "read_write"
+                    and "workspace.project.write" not in granted
+                ):
+                    raise LangGraphCompileError(
+                        f"node {node.id!r} asks to write the project "
+                        "directory, which this Runtime was not started to grant"
+                    )
+            elif "workspace.read" in granted:
                 pass
             elif "workspace.read.files" in granted:
-                if not workspace_policies[0].config.get("files"):
+                if not config.get("files"):
                     raise LangGraphCompileError(
                         f"node {node.id!r} workspace_access policy requires "
                         "config.files on this deployment"

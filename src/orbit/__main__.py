@@ -507,6 +507,10 @@ def _serve(args) -> None:
             agent_project_access_min_free_bytes=(
                 args.agent_project_access_min_free_bytes
             ),
+            agent_project_read=(
+                args.agent_project_read or args.agent_project_write
+            ),
+            agent_project_write=args.agent_project_write,
         )
     except MixedSchemaError as exc:
         ownership.release()
@@ -828,6 +832,29 @@ def build_parser() -> argparse.ArgumentParser:
             "Refuse a non-git workspace_access grant that would leave less "
             "than this much disk free (default: 10 GiB, or 10%% of the "
             "volume, whichever is larger)."
+        ),
+    )
+    serve_cmd.add_argument(
+        "--agent-project-read",
+        action="store_true",
+        help=(
+            "Let a workflow node declaring workspace_access with "
+            "isolation 'none' read the project directory itself, rather than "
+            "a disposable copy of it. Separate consent from "
+            "--agent-project-access: that one hands out copies, this one "
+            "hands out the developer's actual files, uncommitted work "
+            "included."
+        ),
+    )
+    serve_cmd.add_argument(
+        "--agent-project-write",
+        action="store_true",
+        help=(
+            "Let such a node also write the project directory. Implies "
+            "--agent-project-read. This is the switch that lets an Agent CLI "
+            "edit real files with no copy in between and no undo of its own; "
+            "one run holds the project at a time, and everything it changes "
+            "is the working tree you are sitting in."
         ),
     )
     serve_cmd.add_argument(

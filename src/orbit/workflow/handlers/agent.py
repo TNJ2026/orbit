@@ -136,6 +136,7 @@ class TrustedCliAgentClient:
         environment: Mapping[str, str] | None = None,
         workspace_root: Path | str | None = None,
         project_workspace: GitWorktreeGrant | FileAllowlistGrant | None = None,
+        project_root: Path | str | None = None,
     ) -> None:
         if not command or any(not item for item in command):
             raise ValueError("trusted CLI command is required")
@@ -170,6 +171,12 @@ class TrustedCliAgentClient:
         # what keeps every node that never asked for this running exactly as
         # it did before the feature existed.
         self.project_workspace = project_workspace
+        # The real project directory, for nodes granted `isolation: none`.
+        # None unless this Runtime was started to grant it.
+        self.project_root = (
+            None if project_root is None
+            else Path(project_root).expanduser().resolve()
+        )
         # Reader threads this client could not get back. Never reset: it is a
         # cumulative account of leaked capacity, which is what makes the leak
         # visible to whoever reads the metric.
@@ -356,6 +363,23 @@ class TrustedCliAgentClient:
         failure, reported as such.
         """
 
+        if granted.get("isolation") == "none":
+            # The project directory itself. No provisioning, nothing to
+            # acquire — the whole point is that this is the developer's real
+            # working tree, current content and all. Mutual exclusion for it
+            # is the Runtime's job and was settled before this run executed a
+            # node (`langgraph_runtime.project_access`); by the time a Handler
+            # is running, the directory is already this run's.
+            if self.project_root is None:
+                raise HandlerValidationError(
+                    "node asks for the project directory but this Runtime was "
+                    "not started with --agent-project-read"
+                )
+            if not self.project_root.is_dir():
+                raise HandlerValidationError(
+                    f"project directory is gone: {self.project_root}"
+                )
+            return self.project_root
         if self.project_workspace is None:
             # The compiler is supposed to have refused to bind a node with
             # this policy to a Handler lacking workspace capability, which
@@ -379,6 +403,36 @@ class TrustedCliAgentClient:
             raise HandlerValidationError(
                 f"workspace access could not be provisioned: {exc}"
             ) from exc
+
+    def _run_scratch(self, context) -> Path | None:
+        """A place to put working files that is not the project itself.
+
+        Working in the real project directory takes the scratch directory
+        away, and with it the one spot an Agent could leave intermediate
+        files without them becoming part of somebody's repository. Anything
+        left in the project shows up as an addition in the run's change
+        summary and survives a restore, so across a few runs the repository
+        accumulates debris indistinguishable from real work.
+
+        So one is provided under the state directory, which is already
+        git-ignored (`GitWorkspaceProvider.ensure_state_dir_ignored`), and the
+        node's prompt is where an Agent is told to use it. A convention, not a
+        constraint: an Agent has full permissions here and can write anywhere
+        it likes. It lowers the noise for the well-behaved; it cannot stop the
+        rest.
+        """
+
+        if self.project_root is None:
+            return None
+        run_id = str(getattr(context.request, "run_id", "") or "shared")
+        scratch = self.project_root / ".orbit" / "run-tmp" / _safe_name(run_id)
+        try:
+            scratch.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            # Losing the convenience of a scratch directory is not a reason to
+            # fail an attempt that was otherwise ready to run.
+            return None
+        return scratch
 
     def _attempt_timeout(self, context) -> float:
         """How long *this* attempt may run, not how long any attempt may run.
@@ -516,7 +570,19 @@ class TrustedPromptCliAgentClient(TrustedCliAgentClient):
         # Asked for and watched for under the same token, so the line the
         # Agent was told to print is the only one that ends its turn.
         marker = attempt_completion_marker(context.request.attempt_id)
-        prompt = render_agent_prompt(resolved_input, request.config, marker=marker)
+        # Read off the grant rather than by resolving the workspace a second
+        # time: `_run` below already does that, and for a copy-shaped grant
+        # resolving it means acquiring it. Only a node working in the project
+        # itself needs somewhere else to put its scratch files — a disposable
+        # copy is already that somewhere else.
+        granted = getattr(context.request, "workspace_access", None) or {}
+        prompt = render_agent_prompt(
+            resolved_input, request.config, marker=marker,
+            scratch_dir=(
+                self._run_scratch(context)
+                if granted.get("isolation") == "none" else None
+            ),
+        )
         encoded = prompt.encode("utf-8")
         # A prompt fed by an artifact input may be far larger than the inline
         # cap — the point of carrying it as an artifact. Only a stdin CLI can
@@ -675,7 +741,7 @@ def _agent_result(text: str, context) -> "AgentResponse":
 
 def render_agent_prompt(
     node_input: Mapping[str, Any], config: Mapping[str, Any],
-    *, marker: str = AGENT_COMPLETION_MARKER,
+    *, marker: str = AGENT_COMPLETION_MARKER, scratch_dir: Path | None = None,
 ) -> str:
     """One prompt string from the node's authored config and its runtime input.
 
@@ -683,6 +749,12 @@ def render_agent_prompt(
     delimiters. The delimiters are for the reader's benefit, not a security
     boundary: the CLI has no command surface to protect here, because argv is
     fixed before the prompt is known.
+
+    `scratch_dir` is where an Agent working in a real project directory is
+    asked to put its own working files. Saying so is the whole mechanism: an
+    Agent with the project has full permissions and can write anywhere, so
+    this lowers the debris a well-behaved one leaves in somebody's repository
+    and does nothing about the rest.
     """
 
     parts = []
@@ -697,6 +769,14 @@ def render_agent_prompt(
         parts.append(f"INPUT-BEGIN\n{rendered}\nINPUT-END")
     else:
         parts.append(rendered)
+    if scratch_dir is not None:
+        parts.append(
+            "You are working in a real project directory. Put any scratch or "
+            "intermediate files you need under\n"
+            f"{scratch_dir}\n"
+            "so they do not become part of the project. Files you are asked to "
+            "produce belong in the project itself, as normal."
+        )
     parts.append(_completion_protocol(marker))
     return "\n\n".join(parts)
 

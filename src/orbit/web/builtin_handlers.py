@@ -64,6 +64,7 @@ def agent_handlers(
     workspace_root: Any = None,
     grant_capabilities: frozenset[str] = frozenset(),
     project_workspace: Any = None,
+    project_root: Any = None,
 ) -> tuple[Sequence[HandlerRegistration], tuple[str, ...]]:
     """Turn discovered agent CLIs into registrations, or nothing.
 
@@ -102,6 +103,7 @@ def agent_handlers(
                     agent, timeout_seconds=timeout_seconds,
                     workspace_root=workspace_root,
                     project_workspace=project_workspace,
+                    project_root=project_root,
                 )),
                 f"{manifest.name}@{manifest.version}",
                 granted_capabilities=grant_capabilities,
@@ -113,7 +115,7 @@ def agent_handlers(
 
 def agent_client(
     agent: Any, *, timeout_seconds: int = 1800, workspace_root: Any = None,
-    project_workspace: Any = None,
+    project_workspace: Any = None, project_root: Any = None,
 ):
     """The adapter a discovered CLI is invoked through.
 
@@ -126,6 +128,7 @@ def agent_client(
         return TrustedCliAgentClient(
             (agent.executable_path,), timeout_seconds=timeout_seconds,
             workspace_root=workspace_root, project_workspace=project_workspace,
+            project_root=project_root,
         )
     return TrustedPromptCliAgentClient(
         (agent.executable_path, *invocation.args),
@@ -135,6 +138,7 @@ def agent_client(
         timeout_seconds=timeout_seconds,
         workspace_root=workspace_root,
         project_workspace=project_workspace,
+        project_root=project_root,
     )
 
 

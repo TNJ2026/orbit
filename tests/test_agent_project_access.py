@@ -728,3 +728,108 @@ class CreateAppGitDetectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DirectProjectAccessTests(unittest.TestCase):
+    """`isolation: none` — the project directory itself, not a copy of it.
+
+    The discriminator throughout: content that exists only in the working
+    tree. A git worktree is checked out at a commit, so uncommitted edits and
+    untracked files are precisely what it cannot show — if the Agent sees
+    them, it is standing in the real project.
+    """
+
+    def setUp(self) -> None:
+        self.cli = Cli()
+        self.addCleanup(self.cli.cleanup)
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.project = Path(self.temp.name) / "project"
+        self.project.mkdir()
+        for argv in (
+            ("git", "init", "--initial-branch=main"),
+            ("git", "config", "user.email", "t@e.com"),
+            ("git", "config", "user.name", "T"),
+        ):
+            subprocess.run(argv, cwd=self.project, capture_output=True, check=True)
+        (self.project / "committed.txt").write_text("committed\n")
+        subprocess.run(("git", "add", "-A"), cwd=self.project, capture_output=True, check=True)
+        subprocess.run(
+            ("git", "commit", "-m", "init"), cwd=self.project,
+            capture_output=True, check=True,
+        )
+        (self.project / "committed.txt").write_text("committed\nUNCOMMITTED\n")
+        (self.project / "untracked.txt").write_text("untracked\n")
+
+    def client(self, **kwargs):
+        return TrustedCliAgentClient((str(self.cli.path),), **kwargs)
+
+    def run_agent(self, client):
+        return client.execute(
+            SimpleNamespace(input={}, config={}, idempotency_key="k"),
+            context(workspace_access={"mode": "read_write", "isolation": "none"}),
+        )
+
+    def test_the_agent_stands_in_the_real_working_tree(self) -> None:
+        response = self.run_agent(self.client(project_root=self.project))
+
+        files = response.output["files"]
+        self.assertIn("committed.txt", files)
+        # Neither of these can appear in a worktree checked out at a commit.
+        self.assertIn("untracked.txt", files)
+        self.assertEqual(
+            "committed\nUNCOMMITTED\n",
+            (self.project / "committed.txt").read_text(),
+        )
+
+    def test_without_the_grant_it_fails_rather_than_falling_back(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            client = self.client(workspace_root=scratch)  # no project_root
+            with self.assertRaises(HandlerValidationError) as caught:
+                self.run_agent(client)
+            self.assertIn("--agent-project-read", str(caught.exception))
+            self.assertEqual([], list(Path(scratch).iterdir()))
+
+    def test_a_vanished_project_is_an_error_not_a_scratch_directory(self) -> None:
+        gone = Path(self.temp.name) / "gone"
+        with tempfile.TemporaryDirectory() as scratch:
+            client = self.client(project_root=self.project, workspace_root=scratch)
+            client.project_root = gone
+            with self.assertRaises(HandlerValidationError) as caught:
+                self.run_agent(client)
+            self.assertIn("project directory is gone", str(caught.exception))
+            self.assertEqual([], list(Path(scratch).iterdir()))
+
+    def test_a_scratch_directory_is_offered_under_the_state_directory(self) -> None:
+        client = self.client(project_root=self.project)
+        scratch = client._run_scratch(  # noqa: SLF001
+            context(run_id="langgraph_run:abc")
+        )
+        self.assertEqual(
+            self.project.resolve() / ".orbit" / "run-tmp" / "langgraph_run_abc",
+            scratch,
+        )
+        self.assertTrue(scratch.is_dir())
+
+
+class ScratchDirectoryPromptTests(unittest.TestCase):
+    """An Agent in the real project is told where to put its own files."""
+
+    def test_the_prompt_names_the_scratch_directory(self) -> None:
+        from orbit.workflow.handlers.agent import render_agent_prompt
+
+        rendered = render_agent_prompt(
+            {"prompt": "do the thing"}, {},
+            scratch_dir=Path("/p/.orbit/run-tmp/run-1"),
+        )
+
+        self.assertIn("/p/.orbit/run-tmp/run-1", rendered)
+        self.assertIn("real project directory", rendered)
+
+    def test_a_node_without_the_project_is_told_nothing_extra(self) -> None:
+        from orbit.workflow.handlers.agent import render_agent_prompt
+
+        rendered = render_agent_prompt({"prompt": "do the thing"}, {})
+
+        self.assertNotIn("run-tmp", rendered)
+        self.assertNotIn("real project directory", rendered)
