@@ -337,9 +337,16 @@ class LangGraphWorkflowService:
         single_goal: bool = False,
         rebind: Callable[[Any], Any] | None = None,
         clock: Callable[[], datetime] | None = None,
+        project_access: Any = None,
     ) -> None:
         self.workflow_versions = workflow_versions
         self.handlers = handlers
+        # Holds the real project directory for the runs whose workflow asks
+        # for it, or None when this Runtime grants no such access. A run
+        # claims before its first node executes and keeps the directory until
+        # it settles — see `langgraph_runtime.project_access` and
+        # docs/project-file-access-design.md §2, §4.
+        self.project_access = project_access
         # Where a step whose Handler is not installed here gets carried, or
         # None to run every Workflow exactly as its author bound it. A
         # callable rather than a fixed answer: which Agent stands in depends
@@ -665,6 +672,12 @@ class LangGraphWorkflowService:
         # the background, the caller could only recover by starting another
         # Run, leaving one card per rejected attempt in the conversation.
         compile_workflow(ir, self.handlers).validate_inputs(inputs)
+        # Before the durable Run exists, like the input validation above: a
+        # workflow that cannot have the project directory should not leave a
+        # Run (and its card) behind explaining that it could not start.
+        need = self._project_need(ir)
+        if need:
+            self._require_project_available(need)
         request = {
             "workflow_id": workflow_id,
             "workflow_version": record.version.value,
@@ -2378,6 +2391,50 @@ class LangGraphWorkflowService:
             )
             connection.commit()
 
+    def _project_need(self, ir):
+        """What this workflow asks of the real project directory."""
+
+        if self.project_access is None:
+            return None
+        from .project_access import project_access_need
+
+        need = project_access_need(ir)
+        return need if need.required else None
+
+    def _require_project_available(self, need) -> None:
+        """Refuse a start the project cannot accept, before a Run exists.
+
+        Only a look, not a claim: `_execute` takes the directory when
+        execution actually begins. Asking here keeps a workflow that could
+        never run from leaving a durable Run behind to explain itself.
+        """
+
+        if need.write and not self.project_access.write_granted:
+            raise LangGraphRunConflict(
+                "workflow asks to write the project directory but this "
+                "Runtime was not started with --agent-project-write"
+            )
+        blockers = self.project_access.registry.blocked_by(
+            self.project_access.project_root
+        )
+        if blockers:
+            held = blockers[0]
+            raise LangGraphRunConflict(
+                f"project {self.project_access.project_root} is held by run "
+                f"{held.run_id!r}"
+            )
+
+    def _claim_project(self, run_id: str, ir) -> None:
+        need = self._project_need(ir)
+        if need is None:
+            return
+        from ...platform.project_occupancy import ProjectOccupancyError
+
+        try:
+            self.project_access.acquire(run_id, need)
+        except ProjectOccupancyError as exc:
+            raise LangGraphRunConflict(str(exc)) from exc
+
     def _execute(self, run_id: str, ir, *, inputs=..., resume=...) -> LangGraphRun:
         # Registered before the run is read, and the order is the point. A
         # deferred run can sit in the queue for as long as the runs ahead of
@@ -2401,6 +2458,13 @@ class LangGraphWorkflowService:
                 raise LookupError(f"LangGraph run not found: {run_id}")
             if row["status"] == "cancelled":
                 return self.get(run_id)
+            # Every path that executes anything arrives here — start, resume
+            # and recover alike — which is what makes this the one place the
+            # project has to be in hand. A run resumed after a wait, or
+            # recovered after a restart, needs the directory again just as
+            # much as it did the first time; the registry treats a second
+            # claim by the same run as the one it already holds.
+            self._claim_project(run_id, ir)
             return self._drive(run_id, ir, row["owner_actor"], inputs, resume)
 
     def _drive(self, run_id, ir, owner_actor, inputs, resume) -> LangGraphRun:
@@ -2549,6 +2613,11 @@ class LangGraphWorkflowService:
                     " WHERE run_id=? AND status IN ('scheduled','firing')",
                     (run_id,),
                 )
+            # The project goes back here and nowhere else: this is the single
+            # funnel every status change passes through, and `unknown` is
+            # deliberately not among the statuses that release it.
+            if self.project_access is not None:
+                self.project_access.release(run_id, status)
             if changed != 1:
                 connection.rollback()
                 current = self.get(run_id)
