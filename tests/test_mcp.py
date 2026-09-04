@@ -640,7 +640,10 @@ class ToolCallTests(ApiTestCase):
         confirming what an external Agent did, not about writing a Workflow.
         """
 
-        for name in ("wait_authoring_request", "submit_authoring_response"):
+        for name in (
+            "wait_authoring_request", "submit_authoring_response",
+            "checkpoint_delegation",
+        ):
             self.assertIn(name, HARNESS_TOOL_NAMES, name)
 
     def test_unknown_tool_is_an_invalid_params_error(self) -> None:

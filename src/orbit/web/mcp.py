@@ -76,6 +76,7 @@ HARNESS_TOOL_NAMES = frozenset({
     "start_run", "resume_run", "cancel_run", "list_artifacts",
     "read_artifact", "read_artifact_content", "get_artifact_lineage",
     "configure_execution_lease", "claim_delegation", "renew_delegation",
+    "checkpoint_delegation",
     "complete_delegation", "list_delegations", "reconcile_delegation",
     "get_delegation_stats",
 })
@@ -86,7 +87,8 @@ SESSION_RECOVERY_INSTRUCTIONS = (
     "with its default arguments. If it returns no delegations, stay silent "
     "about recovery. If it returns any, tell the user that Orbit has resumable "
     "work and ask whether to continue or reconcile it. Never execute an unknown "
-    "delegation again."
+    "delegation again. A still-leased delegation owned by this task's stable "
+    "worker may continue from its checkpoint after renewing the lease."
 )
 
 
@@ -931,6 +933,29 @@ def build_mcp_dispatcher(
                 },
             },
             {
+                "name": "checkpoint_delegation",
+                "description": (
+                    "Persist the leased Agent's latest safe resume point and "
+                    "atomically renew its lease. This does not make an expired "
+                    "or unknown delegation retryable."
+                ),
+                "scope": WRITE_SCOPE,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "delegation_id": {"type": "string"},
+                        "worker_id": {"type": "string"},
+                        "checkpoint": {"type": "object"},
+                        "expected_revision": {"type": "integer", "minimum": 0},
+                        "lease_seconds": {"type": "integer", "minimum": 5, "maximum": 300},
+                    },
+                    "required": [
+                        "delegation_id", "worker_id", "checkpoint",
+                        "expected_revision",
+                    ],
+                },
+            },
+            {
                 "name": "complete_delegation",
                 "description": "Submit the current App Agent's result for a leased delegation.",
                 "scope": WRITE_SCOPE,
@@ -1048,6 +1073,14 @@ def build_mcp_dispatcher(
             return {"delegation": delegation_queue.renew(
                 str(arguments["delegation_id"]), actor=actor,
                 worker_id=str(arguments["worker_id"]),
+                lease_seconds=int(arguments.get("lease_seconds", 30)),
+            )}
+        if name == "checkpoint_delegation":
+            return {"delegation": delegation_queue.checkpoint(
+                str(arguments["delegation_id"]), actor=actor,
+                worker_id=str(arguments["worker_id"]),
+                checkpoint=arguments["checkpoint"],
+                expected_revision=int(arguments["expected_revision"]),
                 lease_seconds=int(arguments.get("lease_seconds", 30)),
             )}
         if name == "complete_delegation":

@@ -2758,6 +2758,44 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
         self.assertEqual({"prompt": {"goal": "Translate this"}}, run.inputs)
         self.assertEqual({"goal": "Translate this"}, run.result)
 
+    def test_goal_ready_app_workflow_binds_goal_into_task_input(self) -> None:
+        task = IRPort("task", "schema://object/1.0", True, False, None, "")
+        result = IRPort("result", "schema://object/1.0", True, False, None, "")
+        delegate = IRNode(
+            "delegate", "action", (task,), (result,),
+            IRHandlerRef("app.delegate", "1.0.0", FINGERPRINT),
+            {"target": "run_initiator"}, (), None,
+        )
+        terminal = IRNode(
+            "complete", "terminal", (result,), (), None, {}, (), None,
+        )
+        ir = WorkflowIR(
+            "1.3", "workflow:app-goal-ready", "App goal ready", "", {},
+            (task,), (), (delegate, terminal),
+            (IREdge(
+                "done", "delegate", "result", "complete", "result",
+                "success", TRUE, IDENTITY,
+            ),),
+            ("delegate",), ("complete",), (), (), {},
+            IRResult("delegate", "result"),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("app.delegate", lambda values, config, context: {
+                "result": values["task"],
+            }),
+        ])
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            service = self.service(directory, self.publish(directory, ir), registry)
+            run = service.start(
+                ir.workflow_id, {}, goal="Review this",
+                idempotency_key="app-goal-binding",
+            )
+
+        self.assertEqual("completed", run.status)
+        self.assertEqual({"task": {"goal": "Review this"}}, run.inputs)
+        self.assertEqual({"goal": "Review this"}, run.result)
+
     def test_parallel_interrupts_require_and_accept_explicit_id(self) -> None:
         fan = node(
             "fan", inputs=("value",), outputs=("value",), route_mode="parallel",

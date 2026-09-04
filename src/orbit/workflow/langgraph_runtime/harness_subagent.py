@@ -100,8 +100,23 @@ class DelegationQueue:
                 "delegation_id TEXT PRIMARY KEY,actor TEXT NOT NULL,status TEXT NOT NULL,"
                 "request_json TEXT NOT NULL,result_json TEXT,error TEXT,"
                 "lease_owner TEXT,lease_expires_at TEXT,cancel_requested INTEGER NOT NULL DEFAULT 0,"
+                "checkpoint_json TEXT,checkpoint_revision INTEGER NOT NULL DEFAULT 0,"
                 "created_at TEXT NOT NULL,updated_at TEXT NOT NULL)"
             )
+            columns = {
+                str(row[1]) for row in db.execute(
+                    "PRAGMA table_info(harness_delegations)"
+                ).fetchall()
+            }
+            if "checkpoint_json" not in columns:
+                db.execute(
+                    "ALTER TABLE harness_delegations ADD COLUMN checkpoint_json TEXT"
+                )
+            if "checkpoint_revision" not in columns:
+                db.execute(
+                    "ALTER TABLE harness_delegations ADD COLUMN "
+                    "checkpoint_revision INTEGER NOT NULL DEFAULT 0"
+                )
             db.execute(
                 "CREATE INDEX IF NOT EXISTS harness_delegations_claim"
                 " ON harness_delegations(actor,status,created_at)"
@@ -134,6 +149,11 @@ class DelegationQueue:
             "result": None if row["result_json"] is None else json.loads(row["result_json"]),
             "error": row["error"], "lease_expires_at": row["lease_expires_at"],
             "worker_id": row["lease_owner"],
+            "checkpoint": (
+                None if row["checkpoint_json"] is None
+                else json.loads(row["checkpoint_json"])
+            ),
+            "checkpoint_revision": int(row["checkpoint_revision"]),
             "cancel_requested": bool(row["cancel_requested"]),
             "created_at": row["created_at"], "updated_at": row["updated_at"],
         }
@@ -533,6 +553,58 @@ class DelegationQueue:
             raise ValueError("delegation lease is not held by this worker")
         return self.get(delegation_id, actor=actor)
 
+    def checkpoint(
+        self, delegation_id: str, *, actor: str, worker_id: str,
+        checkpoint: Mapping[str, Any], expected_revision: int,
+        lease_seconds: int = 30,
+    ):
+        """Persist an Agent-owned resume point while its lease is unambiguous."""
+
+        if not isinstance(checkpoint, Mapping):
+            raise ValueError("delegation checkpoint must be an object")
+        if expected_revision < 0:
+            raise ValueError("expected_revision must be non-negative")
+        if not 5 <= lease_seconds <= 300:
+            raise ValueError("lease_seconds must be between 5 and 300")
+        encoded = canonical_json(checkpoint)
+        if len(encoded.encode("utf-8")) > 256 * 1024:
+            raise ValueError("delegation checkpoint exceeds 262144 bytes")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._expire(db, actor=actor)
+            row = db.execute(
+                "SELECT status,lease_owner,checkpoint_json,checkpoint_revision "
+                "FROM harness_delegations WHERE delegation_id=? AND actor=?",
+                (delegation_id, actor),
+            ).fetchone()
+            if row is None:
+                db.rollback()
+                raise LookupError("delegation not found")
+            # A retry whose first response was lost is harmless and stable.
+            if (
+                int(row["checkpoint_revision"]) == expected_revision + 1
+                and row["checkpoint_json"] == encoded
+                and row["status"] == "leased"
+                and row["lease_owner"] == worker_id
+            ):
+                db.commit()
+                return self.get(delegation_id, actor=actor)
+            expires = _stamp(_now() + timedelta(seconds=lease_seconds))
+            changed = db.execute(
+                "UPDATE harness_delegations SET checkpoint_json=?,"
+                "checkpoint_revision=checkpoint_revision+1,lease_expires_at=?,"
+                "updated_at=? WHERE delegation_id=? AND actor=? AND status='leased'"
+                " AND lease_owner=? AND checkpoint_revision=?",
+                (encoded, expires, _stamp(_now()), delegation_id, actor,
+                 worker_id, expected_revision),
+            ).rowcount
+            db.commit()
+        if changed != 1:
+            raise ValueError(
+                "delegation checkpoint revision or worker lease no longer matches"
+            )
+        return self.get(delegation_id, actor=actor)
+
     def complete(self, delegation_id: str, *, actor: str, worker_id: str, result=None, error=None):
         if (result is None) == (error is None):
             raise ValueError("exactly one of result or error is required")
@@ -720,18 +792,17 @@ class AppDelegationHandler(HarnessSubagentHandler):
             issues.append(HandlerValidationIssue(
                 ("execution_safety",), "App delegation requires unknown_on_lease_loss",
             ))
-        if config.get("target") not in {"run_initiator", "background_pool"}:
+        # The background implementation is intentionally parked. Keep its
+        # queue/worker code for a later opt-in release, but do not let a
+        # published Workflow depend on a daemon that an App-only installation
+        # does not have.
+        if config.get("target") != "run_initiator":
             issues.append(HandlerValidationIssue(
-                ("target",), "target must be run_initiator or background_pool",
+                ("target",), "target must be run_initiator",
             ))
         if config.get("target") == "run_initiator" and "pool" in config:
             issues.append(HandlerValidationIssue(
                 ("pool",), "pool is only valid for background_pool",
-            ))
-        if (config.get("target") == "background_pool"
-                and not str(config.get("pool", "default")).strip()):
-            issues.append(HandlerValidationIssue(
-                ("pool",), "pool must be non-empty",
             ))
         effects = config.get("effects", "read")
         isolation = config.get("isolation_mode", "shared")
@@ -747,6 +818,10 @@ class AppDelegationHandler(HarnessSubagentHandler):
         return HandlerValidationResult(tuple(issues))
 
     def prepare(self, request, context):
+        if request.config.get("target") != "run_initiator":
+            raise HandlerPermanentError(
+                "app.delegate target must be run_initiator"
+            )
         digest = hashlib.sha256(str(request.idempotency_key).encode()).hexdigest()
         delegation_id = f"app_delegation:{digest}"
         return PreparedExecution({

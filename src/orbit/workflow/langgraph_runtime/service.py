@@ -189,25 +189,32 @@ def _goal(value: str) -> str:
 def _bind_goal_input(ir, inputs: Mapping[str, Any], goal: str) -> dict[str, Any]:
     """Materialize the catalog's conventional ``run.goal`` binding.
 
-    Goal-ready Agent workflows expose one inline object input named ``prompt``.
+    Goal-ready Agent workflows expose one inline object input named ``prompt``
+    for a local CLI, or ``task`` for App/Harness delegation.
     Callers should not have to duplicate the same text in both ``goal`` and
-    ``input.prompt.goal`` merely to satisfy input validation.  Explicit prompt
-    input remains authoritative.
+    the Handler input merely to satisfy input validation. Explicit ``prompt``
+    or ``task`` input remains authoritative.
     """
 
     bound = dict(inputs)
-    if not goal or "prompt" in bound or len(ir.entry) != 1:
+    if not goal or len(ir.entry) != 1:
         return bound
     entry = next((node for node in ir.nodes if node.id == ir.entry[0]), None)
-    prompt = next((port for port in ir.inputs if port.id == "prompt"), None)
+    if entry is None or entry.handler is None:
+        return bound
+    input_id = (
+        "prompt" if entry.handler.name.startswith("agent.")
+        else "task" if entry.handler.name in {"app.delegate", "harness.subagent"}
+        else None
+    )
+    port = next((item for item in ir.inputs if item.id == input_id), None)
     if (
-        entry is not None
-        and entry.handler is not None
-        and entry.handler.name.startswith("agent.")
-        and prompt is not None
-        and prompt.data_policy.transport.value == "inline"
+        input_id is not None
+        and input_id not in bound
+        and port is not None
+        and port.data_policy.transport.value == "inline"
     ):
-        bound["prompt"] = {"goal": goal}
+        bound[input_id] = {"goal": goal}
     return bound
 
 

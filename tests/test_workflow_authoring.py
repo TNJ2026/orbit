@@ -24,6 +24,7 @@ from orbit.workflow.catalogs import (
 from orbit.workflow.domain.durable_execution import ExecutionSafety
 from orbit.workflow.domain.handlers import ResourceProfile
 from orbit.workflow.dsl.schema import ID_PATTERN
+from orbit.workflow.langgraph_runtime.harness_subagent import APP_DELEGATE_MANIFEST
 
 
 MANIFEST = HandlerManifest(
@@ -87,6 +88,53 @@ class ScriptedModel:
 
 
 class AuthoringServiceTests(unittest.TestCase):
+    def test_app_delegation_authoring_only_offers_the_current_session(self) -> None:
+        authoring = WorkflowAuthoringService(
+            InMemoryHandlerCatalog([APP_DELEGATE_MANIFEST]), SCHEMAS,
+            lambda _prompt: "{}",
+            handler_facts=[{
+                "name": "app.delegate", "version": "1.0.0",
+                "config_schema": APP_DELEGATE_MANIFEST.config_schema,
+            }],
+        )
+
+        facts = authoring._handler_facts_with_ports()
+        offered = facts[0]["config_schema"]["properties"]["target"]["enum"]
+        self.assertEqual(["run_initiator"], offered)
+        # Runtime compatibility is retained: the registered 1.0 manifest and
+        # its fingerprint are not rewritten just to narrow authoring choices.
+        declared = APP_DELEGATE_MANIFEST.config_schema["properties"]["target"]["enum"]
+        self.assertIn("background_pool", declared)
+
+    def test_app_delegation_is_a_valid_goal_entry_without_an_agent_cli(self) -> None:
+        document = valid_document()
+        document["nodes"][0].update({
+            "inputs": [{"id": "task", "schema_id": "schema://object/1.0"}],
+            "outputs": [{"id": "result", "schema_id": "schema://object/1.0"}],
+            "handler": {"name": "app.delegate", "version": "1.0.0"},
+            "config": {"target": "run_initiator"},
+        })
+        document["nodes"][1]["inputs"] = [
+            {"id": "result", "schema_id": "schema://object/1.0"},
+        ]
+        document["edges"][0]["from"]["port"] = "result"
+        document["edges"][0]["to"]["port"] = "result"
+        model = ScriptedModel([json.dumps(document)])
+        authoring = WorkflowAuthoringService(
+            InMemoryHandlerCatalog([APP_DELEGATE_MANIFEST]), SCHEMAS, model,
+            handler_facts=[{
+                "name": "app.delegate", "version": "1.0.0",
+                "inputs": {"task": "schema://object/1.0"},
+                "outputs": {"result": "schema://object/1.0"},
+                "config_schema": APP_DELEGATE_MANIFEST.config_schema,
+            }],
+            require_goal_binding=True,
+        )
+
+        outcome = authoring.generate("Classify one item into a structured status")
+
+        self.assertEqual(1, outcome.attempts)
+
     def test_generation_retries_when_goal_cannot_bind_to_one_entry(self) -> None:
         agent_manifest = HandlerManifest(
             "agent.test", "1.0.0", ("action",),
@@ -180,6 +228,8 @@ class AuthoringServiceTests(unittest.TestCase):
         self.assertIn("prefer targeted tests", prompt)
         self.assertIn("useful partial result", prompt)
         self.assertIn("explicit back_edge", prompt)
+        self.assertIn("durable recovery boundary", prompt)
+        self.assertIn("one monolithic Agent prompt", prompt)
 
     def test_prompt_carries_the_rules_that_were_learned_by_failing(self) -> None:
         """Three constraints a document can satisfy the schema and still break on.

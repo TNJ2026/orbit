@@ -76,12 +76,16 @@ resolved workflow identity are sent to `start_run`.
    observe a still-leased item only when its
    `worker_id` is this task's stable worker ID. Then, while following, call
    `claim_delegation` with that stable worker ID for this
-   task. This actor-scoped claim path excludes every `background_pool` item;
-   those are owned by the machine Background Agent Worker and the Runtime
-   resumes the Run when that worker completes. A non-null delegation is a
-   `run_initiator` `app.delegate` Agent step assigned to the current
-   conversation: follow its request, execute it with the App's normal
-   tools, renew before its lease expires when necessary, then call
+   task. A non-null delegation is a `run_initiator` `app.delegate` Agent step
+   assigned to the current conversation: follow its request, execute it with the App's normal
+   tools, renew before its lease expires when necessary, and call
+   `checkpoint_delegation` after an independently resumable internal stage.
+   Use the returned `checkpoint_revision` as the next expected revision and
+   store enough structured state to continue without guessing which stage
+   completed. A checkpoint also renews the lease. If the same task reconnects
+   while that lease is still valid, continue from the returned checkpoint;
+   an expired delegation is still `unknown` and must never be resumed merely
+   because it has a checkpoint. Then call
    `complete_delegation` with exactly one of `result` or `error`. Continue
    claiming until none is queued. Never wait synchronously for a Run while it
    may be waiting for this same conversation; `start_run(wait=false)` above is

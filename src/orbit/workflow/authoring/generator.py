@@ -745,6 +745,20 @@ class WorkflowAuthoringService:
 
         rendered = []
         for fact in self.handler_facts:
+            fact = dict(fact)
+            # background_pool remains in the 1.0 manifest fingerprint so
+            # existing run_initiator definitions do not become incompatible,
+            # but it is not an authorable configuration while the unattended
+            # worker is parked. The Handler validator is the matching runtime
+            # gate; this projection keeps models from proposing it first.
+            if fact.get("name") == "app.delegate":
+                schema = fact.get("config_schema")
+                if isinstance(schema, Mapping):
+                    properties = dict(schema.get("properties") or {})
+                    target = dict(properties.get("target") or {})
+                    target["enum"] = ["run_initiator"]
+                    properties["target"] = target
+                    fact["config_schema"] = {**schema, "properties": properties}
             ports = {}
             for side in ("inputs", "outputs"):
                 declared = fact.get(side)
@@ -799,6 +813,8 @@ class WorkflowAuthoringService:
             "For exclusive routes, allow at most one default edge per route.",
             "human nodes take config{task_kind:'approval', participants:[...], quorum:'any'} and exactly one output.",
             "Use preferred_handler for action nodes when it is set, unless the instruction explicitly requires a different available handler for a distinct role.",
+            "When using app.delegate, set config.target to run_initiator. background_pool is not an available Workflow configuration.",
+            "Split a long Agent job with independently meaningful stages into separate action nodes, and connect their declared outputs to the next stage. A completed node is Orbit's durable recovery boundary. Do not hide research, implementation, verification, and reporting inside one monolithic Agent prompt when later stages can consume a persisted result from an earlier node. Keep one node when the work is genuinely atomic; do not create artificial checkpoint-only nodes.",
             "When an output is expected to contain long-form or otherwise substantial text, pass it as an Artifact instead of inline data: keep the handler's port id and schema_id, set transport:'artifact_ref', choose an appropriate text content type and max_size_bytes, and set visibility:'run'. Apply the same Artifact policy to every downstream port carrying that content. Reserve inline transport for short structured values, status, routing, and small summaries.",
             "An edge's two ports must agree on transport, visibility and content types — all three, or the edge is refused. One consequence is worth stating on its own: an Artifact edge and an inline edge can never share a join input port, so a fan-in that mixes long-form and short results needs a port for each kind.",
             "When the Goal's final deliverable is primarily prose—such as a report, document, plan, proposal, brief, summary, or similar text—and the instruction does not explicitly request another format, make the declared result port an Artifact: keep the handler's result port id and schema_id, set transport:'artifact_ref', content_types:['text/markdown'], visibility:'run', and a suitable max_size_bytes. Apply the same Artifact policy to every downstream port carrying that result to the terminal. Never return such a deliverable only as inline JSON.",
@@ -810,7 +826,7 @@ class WorkflowAuthoringService:
         ]
         if self.require_goal_binding and current_source is None:
             hard.append(
-                "The generated workflow must be directly runnable from a Run Goal: declare exactly one entry node; it must be an action using an agent.* handler with exactly one inline object input named prompt. Route that entry's output to any downstream parallel branches instead of declaring those branches as additional entries."
+                "The generated workflow must be directly runnable from a Run Goal: declare exactly one entry action. For an agent.* handler its single inline object input is named prompt; for app.delegate or harness.subagent it is named task. Route that entry's output to any downstream parallel branches instead of declaring those branches as additional entries."
             )
         if current_source is not None and shape == "patch":
             # The rules that ask for a whole document are not merely unhelpful
@@ -1098,25 +1114,28 @@ class WorkflowAuthoringService:
                 "entry action; connect that action to downstream parallel branches"
             )
         entry = next(node for node in compiled.ir.nodes if node.id == entries[0])
-        if (
-            entry.kind != "action"
-            or entry.handler is None
-            or not entry.handler.name.startswith("agent.")
+        handler_name = None if entry.handler is None else entry.handler.name
+        if entry.kind != "action" or handler_name is None or not (
+            handler_name.startswith("agent.")
+            or handler_name in {"app.delegate", "harness.subagent"}
         ):
             raise ValueError(
                 "GOAL_BINDING_MISSING: the only entry node must be an action using "
-                "an agent.* handler"
+                "an agent.*, app.delegate, or harness.subagent handler"
             )
-        prompt = next((port for port in entry.inputs if port.id == "prompt"), None)
-        schema = None if prompt is None else self.schemas.get(prompt.schema_id)
+        input_id = "prompt" if handler_name.startswith("agent.") else "task"
+        goal_input = next(
+            (port for port in entry.inputs if port.id == input_id), None
+        )
+        schema = None if goal_input is None else self.schemas.get(goal_input.schema_id)
         if (
-            prompt is None
+            goal_input is None
             or (schema or {}).get("type") != "object"
-            or prompt.data_policy.transport.value != "inline"
+            or goal_input.data_policy.transport.value != "inline"
         ):
             raise ValueError(
                 "GOAL_BINDING_MISSING: the only entry action must declare an inline "
-                "object input port named prompt"
+                f"object input port named {input_id}"
             )
 
     @staticmethod

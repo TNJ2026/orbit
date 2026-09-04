@@ -1,5 +1,11 @@
 # Unattended background Agent
 
+> Status: parked. Orbit retains this implementation for later opt-in work,
+> but the current `app.delegate@1.0.0` validator rejects
+> `target: background_pool`, and workflow authoring only offers
+> `target: run_initiator`. Starting this worker does not make background-pool
+> Workflow configuration available.
+
 Orbit can run one machine-wide background Agent worker separately from every
 Workspace Runtime. Runtimes remain the authority for Workflow state and their
 durable delegation queues; the worker reaches them only through the fixed Hub.
@@ -21,7 +27,8 @@ config:
   target: run_initiator
 ```
 
-An unattended step must opt into a named background pool:
+The retained implementation uses the following reserved shape. It is not a
+currently publishable Workflow configuration:
 
 ```yaml
 handler: app.delegate@1.0.0

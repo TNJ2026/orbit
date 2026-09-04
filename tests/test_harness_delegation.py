@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 import pickle
+import sqlite3
 import tempfile
 from threading import Thread
 import time
@@ -11,7 +12,9 @@ import unittest
 
 from orbit.workflow.domain.durable_execution import ExecutionSafety
 from orbit.workflow.domain.definitions import IRHandlerRef, IRNode
-from orbit.workflow.domain.handlers import CancelDisposition, RecoveryDisposition
+from orbit.workflow.domain.handlers import (
+    CancelDisposition, HandlerPermanentError, RecoveryDisposition,
+)
 from orbit.workflow.langgraph_runtime.harness_subagent import (
     APP_DELEGATE_MANIFEST, AppDelegationHandler, DelegationQueue,
     HARNESS_SUBAGENT_MANIFEST, HarnessSubagentHandler,
@@ -35,6 +38,26 @@ class DelegationQueueTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_legacy_queue_schema_is_migrated_for_checkpoints(self) -> None:
+        path = Path(self.temp.name) / "legacy.db"
+        with sqlite3.connect(path) as db:
+            db.execute(
+                "CREATE TABLE harness_delegations("
+                "delegation_id TEXT PRIMARY KEY,actor TEXT NOT NULL,"
+                "status TEXT NOT NULL,request_json TEXT NOT NULL,"
+                "result_json TEXT,error TEXT,lease_owner TEXT,"
+                "lease_expires_at TEXT,cancel_requested INTEGER NOT NULL DEFAULT 0,"
+                "created_at TEXT NOT NULL,updated_at TEXT NOT NULL)"
+            )
+        queue = DelegationQueue(path, require_execution_lease=False)
+        item = queue.enqueue(
+            "delegation:legacy", actor="session:legacy",
+            request={"input": {"task": 1}, "config": {"provider": "codex"}},
+        )
+
+        self.assertEqual(0, item["checkpoint_revision"])
+        self.assertIsNone(item["checkpoint"])
 
     def test_duplicate_submission_is_one_job_and_changed_payload_is_refused(self) -> None:
         first = self.queue.enqueue("delegation:1", actor="session:1", request={"task": 1})
@@ -109,7 +132,7 @@ class DelegationQueueTests(unittest.TestCase):
         background = handler.validate(APP_DELEGATE_MANIFEST, {
             "target": "background_pool", "pool": "coding", "effects": "read",
         })
-        self.assertEqual((), background.issues)
+        self.assertEqual("target must be run_initiator", background.issues[0].message)
         invalid = handler.validate(APP_DELEGATE_MANIFEST, {
             "target": "codex-app", "effects": "write", "isolation_mode": "shared",
         })
@@ -212,6 +235,45 @@ class DelegationQueueTests(unittest.TestCase):
         )
         self.assertTrue(renewed["cancel_requested"])
 
+    def test_checkpoint_is_durable_versioned_and_never_requeues_unknown_work(self) -> None:
+        self.queue.enqueue("delegation:checkpoint", actor="session:1", request={
+            "input": {"task": 1}, "config": {"provider": "codex"},
+        })
+        claimed = self.queue.claim(actor="session:1", worker_id="worker:1")
+        self.assertEqual(0, claimed["checkpoint_revision"])
+        saved = self.queue.checkpoint(
+            "delegation:checkpoint", actor="session:1", worker_id="worker:1",
+            checkpoint={"stage": "researched", "artifacts": ["artifact:1"]},
+            expected_revision=0,
+        )
+        self.assertEqual(1, saved["checkpoint_revision"])
+        self.assertEqual("researched", saved["checkpoint"]["stage"])
+        replay = self.queue.checkpoint(
+            "delegation:checkpoint", actor="session:1", worker_id="worker:1",
+            checkpoint={"stage": "researched", "artifacts": ["artifact:1"]},
+            expected_revision=0,
+        )
+        self.assertEqual(1, replay["checkpoint_revision"])
+        with self.assertRaisesRegex(ValueError, "revision or worker lease"):
+            self.queue.checkpoint(
+                "delegation:checkpoint", actor="session:1", worker_id="worker:2",
+                checkpoint={"stage": "implemented"}, expected_revision=1,
+            )
+        with self.queue._connect() as db:
+            db.execute(
+                "UPDATE harness_delegations SET lease_expires_at=? "
+                "WHERE delegation_id=?",
+                ("2000-01-01T00:00:00.000000Z", "delegation:checkpoint"),
+            )
+            db.commit()
+        reopened = DelegationQueue(self.queue.path)
+        unknown = reopened.get("delegation:checkpoint", actor="session:1")
+        self.assertEqual("unknown", unknown["status"])
+        self.assertEqual("researched", unknown["checkpoint"]["stage"])
+        self.assertIsNone(reopened.claim(
+            actor="session:1", worker_id="worker:1",
+        ))
+
     def test_harness_mcp_claims_and_completes_the_same_queue(self) -> None:
         self.queue.enqueue(
             "delegation:1", actor="session:1",
@@ -225,6 +287,7 @@ class DelegationQueueTests(unittest.TestCase):
         listed = dispatch({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, "session:1")
         names = {tool["name"] for tool in listed["result"]["tools"]}
         self.assertIn("claim_delegation", names)
+        self.assertIn("checkpoint_delegation", names)
         self.assertIn("list_delegations", names)
         self.assertIn("configure_execution_lease", names)
         resumable = dispatch({
@@ -256,6 +319,18 @@ class DelegationQueueTests(unittest.TestCase):
         }, "session:1")
         payload = claimed["result"]["structuredContent"]
         self.assertEqual("delegation:1", payload["delegation"]["delegation_id"])
+        checkpointed = dispatch({
+            "jsonrpc": "2.0", "id": 12, "method": "tools/call",
+            "params": {"name": "checkpoint_delegation", "arguments": {
+                "delegation_id": "delegation:1", "worker_id": "worker:1",
+                "checkpoint": {"stage": "planned"}, "expected_revision": 0,
+            }},
+        }, "session:1")
+        self.assertEqual(
+            1,
+            checkpointed["result"]["structuredContent"]
+            ["delegation"]["checkpoint_revision"],
+        )
         completed = dispatch({
             "jsonrpc": "2.0", "id": 3, "method": "tools/call",
             "params": {"name": "complete_delegation", "arguments": {
@@ -521,6 +596,21 @@ class HarnessSubagentHandlerTests(unittest.TestCase):
             thread.join(2)
             self.assertFalse(thread.is_alive())
             self.assertEqual({"result": {"answer": "done"}}, dict(captured[0].output))
+
+    def test_app_handler_refuses_a_legacy_background_target_at_runtime(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            handler = AppDelegationHandler(DelegationQueue(
+                Path(directory) / "app.db", require_execution_lease=False,
+            ))
+            request = SimpleNamespace(
+                idempotency_key="legacy-background",
+                config={"target": "background_pool", "pool": "coding"},
+            )
+
+            with self.assertRaisesRegex(
+                HandlerPermanentError, "target must be run_initiator",
+            ):
+                handler.prepare(request, SimpleNamespace(request=request))
 
     def test_manifest_is_fixed_unknown_on_lease_loss(self) -> None:
         self.assertEqual("harness.subagent", HARNESS_SUBAGENT_MANIFEST.name)

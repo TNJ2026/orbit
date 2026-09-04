@@ -23,6 +23,11 @@ When the user asks this task to generate a new workflow:
    contains `app.delegate`, bind that step to `app.delegate` with
    `target: "run_initiator"`; this keeps execution on the App conversation
    that starts the Run instead of assuming a separately installed Agent CLI.
+   When the requested Agent work has independently meaningful stages, express
+   those stages as separate action nodes with connected, persisted outputs.
+   Completed Workflow nodes are the recovery boundary; one monolithic Agent
+   prompt cannot resume from its internal halfway point. Do not split work that
+   is genuinely atomic or add nodes whose only purpose is naming a checkpoint.
 5. Call `submit_authoring_response` with the returned `request_id` and DSL.
 6. Call `get_authoring_job`. If compilation requests another attempt, repeat
    the claim, generation, and submission steps. Stop when the job is done,
