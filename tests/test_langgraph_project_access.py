@@ -231,8 +231,16 @@ class ServiceSeamTests(unittest.TestCase):
         self.assertEqual([run.run_id], recorder.acquired)
         self.assertEqual([(run.run_id, "completed")], recorder.released)
 
-    def test_a_start_is_refused_before_a_run_exists_when_the_project_is_held(self) -> None:
-        from orbit.workflow.langgraph_runtime.service import LangGraphRunConflict
+    def test_a_start_queues_behind_whoever_is_holding_the_project(self) -> None:
+        """Held is *not yet*, and the Runtime can wait by itself.
+
+        This used to be refused before a Run existed, which told the second
+        person to come back and start it again by hand — for a wait the
+        Runtime is perfectly able to do. The run is now created, parked
+        `waiting`, and in the queue, which is also what makes it something a
+        person can see and cancel.
+        """
+
         from orbit.platform.project_occupancy import (
             ProjectOccupancyRegistry,
         )
@@ -272,14 +280,257 @@ class ServiceSeamTests(unittest.TestCase):
             required=True, write=True,
         )
 
-        with self.assertRaises(LangGraphRunConflict) as caught:
-            self.service.start(
-                "workflow:linear", {"value": 1}, idempotency_key="k",
-                actor="local",
+        run = self.service.start(
+            "workflow:linear", {"value": 1}, idempotency_key="k", actor="local",
+        )
+
+        self.assertEqual("waiting", run.status)
+        self.assertFalse(self.service.project_access.held_by(run.run_id))
+        waiting = next(
+            item for item in run.interrupts if item["type"] == "project_wait"
+        )
+        self.assertIn("someone-else", waiting["reason"])
+        # And it is in the line, durably, rather than only in a timer.
+        with self.service._connect() as connection:
+            queued = [
+                row["run_id"] for row in connection.execute(
+                    "SELECT run_id FROM langgraph_project_waiters"
+                )
+            ]
+        self.assertEqual([run.run_id], queued)
+
+    def test_the_holder_finishing_brings_the_next_look_forward(self) -> None:
+        """Waking is what makes the queue a queue rather than a poll.
+
+        Without it the run still gets in eventually — its own timer fires —
+        but a project handed back a second after a run queued would sit idle
+        for the whole poll interval with nobody holding it.
+        """
+
+        from orbit.platform.project_occupancy import ProjectOccupancyRegistry
+        from orbit.workflow.langgraph_runtime.project_access import (
+            ProjectAccessCoordinator,
+        )
+        from pathlib import Path
+        import subprocess
+
+        root = Path(self.temp.name)
+        project = root / "waking"
+        project.mkdir()
+        for argv in (
+            ("git", "init", "--initial-branch=main"),
+            ("git", "config", "user.email", "t@e.com"),
+            ("git", "config", "user.name", "T"),
+        ):
+            subprocess.run(argv, cwd=project, capture_output=True, check=True)
+        (project / "seed.txt").write_text("seed\n")
+        subprocess.run(("git", "add", "-A"), cwd=project, capture_output=True, check=True)
+        subprocess.run(
+            ("git", "commit", "-m", "init"), cwd=project,
+            capture_output=True, check=True,
+        )
+        registry = ProjectOccupancyRegistry(root / "occ-waking")
+        holder = ProjectAccessCoordinator(
+            project, registry=registry, write_granted=True,
+        )
+        holder.acquire("holder", ProjectAccessNeed(required=True, write=True))
+        self.service.project_access = ProjectAccessCoordinator(
+            project, registry=registry, write_granted=True,
+        )
+        self.service._project_need = lambda ir: ProjectAccessNeed(
+            required=True, write=True,
+        )
+        run = self.service.start(
+            "workflow:linear", {"value": 1}, idempotency_key="waking",
+            actor="local",
+        )
+        self.assertEqual("waiting", run.status)
+
+        def due() -> str:
+            with self.service._connect() as connection:
+                return str(connection.execute(
+                    "SELECT due_at FROM langgraph_timers WHERE run_id=?"
+                    " AND purpose='project_wait'", (run.run_id,),
+                ).fetchone()["due_at"])
+
+        scheduled = due()
+        holder.release("holder", "completed")
+        woken = self.service._wake_next_for_project()
+
+        self.assertEqual(run.run_id, woken)
+        self.assertLess(due(), scheduled)
+
+    def test_the_queued_run_gets_the_project_and_finishes(self) -> None:
+        """The whole point, end to end: refused nothing, waited, then ran."""
+
+        from orbit.platform.project_occupancy import ProjectOccupancyRegistry
+        from orbit.workflow.langgraph_runtime.project_access import (
+            ProjectAccessCoordinator,
+        )
+        from pathlib import Path
+        import subprocess
+
+        root = Path(self.temp.name)
+        project = root / "queueing"
+        project.mkdir()
+        for argv in (
+            ("git", "init", "--initial-branch=main"),
+            ("git", "config", "user.email", "t@e.com"),
+            ("git", "config", "user.name", "T"),
+        ):
+            subprocess.run(argv, cwd=project, capture_output=True, check=True)
+        (project / "seed.txt").write_text("seed\n")
+        subprocess.run(("git", "add", "-A"), cwd=project, capture_output=True, check=True)
+        subprocess.run(
+            ("git", "commit", "-m", "init"), cwd=project,
+            capture_output=True, check=True,
+        )
+        registry = ProjectOccupancyRegistry(root / "occ-queueing")
+        holder = ProjectAccessCoordinator(
+            project, registry=registry, write_granted=True,
+        )
+        holder.acquire("holder", ProjectAccessNeed(required=True, write=True))
+        self.service.project_access = ProjectAccessCoordinator(
+            project, registry=registry, write_granted=True,
+        )
+        self.service._project_need = lambda ir: ProjectAccessNeed(
+            required=True, write=True,
+        )
+        run = self.service.start(
+            "workflow:linear", {"value": 1}, idempotency_key="queueing",
+            actor="local",
+        )
+        self.assertEqual("waiting", run.status)
+
+        holder.release("holder", "completed")
+        self.service._wake_next_for_project()
+        self.service.recover_due()
+
+        settled = self.service.get(run.run_id)
+        self.assertEqual("completed", settled.status)
+        with self.service._connect() as connection:
+            self.assertEqual([], connection.execute(
+                "SELECT run_id FROM langgraph_project_waiters"
+            ).fetchall())
+
+    def test_a_wait_that_has_gone_on_too_long_is_called_off(self) -> None:
+        """`waiting` that can never end is a failure wearing a hopeful status.
+
+        The holder may be a run nobody will ever answer. A queue nobody
+        empties is worse than a refusal somebody reads, so the wait is
+        bounded and says what it was waiting for.
+        """
+
+        from orbit.platform.project_occupancy import ProjectOccupancyRegistry
+        from orbit.workflow.langgraph_runtime.project_access import (
+            ProjectAccessCoordinator,
+        )
+        from pathlib import Path
+        import subprocess
+
+        root = Path(self.temp.name)
+        project = root / "too-long"
+        project.mkdir()
+        for argv in (
+            ("git", "init", "--initial-branch=main"),
+            ("git", "config", "user.email", "t@e.com"),
+            ("git", "config", "user.name", "T"),
+        ):
+            subprocess.run(argv, cwd=project, capture_output=True, check=True)
+        (project / "seed.txt").write_text("seed\n")
+        subprocess.run(("git", "add", "-A"), cwd=project, capture_output=True, check=True)
+        subprocess.run(
+            ("git", "commit", "-m", "init"), cwd=project,
+            capture_output=True, check=True,
+        )
+        registry = ProjectOccupancyRegistry(root / "occ-too-long")
+        holder = ProjectAccessCoordinator(
+            project, registry=registry, write_granted=True,
+        )
+        holder.acquire("holder", ProjectAccessNeed(required=True, write=True))
+        self.addCleanup(holder.release, "holder", "completed")
+        self.service.project_access = ProjectAccessCoordinator(
+            project, registry=registry, write_granted=True,
+        )
+        self.service._project_need = lambda ir: ProjectAccessNeed(
+            required=True, write=True,
+        )
+        run = self.service.start(
+            "workflow:linear", {"value": 1}, idempotency_key="too-long",
+            actor="local",
+        )
+        # Backdated rather than waited for: the limit is hours, and a test
+        # that spent them would be measuring the clock, not the queue.
+        with self.service._connect() as connection:
+            connection.execute(
+                "UPDATE langgraph_project_waiters SET enqueued_at='2000-01-01T00:00:00Z'"
+                " WHERE run_id=?", (run.run_id,),
             )
-        self.assertIn("someone-else", str(caught.exception))
-        # And no durable Run was left behind to explain it.
-        self.assertEqual([], list(self.service.list_runs()))
+            connection.commit()
+
+        self.service._wake_next_for_project()
+        self.service.recover_due()
+
+        settled = self.service.get(run.run_id)
+        self.assertEqual("failed", settled.status)
+        self.assertIn("still held", settled.error or "")
+        with self.service._connect() as connection:
+            self.assertEqual([], connection.execute(
+                "SELECT run_id FROM langgraph_project_waiters"
+            ).fetchall())
+
+    def test_a_cancelled_run_leaves_the_line(self) -> None:
+        """Nothing else would ever take it out: it is waiting, not running."""
+
+        from orbit.platform.project_occupancy import ProjectOccupancyRegistry
+        from orbit.workflow.langgraph_runtime.project_access import (
+            ProjectAccessCoordinator,
+        )
+        from pathlib import Path
+        import subprocess
+
+        root = Path(self.temp.name)
+        project = root / "leaving"
+        project.mkdir()
+        for argv in (
+            ("git", "init", "--initial-branch=main"),
+            ("git", "config", "user.email", "t@e.com"),
+            ("git", "config", "user.name", "T"),
+        ):
+            subprocess.run(argv, cwd=project, capture_output=True, check=True)
+        (project / "seed.txt").write_text("seed\n")
+        subprocess.run(("git", "add", "-A"), cwd=project, capture_output=True, check=True)
+        subprocess.run(
+            ("git", "commit", "-m", "init"), cwd=project,
+            capture_output=True, check=True,
+        )
+        registry = ProjectOccupancyRegistry(root / "occ-leaving")
+        holder = ProjectAccessCoordinator(
+            project, registry=registry, write_granted=True,
+        )
+        holder.acquire("holder", ProjectAccessNeed(required=True, write=True))
+        self.addCleanup(holder.release, "holder", "completed")
+        self.service.project_access = ProjectAccessCoordinator(
+            project, registry=registry, write_granted=True,
+        )
+        self.service._project_need = lambda ir: ProjectAccessNeed(
+            required=True, write=True,
+        )
+        run = self.service.start(
+            "workflow:linear", {"value": 1}, idempotency_key="leaving",
+            actor="local",
+        )
+
+        cancelled = self.service.cancel(
+            run.run_id, expected_revision=run.revision,
+            idempotency_key="cancel-leaving", actor="local",
+        )
+
+        self.assertEqual("cancelled", cancelled.status)
+        with self.service._connect() as connection:
+            self.assertEqual([], connection.execute(
+                "SELECT run_id FROM langgraph_project_waiters"
+            ).fetchall())
 
     def test_a_start_is_refused_when_write_was_not_granted(self) -> None:
         from orbit.workflow.langgraph_runtime.service import LangGraphRunConflict

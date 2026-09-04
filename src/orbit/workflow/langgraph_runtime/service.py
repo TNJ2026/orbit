@@ -41,6 +41,29 @@ BACKGROUND_WORKERS = 8
 IR_CACHE_SIZE = 64
 
 
+# How long a run may queue for the project directory before the wait is
+# called off. A bound rather than none, because "waiting" that can never end
+# is a failure wearing a hopeful status: the holder may be a run nobody will
+# ever answer, and a queue nobody empties is worse than a refusal somebody
+# reads. Generous, because the thing being waited for is another person's
+# work finishing.
+PROJECT_WAIT_LIMIT_SECONDS = 6 * 60 * 60
+# How long a waiting run leaves before looking again on its own. The ordinary
+# wake-up is the holder releasing, which sets this run's timer due
+# immediately; this is only the fallback for the release nobody delivered —
+# a Runtime that died holding the claim, or a claim resolved by an operator.
+PROJECT_WAIT_POLL_SECONDS = 30
+
+
+class _ProjectHeld(Exception):
+    """Somebody else has the project, and this run may queue behind them.
+
+    Deliberately not a `LangGraphRunConflict`: that is the answer for a run
+    that cannot proceed at all, and this one can — later. Kept internal, so
+    the only decision a caller makes with it is to wait.
+    """
+
+
 def _has_checkpoint_schema(connection: sqlite3.Connection) -> bool:
     return connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='checkpoints'"
@@ -434,6 +457,9 @@ class LangGraphWorkflowService:
                     error TEXT,updated_at TEXT NOT NULL,
                     handler_name TEXT NOT NULL DEFAULT '',execution_ref TEXT,
                     execution_owner TEXT
+                );
+                CREATE TABLE IF NOT EXISTS langgraph_project_waiters (
+                    run_id TEXT PRIMARY KEY,enqueued_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS langgraph_timers (
                     timer_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,node_id TEXT NOT NULL,
@@ -1432,6 +1458,13 @@ class LangGraphWorkflowService:
             connection.execute(
                 "UPDATE langgraph_timers SET status='cancelled'"
                 " WHERE run_id=? AND status IN ('scheduled','firing')", (run_id,),
+            )
+            # A run queued for the project leaves the line here and nowhere
+            # else. Cancelling is the only way out of that queue that does not
+            # pass through `_settle`, and a waiter left behind would hold a
+            # place for a run that is over.
+            connection.execute(
+                "DELETE FROM langgraph_project_waiters WHERE run_id=?", (run_id,),
             )
             connection.execute(
                 "INSERT INTO langgraph_run_receipts VALUES (?,?,?)",
@@ -2541,11 +2574,19 @@ class LangGraphWorkflowService:
         return need if need.required else None
 
     def _require_project_available(self, need) -> None:
-        """Refuse a start the project cannot accept, before a Run exists.
+        """Refuse a start the project can never accept, before a Run exists.
 
         Only a look, not a claim: `_execute` takes the directory when
         execution actually begins. Asking here keeps a workflow that could
         never run from leaving a durable Run behind to explain itself.
+
+        *Never*, not *not yet*. A project somebody else is holding used to be
+        refused here too, which meant the second person to ask was told to
+        come back and try again by hand — for a wait the Runtime is perfectly
+        able to do itself. Being held is now a queue (`_queue_for_project`),
+        and what is still refused is what waiting cannot fix: a Runtime that
+        was not started to grant what the workflow asks, or a project that
+        cannot be given a way back.
         """
 
         from ...workspace.recovery import RecoveryPointError
@@ -2558,15 +2599,6 @@ class LangGraphWorkflowService:
             self.project_access.preflight(need)
         except (RecoveryPointError, ProjectAccessUnavailable) as exc:
             raise LangGraphRunConflict(str(exc)) from exc
-        blockers = self.project_access.registry.blocked_by(
-            self.project_access.project_root
-        )
-        if blockers:
-            held = blockers[0]
-            raise LangGraphRunConflict(
-                f"project {self.project_access.project_root} is held by run "
-                f"{held.run_id!r}"
-            )
 
     def _claim_project(self, run_id: str, ir) -> None:
         need = self._project_need(ir)
@@ -2576,8 +2608,16 @@ class LangGraphWorkflowService:
         from ...workspace.recovery import RecoveryPointError
         from .project_access import ProjectAccessUnavailable
 
+        from ...platform.project_occupancy import ProjectBusy
+
         try:
             self.project_access.acquire(run_id, need)
+        except ProjectBusy as exc:
+            # Held, which is a queue rather than a refusal — §the wait table.
+            # Only this one: `ProjectNeedsRecovery` means the claim on record
+            # cannot be trusted, and waiting for a person to resolve it is
+            # not something a run should do silently.
+            raise _ProjectHeld(str(exc)) from exc
         except (ProjectOccupancyError, RecoveryPointError) as exc:
             # Both are outcomes rather than crashes: the project is held by
             # somebody, or it cannot be given a way back. §6.2 refuses the run
@@ -2616,8 +2656,139 @@ class LangGraphWorkflowService:
             # recovered after a restart, needs the directory again just as
             # much as it did the first time; the registry treats a second
             # claim by the same run as the one it already holds.
-            self._claim_project(run_id, ir)
+            try:
+                self._claim_project(run_id, ir)
+            except _ProjectHeld as held:
+                return self._queue_for_project(run_id, str(held))
             return self._drive(run_id, ir, row["owner_actor"], inputs, resume)
+
+    def _queue_for_project(self, run_id: str, reason: str) -> LangGraphRun:
+        """Park this run behind whoever holds the project.
+
+        A wait, not a thread: the few `_background_worker` threads are shared
+        with every workflow in this Runtime, so a run blocking one of them
+        until a project came free would stop workflows that never touch the
+        project from running at all. What waits here is the *run* — durable,
+        `waiting`, with a timer — which is the same shape a retry already
+        takes and the same shape a cancel already understands.
+
+        Order is the enqueue time, so the queue is the one a person would
+        expect. It is a queue within this Runtime: two Runtimes serving
+        overlapping project roots still exclude each other through the
+        registry, but nothing orders them against each other, and this does
+        not pretend to.
+        """
+
+        now = self._stamp()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT enqueued_at FROM langgraph_project_waiters WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    "INSERT INTO langgraph_project_waiters(run_id,enqueued_at)"
+                    " VALUES (?,?)", (run_id, now),
+                )
+            enqueued_at = now if row is None else str(row["enqueued_at"])
+            connection.commit()
+        if self._waited_seconds(enqueued_at, now) > PROJECT_WAIT_LIMIT_SECONDS:
+            self._leave_project_queue(run_id)
+            return self._settle(
+                run_id, "failed",
+                error=(
+                    f"waited {PROJECT_WAIT_LIMIT_SECONDS}s for the project "
+                    f"and it was still held: {reason}"
+                ),
+            )
+        due_at, timer_id = self._schedule_project_wait(run_id)
+        return self._settle(
+            run_id, "waiting",
+            interrupts=({
+                "type": "project_wait", "timer_id": timer_id,
+                "due_at": due_at, "enqueued_at": enqueued_at,
+                "reason": reason,
+            },),
+        )
+
+    @staticmethod
+    def _waited_seconds(enqueued_at: str, now: str) -> float:
+        def parsed(value: str) -> datetime | None:
+            try:
+                return datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+
+        start, end = parsed(enqueued_at), parsed(now)
+        # An unreadable stamp is not evidence that the limit was passed. The
+        # queue then ends by the holder finishing or by a cancel, which are
+        # the two ways out that never depended on this arithmetic.
+        if start is None or end is None:
+            return 0.0
+        return (end - start).total_seconds()
+
+    def _schedule_project_wait(self, run_id: str) -> tuple[str, str]:
+        """The next time this run looks again, and the timer that says so."""
+
+        due = self.clock().astimezone(timezone.utc) + timedelta(
+            seconds=PROJECT_WAIT_POLL_SECONDS
+        )
+        due_at = due.isoformat(timespec="microseconds").replace("+00:00", "Z")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            # One timer per look. `attempt_number` counts them because the
+            # table's uniqueness is `(run_id, purpose, target_id,
+            # attempt_number)`, and a single reused row would make the second
+            # wait a no-op the way it once did for join deadlines in a loop.
+            attempt_number = int(connection.execute(
+                "SELECT COUNT(*) FROM langgraph_timers"
+                " WHERE run_id=? AND purpose='project_wait'", (run_id,),
+            ).fetchone()[0]) + 1
+            timer_id = f"langgraph_timer:{run_id}:project_wait:{attempt_number}"
+            connection.execute(
+                "INSERT OR IGNORE INTO langgraph_timers("
+                "timer_id,run_id,node_id,attempt_number,due_at,status,purpose,"
+                "target_id) VALUES (?,?,'',?,?,'scheduled','project_wait','')",
+                (timer_id, run_id, attempt_number, due_at),
+            )
+            connection.commit()
+        return due_at, timer_id
+
+    def _leave_project_queue(self, run_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM langgraph_project_waiters WHERE run_id=?", (run_id,)
+            )
+            connection.commit()
+
+    def _wake_next_for_project(self) -> str | None:
+        """Bring the head of the queue's next look forward to now.
+
+        Called where the project goes back. Waking one rather than all of
+        them: the others' own timers still fire, so a wake that is lost to a
+        crash costs a poll interval rather than the queue.
+        """
+
+        now = self._stamp()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT w.run_id FROM langgraph_project_waiters w"
+                " JOIN langgraph_runs r ON r.run_id=w.run_id"
+                " WHERE r.status='waiting'"
+                " ORDER BY w.enqueued_at,w.run_id LIMIT 1",
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                return None
+            connection.execute(
+                "UPDATE langgraph_timers SET due_at=?"
+                " WHERE run_id=? AND purpose='project_wait' AND status='scheduled'",
+                (now, str(row["run_id"])),
+            )
+            connection.commit()
+        return str(row["run_id"])
 
     def _drive(self, run_id, ir, owner_actor, inputs, resume) -> LangGraphRun:
         config = {"configurable": {
@@ -2789,6 +2960,14 @@ class LangGraphWorkflowService:
                     " WHERE run_id=? AND status IN ('scheduled','firing')",
                     (run_id,),
                 )
+                # A run that is over is not waiting for anything, whichever
+                # way it ended. Cancelling one that had queued for the
+                # project is the case this exists for: nothing else would
+                # ever take it out of the line.
+                connection.execute(
+                    "DELETE FROM langgraph_project_waiters WHERE run_id=?",
+                    (run_id,),
+                )
             # The project goes back here and nowhere else: this is the single
             # funnel every status change passes through, and `unknown` is
             # deliberately not among the statuses that release it.
@@ -2813,6 +2992,7 @@ class LangGraphWorkflowService:
                         connection.commit()
                     if self.project_access is not None:
                         self.project_access.release(run_id, "cancelled")
+                        self._wake_next_for_project()
                     return current
                 raise LookupError(f"LangGraph run not found: {run_id}")
             self._append_event(connection, run_id)
@@ -2825,6 +3005,13 @@ class LangGraphWorkflowService:
             connection.commit()
         if self.project_access is not None:
             self.project_access.release(run_id, status)
+            # Whoever is next in line looks again now rather than at their own
+            # next poll — but only where something was actually handed back.
+            # Waking on every settle woke the run that had just queued, one
+            # line after it set its own timer: it looked again immediately,
+            # found the project still held, and queued again.
+            if status in RELEASING_STATUSES:
+                self._wake_next_for_project()
         return self.get(run_id)
 
     def project_summary(self, run_id: str) -> Mapping[str, Any] | None:
