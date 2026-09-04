@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from orbit.hub import (
-    HubError, MultipleRuntimesError, WorkspaceRegistry,
+    HubError, MultipleRuntimesError, ProjectAccessGrants, WorkspaceRegistry,
     WorkspaceRuntimeManager, create_hub_app, workspace_urls,
 )
 from orbit.global_control import WorkflowTemplateStore
@@ -162,6 +162,149 @@ class WorkspaceRegistryTests(unittest.TestCase):
             },
             workspace_urls("abc"),
         )
+
+
+class ProjectAccessGrantTests(unittest.TestCase):
+    """The one route an operator's consent has into a Hub-started Runtime.
+
+    `orbit serve --agent-project-access` decides whether a `workspace_access`
+    policy can be satisfied at all, and the Hub writes the whole argv of every
+    Runtime it launches. Until this, the switch was unreachable through the
+    ordinary way of starting Orbit, and a workflow declaring the policy was
+    refused on a Runtime that could never have been started to allow it.
+    """
+
+    def manager(self, root: Path, grants: ProjectAccessGrants):
+        registry = WorkspaceRegistry(root / "workspaces.json")
+        (root / "project").mkdir(exist_ok=True)
+        identifier, workspace = registry.register(root / "project")
+        return identifier, workspace, WorkspaceRuntimeManager(
+            registry=registry, grants=grants, runtime_discovery=lambda: (),
+            health_check=lambda _url: True, launcher=lambda _path: None,
+        )
+
+    def test_a_workspace_without_the_grant_is_started_without_the_switch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            grants = ProjectAccessGrants(root / "project-access.json")
+            _identifier, workspace, manager = self.manager(root, grants)
+
+            arguments = manager._serve_arguments(workspace)
+
+            self.assertNotIn("--agent-project-access", arguments)
+            self.assertIn("--project-root", arguments)
+
+    def test_a_granted_workspace_carries_the_switch_into_its_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            grants = ProjectAccessGrants(root / "project-access.json")
+            identifier, workspace, manager = self.manager(root, grants)
+            grants.set(identifier, allowed=True)
+
+            self.assertIn("--agent-project-access", manager._serve_arguments(workspace))
+
+    def test_the_grant_is_taken_back_by_asking(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            grants = ProjectAccessGrants(root / "project-access.json")
+            identifier, workspace, manager = self.manager(root, grants)
+            grants.set(identifier, allowed=True)
+            grants.set(identifier, allowed=False)
+
+            self.assertFalse(grants.granted(identifier))
+            self.assertNotIn(
+                "--agent-project-access", manager._serve_arguments(workspace)
+            )
+
+    def test_the_grant_survives_a_re_registration(self) -> None:
+        """Registering happens on every start; permission must not ride on it.
+
+        `start-orbit.sh` runs `hub register` each time, and the Workspace
+        registry is rewritten by it. A grant kept in that file would be
+        revoked by the next ordinary start, silently.
+        """
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            grants = ProjectAccessGrants(root / "project-access.json")
+            identifier, _workspace, _manager = self.manager(root, grants)
+            grants.set(identifier, allowed=True)
+
+            registry = WorkspaceRegistry(root / "workspaces.json")
+            registry.register(root / "project")
+
+            self.assertTrue(
+                ProjectAccessGrants(root / "project-access.json").granted(identifier)
+            )
+
+    def test_only_a_true_in_the_file_is_consent(self) -> None:
+        """Anything else on disk is not a grant, however suggestive it looks."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "project-access.json"
+            path.write_text(json.dumps({"project_access": {
+                "yes": True, "truthy": 1, "worded": "true", "off": False,
+            }}), encoding="utf-8")
+            grants = ProjectAccessGrants(path)
+
+            self.assertTrue(grants.granted("yes"))
+            for identifier in ("truthy", "worded", "off", "absent"):
+                with self.subTest(identifier=identifier):
+                    self.assertFalse(grants.granted(identifier))
+
+    def test_a_damaged_file_grants_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "project-access.json"
+            path.write_text("{not json", encoding="utf-8")
+
+            self.assertFalse(ProjectAccessGrants(path).granted("anything"))
+
+    def test_the_cli_records_the_decision_and_reports_it_every_time(self) -> None:
+        """Through the entry point an operator actually types.
+
+        Reported on every registration rather than only when it changes:
+        `hub register` is what `start-orbit.sh` runs, so it is the one moment
+        the person opening a Workspace is told whether a workflow in it can
+        read the project.
+        """
+
+        import subprocess
+        import sys
+
+        repository = Path(__file__).resolve().parents[1]
+
+        def register(*flags: str) -> dict:
+            result = subprocess.run(
+                [sys.executable, "-m", "orbit", "hub", "register",
+                 str(workspace), *flags],
+                capture_output=True, text=True, timeout=120,
+                env={
+                    "PYTHONPATH": str(repository / "src"),
+                    "PATH": "/usr/bin:/bin",
+                    "ORBIT_HUB_ROOT": str(hub_root),
+                },
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            return json.loads(result.stdout)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            hub_root = root / "hub"
+            workspace = root / "project"
+            workspace.mkdir()
+
+            plain = register()
+            granted = register("--agent-project-access")
+            # The ordinary start that happens every time: it must not be a
+            # silent revocation.
+            again = register()
+            revoked = register("--no-agent-project-access")
+
+            self.assertFalse(plain["agent_project_access"])
+            self.assertTrue(granted["agent_project_access"])
+            self.assertTrue(again["agent_project_access"])
+            self.assertFalse(revoked["agent_project_access"])
+            self.assertEqual(plain["workspace_id"], granted["workspace_id"])
 
 
 class WorkspaceRuntimeManagerTests(unittest.TestCase):

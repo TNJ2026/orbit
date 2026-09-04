@@ -197,6 +197,66 @@ class WorkspaceRegistry:
         raise HubError("workspace_id, path, or name is required")
 
 
+class ProjectAccessGrants:
+    """Which Workspaces an operator has agreed to hand real project files.
+
+    `orbit serve --agent-project-access` is the switch that decides this, and
+    a Runtime the Hub starts is never typed by anybody: `_serve_arguments`
+    writes its whole argv. So a workflow node declaring a `workspace_access`
+    policy was refused on every Runtime the Hub had ever launched — the
+    capability existed and the ordinary way of starting Orbit could not reach
+    it. Consent is recorded here instead, and turned into that switch at
+    launch.
+
+    Per Workspace, because it is a decision about one project rather than
+    about Orbit, and durable, because the Hub relaunches Runtimes without
+    asking again. Kept apart from `workspaces.json`: that file is routing and
+    is rewritten by every `hub register`, and permission that a routine
+    re-registration could silently drop is not permission.
+    """
+
+    def __init__(self, path: Path | str | None = None) -> None:
+        self.path = Path(
+            path or default_hub_root() / "project-access.json"
+        ).expanduser()
+        self._lock = threading.Lock()
+
+    def granted(self, identifier: str) -> bool:
+        return bool(self._read().get(identifier))
+
+    def set(self, identifier: str, *, allowed: bool) -> None:
+        with self._lock:
+            entries = self._read()
+            if allowed:
+                entries[identifier] = True
+            else:
+                entries.pop(identifier, None)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_suffix(f".{os.getpid()}.tmp")
+            temporary.write_text(
+                json.dumps({"project_access": entries}, indent=2, sort_keys=True)
+                + "\n",
+                encoding="utf-8",
+            )
+            temporary.replace(self.path)
+
+    def _read(self) -> dict[str, bool]:
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {}
+        values = payload.get("project_access", {}) if isinstance(payload, dict) else {}
+        if not isinstance(values, dict):
+            return {}
+        # Only `true` is a grant. A file edited by hand into something else is
+        # not consent, and reading it as one is the failure this whole switch
+        # exists to make impossible.
+        return {
+            str(key): True for key, value in values.items()
+            if isinstance(key, str) and value is True
+        }
+
+
 def workspace_urls(identifier: str, hub_url: str = "http://127.0.0.1:8848") -> dict[str, str]:
     base = hub_url.rstrip("/") + f"/workspaces/{identifier}"
     events = base.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
@@ -220,8 +280,10 @@ class WorkspaceRuntimeManager:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         log_root: Path | str | None = None,
+        grants: ProjectAccessGrants | None = None,
     ) -> None:
         self.registry = registry or WorkspaceRegistry()
+        self.grants = grants or ProjectAccessGrants()
         self.runtime_discovery = runtime_discovery
         self.launcher = launcher or self._launch
         self.health_check = health_check or self._healthy
@@ -298,6 +360,23 @@ class WorkspaceRuntimeManager:
 
         return self._find(Path(workspace).expanduser())
 
+    def _serve_arguments(self, workspace: Path) -> list[str]:
+        """The whole argv a workspace Runtime is started with.
+
+        Its own method because it is the only place an operator's consent can
+        reach a Runtime the Hub launches. Nobody is at a prompt to type
+        `--agent-project-access`, so a Workspace it was granted for carries
+        it here or the grant may as well not exist.
+        """
+
+        arguments = [
+            sys.executable, "-m", "orbit", "serve", "--host", "127.0.0.1",
+            "--port", "0", "--project-root", str(workspace),
+        ]
+        if self.grants.granted(project_id(workspace)):
+            arguments.append("--agent-project-access")
+        return arguments
+
     def _launch(self, workspace: Path) -> subprocess.Popen:
         identifier = project_id(workspace)
         directory = self.log_root / identifier
@@ -306,8 +385,7 @@ class WorkspaceRuntimeManager:
         stderr = (directory / "stderr.log").open("ab")
         try:
             return subprocess.Popen(
-                [sys.executable, "-m", "orbit", "serve", "--host", "127.0.0.1",
-                 "--port", "0", "--project-root", str(workspace)],
+                self._serve_arguments(workspace),
                 cwd=workspace,
                 env={**os.environ, "ORBIT_HUB_CHILD": "1"},
                 stdin=subprocess.DEVNULL,

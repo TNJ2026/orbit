@@ -997,6 +997,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hub_register = hub_sub.add_parser("register", help="Register a workspace and print its URLs")
     hub_register.add_argument("workspace")
+    hub_register.add_argument(
+        "--agent-project-access",
+        dest="project_access", action="store_true", default=None,
+        help=(
+            "Remember that this workspace may hand real project files to a "
+            "workflow node declaring a workspace_access policy, and start its "
+            "Runtimes with --agent-project-access from now on. Recorded "
+            "rather than applied: an ordinary re-registration leaves the "
+            "decision alone, and a Runtime already running keeps whatever it "
+            "was started with until it is restarted."
+        ),
+    )
+    hub_register.add_argument(
+        "--no-agent-project-access",
+        dest="project_access", action="store_false",
+        help="Take that permission back. The next Runtime start is without it.",
+    )
     hub_forget = hub_sub.add_parser(
         "forget",
         help="Drop one workspace registration; the directory and any Runtime stay",
@@ -1184,14 +1201,27 @@ def main() -> None:
 
     if args.command == "hub":
         from .hub import (
-            WorkspaceRegistry, WorkspaceRuntimeManager, create_hub_app, workspace_urls,
+            ProjectAccessGrants, WorkspaceRegistry, WorkspaceRuntimeManager,
+            create_hub_app, workspace_urls,
         )
         from .platform.projects import project_id, resolve_project_root
 
         registry = WorkspaceRegistry()
         if args.hub_action == "register":
             identifier, _ = registry.register(args.workspace)
-            print(json.dumps(workspace_urls(identifier), sort_keys=True))
+            grants = ProjectAccessGrants()
+            if args.project_access is not None:
+                grants.set(identifier, allowed=args.project_access)
+            # Reported on every registration, not only when it changes: this
+            # is the one place the operator sees whether the Workspace they
+            # just opened will let a workflow read the project it runs in.
+            print(json.dumps(
+                {
+                    **workspace_urls(identifier),
+                    "agent_project_access": grants.granted(identifier),
+                },
+                sort_keys=True,
+            ))
             return
         if args.hub_action == "forget":
             # By id or by path, because the caller that most wants to undo a
