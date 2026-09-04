@@ -162,6 +162,38 @@ class HumanReworkTests(unittest.TestCase):
             self.order(graph, config),
         )
 
+    def test_a_new_generation_does_not_inherit_the_last_ones_outputs(self) -> None:
+        """A back edge ends a generation, and that generation's outputs end with it.
+
+        `review_context` joins the rendered document with the review decision.
+        Both were still in `node_outputs` when a rejection sent the run back to
+        `draft`, so on the next generation that join was satisfied the moment
+        `render` finished — by the *previous* reviewer's submission — and ran
+        again before anybody had been asked anything. A plain chain overwrites
+        those values in order and hides it; a join is what makes it visible,
+        which is why this fixture has one.
+
+        Named for the defect rather than left to the tests above, because what
+        catches it is the shape of this workflow: simplify the fixture and
+        those tests keep passing while the coverage quietly goes.
+        """
+
+        graph, config = self.started()
+
+        self.submit(graph, config, "reject", "再写一版")
+
+        order = self.order(graph, config)
+        self.assertEqual(1, order.count("review_context"), order)
+        # Waiting on the person again, not past them.
+        self.assertEqual(("review",), graph.graph.get_state(config).next)
+        held = graph.graph.get_state(config).values["node_outputs"]
+        for node_id in ("review", "review_context"):
+            with self.subTest(node=node_id):
+                self.assertNotIn(node_id, held)
+        # And the one output the back edge itself maps from survives, or there
+        # would be no reason to carry across it.
+        self.assertIn("route_review", held)
+
     def test_an_approval_finishes_the_run_at_its_terminal(self) -> None:
         graph, config = self.started()
 

@@ -301,7 +301,17 @@ class LangGraphHandlerRegistry:
 
 
 def _merge_dicts(left: Mapping[str, Any], right: Mapping[str, Any]) -> dict[str, Any]:
-    """Merge parallel results and let a new loop generation invalidate old state."""
+    """Merge parallel results, where `None` on the right *removes* a key.
+
+    The reducer for `node_outputs`, `node_routes` and `join_deadlines`. The
+    removal is how a back edge ends a generation: the outputs below its target
+    have to stop existing, not merely be overwritten later, or a join reads
+    them as this generation's. Nothing else writes `None` — an output is a
+    mapping, a route is a string and a deadline is a boolean, so the sentinel
+    can never collide with a value one of those channels meant to store. A
+    channel that later wants `None` to *mean* something needs its own reducer
+    rather than this one.
+    """
 
     merged = dict(left)
     for key, value in right.items():
@@ -1517,10 +1527,13 @@ def compile_workflow(
                             if nodes_by_id[node_id].handler is not None
                         },
                     )
+            # Empty unless a back edge was actually taken: `union` of nothing
+            # is the empty set, so the guard that used to precede this asked
+            # the same question twice.
             invalidated = set().union(*(
                 back_edge_invalidations.get(edge.id, frozenset())
                 for edge in selected_for_route if edge.back_edge
-            )) if any(edge.back_edge for edge in selected_for_route) else set()
+            ))
             return {
                 "node_outputs": {
                     **{node_id: None for node_id in invalidated},
