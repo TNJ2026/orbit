@@ -3263,6 +3263,61 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             checkpoint_db_path=Path(directory) / "langgraph-checkpoints.sqlite3",
         )
 
+    def test_confirmed_delegation_result_can_resume_an_unknown_run(self) -> None:
+        action = node("delegated", inputs=("value",), outputs=("value",))
+        terminal = node(
+            "terminal", inputs=("value",), kind="terminal", handler=False,
+        )
+        ir = workflow(
+            (action, terminal), (edge("done", "delegated", "terminal"),),
+            entry=("delegated",), terminals=("terminal",),
+            result=("delegated", "value"),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("delegated", lambda values, config, context: dict(values)),
+        ])
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            store = self.publish(directory, ir)
+            service = self.service(directory, store, registry)
+            original = service.start(
+                ir.workflow_id, {"value": 7}, idempotency_key="delegation-run",
+                actor="session:app",
+            )
+            delegation_id = "app_delegation:verified"
+            attempt_id = f"langgraph_attempt:{original.run_id}:delegated:1"
+            with service._connect() as connection:
+                connection.execute(
+                    "UPDATE langgraph_runs SET status='unknown',error='lost result'"
+                    " WHERE run_id=?", (original.run_id,),
+                )
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS langgraph_handler_attempts("
+                    "attempt_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,node_id TEXT NOT NULL,"
+                    "status TEXT NOT NULL,output_json TEXT,error TEXT,updated_at TEXT NOT NULL,"
+                    "handler_name TEXT NOT NULL DEFAULT '',execution_ref TEXT,"
+                    "execution_owner TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO langgraph_handler_attempts VALUES "
+                    "(?,?,?,'unknown',NULL,'lost',?,'app.delegate',?,NULL)",
+                    (attempt_id, original.run_id, "delegated",
+                     datetime.now(timezone.utc).isoformat(), delegation_id),
+                )
+                connection.commit()
+            recovered = service.resolve_unknown_delegation(
+                delegation_id, actor="session:app",
+                outcome="confirmed_succeeded", result={"value": 7},
+            )
+            with service._connect() as connection:
+                attempt = connection.execute(
+                    "SELECT status,output_json FROM langgraph_handler_attempts"
+                    " WHERE attempt_id=?", (attempt_id,),
+                ).fetchone()
+
+        self.assertEqual("completed", recovered.status)
+        self.assertEqual("succeeded", attempt["status"])
+        self.assertEqual({"result": {"value": 7}}, json.loads(attempt["output_json"]))
+
     def test_a_run_that_cannot_satisfy_completion_is_answered_not_raised(
         self,
     ) -> None:

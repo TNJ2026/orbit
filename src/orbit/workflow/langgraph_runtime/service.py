@@ -671,17 +671,6 @@ class LangGraphWorkflowService:
         record = self._workflow(workflow_id, workflow_version, starting=True)
         ir, binding = self._bound(record.ir)
         inputs = _bind_goal_input(ir, inputs, goal)
-        # Validate before a durable Run (and its MCP App card) exists. When
-        # deferred execution used to discover a missing or unknown input in
-        # the background, the caller could only recover by starting another
-        # Run, leaving one card per rejected attempt in the conversation.
-        compile_workflow(ir, self.handlers).validate_inputs(inputs)
-        # Before the durable Run exists, like the input validation above: a
-        # workflow that cannot have the project directory should not leave a
-        # Run (and its card) behind explaining that it could not start.
-        need = self._project_need(ir)
-        if need:
-            self._require_project_available(need)
         request = {
             "workflow_id": workflow_id,
             "workflow_version": record.version.value,
@@ -699,6 +688,38 @@ class LangGraphWorkflowService:
             # every earlier build did and receipts written then still replay.
             request["agent_binding"] = binding.identity
         request_hash = definition_hash(request).value
+
+        # Resolve a replay before anything may refuse to compile the graph it
+        # would hand back. Rebinding moves a step to a Handler this Runtime
+        # may not have registered, and compiling the moved graph to answer an
+        # idempotent replay would fail for a reason that is not the replay's —
+        # the hash already knows whether this key started the run, and that is
+        # the conflict the caller is asking about.
+        with self._connect() as connection:
+            receipt = connection.execute(
+                "SELECT request_hash,run_id FROM langgraph_run_receipts"
+                " WHERE idempotency_key=?",
+                (idempotency_key,),
+            ).fetchone()
+        if receipt is not None:
+            if receipt["request_hash"] != request_hash:
+                raise LangGraphRunConflict(
+                    "idempotency key was already used for another request"
+                )
+            return self.get(receipt["run_id"])
+
+        # Validate before a durable Run (and its MCP App card) exists. When
+        # deferred execution used to discover a missing or unknown input in
+        # the background, the caller could only recover by starting another
+        # Run, leaving one card per rejected attempt in the conversation.
+        compile_workflow(ir, self.handlers).validate_inputs(inputs)
+        # Before the durable Run exists, like the input validation above: a
+        # workflow that cannot have the project directory should not leave a
+        # Run (and its card) behind explaining that it could not start.
+        need = self._project_need(ir)
+        if need:
+            self._require_project_available(need)
+
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             receipt = connection.execute(
@@ -1150,6 +1171,98 @@ class LangGraphWorkflowService:
             ).fetchone()
         inputs = None if has_checkpoint else json.loads(row["input_json"])
         return self._execute(run_id, self._run_ir(current), inputs=inputs)
+
+    def resolve_unknown_delegation(
+        self, delegation_id: str, *, actor: str, outcome: str,
+        result: Mapping[str, Any] | None = None, error: str | None = None,
+    ) -> LangGraphRun:
+        """Apply a verified App delegation outcome and continue its Run.
+
+        The queue records the operator's evidence first. This method joins that
+        evidence back to the durable Handler attempt. A confirmed success is
+        replayed from the journal into the existing checkpoint; the Agent is
+        never invoked a second time.
+        """
+
+        if outcome not in {"confirmed_succeeded", "confirmed_failed"}:
+            raise ValueError("unsupported delegation reconciliation outcome")
+        current = self.get_by_delegation(delegation_id, actor=actor)
+        if (
+            current.status == "completed" and outcome == "confirmed_succeeded"
+        ) or (current.status == "failed" and outcome == "confirmed_failed"):
+            return current
+        if current.status not in {"unknown", "running"}:
+            raise LangGraphRunConflict(
+                f"run {current.run_id} cannot reconcile a delegation from "
+                f"status {current.status}"
+            )
+        output = None if result is None else {"result": dict(result)}
+        if outcome == "confirmed_succeeded" and output is None:
+            raise ValueError("confirmed success requires the delegation result")
+        stamp = self._stamp()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            attempt = connection.execute(
+                "SELECT attempt_id,node_id,status FROM langgraph_handler_attempts"
+                " WHERE execution_ref=? AND handler_name IN"
+                " ('app.delegate','harness.subagent')",
+                (delegation_id,),
+            ).fetchone()
+            if attempt is None:
+                connection.rollback()
+                raise LookupError(f"delegation attempt not found: {delegation_id}")
+            target_status = (
+                "succeeded" if outcome == "confirmed_succeeded" else "failed"
+            )
+            if attempt["status"] not in {"unknown", target_status}:
+                connection.rollback()
+                raise LangGraphRunConflict(
+                    f"delegation attempt has {attempt['status']} outcome"
+                )
+            connection.execute(
+                "UPDATE langgraph_handler_attempts SET status=?,output_json=?,error=?,"
+                "updated_at=? WHERE attempt_id=?",
+                (
+                    target_status,
+                    None if output is None else canonical_json(output),
+                    None if output is not None else (error or "delegation confirmed failed"),
+                    stamp, attempt["attempt_id"],
+                ),
+            )
+            append_event(
+                connection, current.run_id, f"langgraph_node.{target_status}",
+                occurred_at=stamp, node_id=attempt["node_id"],
+                attempt_id=attempt["attempt_id"],
+            )
+            if outcome == "confirmed_succeeded":
+                changed = connection.execute(
+                    "UPDATE langgraph_runs SET status='running',revision=revision+1,"
+                    "error=NULL,updated_at=? WHERE run_id=? AND status='unknown'",
+                    (stamp, current.run_id),
+                ).rowcount
+                if changed:
+                    self._append_event(connection, current.run_id)
+            connection.commit()
+        if outcome == "confirmed_failed":
+            return self._settle(
+                current.run_id, "failed",
+                error=error or "delegation confirmed failed",
+            )
+        return self.recover(current.run_id)
+
+    def get_by_delegation(
+        self, delegation_id: str, *, actor: str,
+    ) -> LangGraphRun:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT run_id FROM langgraph_handler_attempts"
+                " WHERE execution_ref=? AND handler_name IN"
+                " ('app.delegate','harness.subagent')",
+                (delegation_id,),
+            ).fetchone()
+        if row is None:
+            raise LookupError(f"delegation attempt not found: {delegation_id}")
+        return self.get(str(row["run_id"]), actor=actor)
 
     def _schedule_join_deadlines(
         self, run_id: str, ir, *,
@@ -1821,7 +1934,9 @@ class LangGraphWorkflowService:
                         "delegation_id": fact.get("execution_ref"),
                     }
                     if status == "unknown"
-                    and fact.get("handler_name") == "harness.subagent"
+                    and fact.get("handler_name") in {
+                        "harness.subagent", "app.delegate",
+                    }
                     else None
                 ),
             })

@@ -889,7 +889,10 @@ def create_app(
 
     from ..workflow.application.authoring_job_service import AuthoringJobService
     from .api_v1 import authoring_timeout_seconds, build_api_v1
-    from .mcp import agent_tool_routes, build_mcp_dispatcher, mcp_routes
+    from .mcp import (
+        agent_tool_routes, background_delegation_routes, build_mcp_dispatcher,
+        mcp_routes,
+    )
 
     from importlib import resources as _resources
 
@@ -1149,6 +1152,8 @@ def create_app(
         # The fixed Hub owns the public MCP protocol. This private, loopback
         # backend exposes only the workspace's Agent tool catalog and calls.
         *agent_tool_routes(mcp_dispatch, authenticator=authenticator),
+        *(background_delegation_routes(delegation_queue)
+          if delegation_queue is not None else ()),
     ]
 
     # Durable notifications for Agent Apps. Frames are hints only: consumers

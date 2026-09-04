@@ -174,6 +174,8 @@ let OrbitRemoteService = (() => {
         /** The last thing that went wrong while writing a Workflow here. */
         authoringTrouble = new Map();
         bridgeDiagnostics = new Map();
+        /** Sessions whose model has already received the one-time recovery check. */
+        recoveryPromptedSessions = new Set();
         /** Deleted Workflows the panel still has to name, by Workspace and id. */
         retiredNames = new Map();
         hostSessions;
@@ -229,6 +231,7 @@ let OrbitRemoteService = (() => {
                     const session = context.agent?.session;
                     if (session === undefined)
                         return '';
+                    const sessionId = String(session.id);
                     // A delegated Session is never bridged — `sessionCanBridge` requires
                     // depth 0 — but it works in the same directory, calls the same tools,
                     // and `route` already resolves those by its cwd. Only the prompt went
@@ -243,9 +246,19 @@ let OrbitRemoteService = (() => {
                             : [...this.bridgedWorkspaces.values()].find(item => item.canonicalPath === session.header.cwd));
                     if (workspace === undefined)
                         return '';
+                    let recovery = '';
+                    if (!this.recoveryPromptedSessions.has(sessionId)) {
+                        this.recoveryPromptedSessions.add(sessionId);
+                        recovery = '[ORBIT SESSION RECOVERY]\nOn this Session\'s first user turn, call '
+                            + 'orbit_list_delegations once. If the returned list is empty, do not '
+                            + 'mention recovery. If it contains work, tell the user what is resumable '
+                            + 'and ask whether to continue or reconcile it. Never execute an unknown '
+                            + 'delegation again.';
+                    }
                     if (this.catalog.stale(workspace.canonicalPath))
                         this.refreshCatalog(workspace);
-                    return this.catalog.render(workspace.canonicalPath);
+                    return [recovery, this.catalog.render(workspace.canonicalPath)]
+                        .filter(Boolean).join('\n\n');
                 },
             }), 'orbit: runnable Workflows in the model context');
         }
@@ -573,6 +586,7 @@ let OrbitRemoteService = (() => {
             // Session for its diagnostics. Keeping the entry would grow this map by one
             // for every Session the Host ever opened.
             this.bridgeDiagnostics.delete(sessionId);
+            this.recoveryPromptedSessions.delete(sessionId);
             const workspace = this.bridgedWorkspaces.get(sessionId);
             this.bridgedWorkspaces.delete(sessionId);
             if (workspace !== undefined

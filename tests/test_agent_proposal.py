@@ -152,6 +152,7 @@ class PatchTests(unittest.TestCase):
             for relative in (
                 "src/orbit/workflow/catalogs/agent_discovery.py",
                 "src/orbit/web/app.py",
+                "src/orbit/web/mcp.py",
                 "src/orbit/web/builtin_handlers.py",
                 "src/orbit/workflow/handlers/agent.py",
                 "src/orbit/workspace/__init__.py",

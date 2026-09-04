@@ -51,6 +51,8 @@ export declare class OrbitRemoteService extends TypertRemoteService {
     /** The last thing that went wrong while writing a Workflow here. */
     private readonly authoringTrouble;
     private readonly bridgeDiagnostics;
+    /** Sessions whose model has already received the one-time recovery check. */
+    private readonly recoveryPromptedSessions;
     /** Deleted Workflows the panel still has to name, by Workspace and id. */
     private readonly retiredNames;
     private readonly hostSessions;

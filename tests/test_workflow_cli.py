@@ -163,6 +163,9 @@ class WorkflowCliTests(unittest.TestCase):
         self.assertEqual(
             self.db, create_app.call_args.kwargs["workflow_db_path"],
         )
+        handlers = create_app.call_args.kwargs["handlers"]
+        self.assertIn("app.delegate", {item.manifest.name for item in handlers})
+        self.assertIsNotNone(create_app.call_args.kwargs["delegation_queue"])
 
     def test_serve_reports_an_unusable_artifact_root_without_a_traceback(self) -> None:
         invalid_root = Path(self.temp_dir.name) / "not-a-directory"

@@ -168,7 +168,7 @@ class AuthoringServiceTests(unittest.TestCase):
         self.assertIn("There is no edge field named default", prompt)
         self.assertIn("at most one incoming non-back edge", prompt)
         self.assertIn("source.result.approved", prompt)
-        self.assertIn("never source.approved", prompt)
+        self.assertIn("never source.decision or source.result.approved", prompt)
         self.assertIn("top-level join policy", prompt)
         self.assertIn("must never form a cycle", prompt)
         self.assertIn("content_types:['text/markdown']", prompt)

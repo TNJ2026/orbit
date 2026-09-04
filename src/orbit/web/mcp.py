@@ -76,10 +76,18 @@ HARNESS_TOOL_NAMES = frozenset({
     "start_run", "resume_run", "cancel_run", "list_artifacts",
     "read_artifact", "read_artifact_content", "get_artifact_lineage",
     "configure_execution_lease", "claim_delegation", "renew_delegation",
-    "complete_delegation", "reconcile_delegation", "get_delegation_stats",
+    "complete_delegation", "list_delegations", "reconcile_delegation",
+    "get_delegation_stats",
 })
 OBJECT_OUTPUT_SCHEMA = {"type": "object"}
 MCP_ARTIFACT_CONTENT_MAX_BYTES = 2 * 1024 * 1024
+SESSION_RECOVERY_INSTRUCTIONS = (
+    "On the first user turn of each conversation, call list_delegations once "
+    "with its default arguments. If it returns no delegations, stay silent "
+    "about recovery. If it returns any, tell the user that Orbit has resumable "
+    "work and ask whether to continue or reconcile it. Never execute an unknown "
+    "delegation again."
+)
 
 
 class McpSessionRegistry:
@@ -870,8 +878,35 @@ def build_mcp_dispatcher(
                 },
             },
             {
+                "name": "list_delegations",
+                "description": (
+                    "Resume an interactive App workflow by listing this session's "
+                    "queued, leased, or unknown Agent delegations. Leased work is "
+                    "never reassigned after ambiguity; reconcile unknown work instead."
+                ),
+                "scope": READ_SCOPE,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "statuses": {
+                            "type": "array",
+                            "items": {"type": "string", "enum": [
+                                "queued", "leased", "succeeded", "failed",
+                                "cancelled", "unknown",
+                            ]},
+                            "maxItems": 6,
+                        },
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                    },
+                },
+            },
+            {
                 "name": "claim_delegation",
-                "description": "Lease the oldest queued Harness subagent delegation.",
+                "description": (
+                    "Lease the oldest queued Agent delegation for this App session. "
+                    "While following a Run, call this automatically and execute the "
+                    "returned request in the current conversation."
+                ),
                 "scope": WRITE_SCOPE,
                 "inputSchema": {
                     "type": "object",
@@ -884,7 +919,7 @@ def build_mcp_dispatcher(
             },
             {
                 "name": "renew_delegation",
-                "description": "Renew a Harness delegation lease and observe cancellation.",
+                "description": "Renew an Agent delegation lease and observe cancellation.",
                 "scope": WRITE_SCOPE,
                 "inputSchema": {
                     "type": "object",
@@ -897,13 +932,13 @@ def build_mcp_dispatcher(
             },
             {
                 "name": "complete_delegation",
-                "description": "Settle a leased Harness delegation exactly once.",
+                "description": "Submit the current App Agent's result for a leased delegation.",
                 "scope": WRITE_SCOPE,
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "delegation_id": {"type": "string"}, "worker_id": {"type": "string"},
-                        "result": {}, "error": {"type": "string"},
+                        "result": {"type": "object"}, "error": {"type": "string"},
                     },
                     "required": ["delegation_id", "worker_id"],
                 },
@@ -911,7 +946,7 @@ def build_mcp_dispatcher(
             {
                 "name": "reconcile_delegation",
                 "description": (
-                    "Record a human verdict for an unknown Harness delegation. "
+                    "Record a human verdict for an unknown Agent delegation. "
                     "This never retries or rewrites the original attempt."
                 ),
                 "scope": WRITE_SCOPE,
@@ -923,6 +958,8 @@ def build_mcp_dispatcher(
                             "confirmed_succeeded", "confirmed_failed",
                         ]},
                         "note": {"type": "string", "maxLength": 4000},
+                        "result": {"type": "object"},
+                        "error": {"type": "string"},
                         "idempotency_key": {"type": "string"},
                     },
                     "required": ["delegation_id", "outcome", "idempotency_key"],
@@ -930,13 +967,13 @@ def build_mcp_dispatcher(
             },
             {
                 "name": "get_delegation_stats",
-                "description": "Read actor-scoped Harness delegation counts.",
+                "description": "Read actor-scoped Agent delegation counts.",
                 "scope": READ_SCOPE,
                 "inputSchema": {"type": "object", "properties": {}},
             },
             {
                 "name": "prune_delegations",
-                "description": "Delete bounded old terminal Harness delegations.",
+                "description": "Delete bounded old terminal Agent delegations.",
                 "scope": OPS_WRITE_SCOPE,
                 "inputSchema": {
                     "type": "object",
@@ -960,6 +997,9 @@ def build_mcp_dispatcher(
             return {
                 "orbit_version": __version__,
                 "integration_protocol": "orbit-harness/1",
+                "integration_protocols": [
+                    "orbit-harness/1", "orbit-app-delegation/1",
+                ],
                 "mcp_protocol": PROTOCOL_VERSION,
                 "event_schemas": ["langgraph_run/1", "langgraph_node/1"],
                 "tool_profile": tool_profile,
@@ -993,6 +1033,12 @@ def build_mcp_dispatcher(
                 max_wall_seconds=int(arguments["max_wall_seconds"]),
                 expires_at=str(arguments["expires_at"]),
             )}
+        if name == "list_delegations":
+            return {"delegations": list(delegation_queue.list(
+                actor=actor,
+                statuses=tuple(str(item) for item in arguments.get("statuses", ())),
+                limit=int(arguments.get("limit", 100)),
+            ))}
         if name == "claim_delegation":
             return {"delegation": delegation_queue.claim(
                 actor=actor, worker_id=str(arguments["worker_id"]),
@@ -1011,12 +1057,26 @@ def build_mcp_dispatcher(
                 result=arguments.get("result"), error=arguments.get("error"),
             )}
         if name == "reconcile_delegation":
-            return {"reconciliation": delegation_queue.reconcile(
-                str(arguments["delegation_id"]), actor=actor,
-                outcome=str(arguments["outcome"]),
+            delegation_id = str(arguments["delegation_id"])
+            outcome = str(arguments["outcome"])
+            result = arguments.get("result")
+            error = arguments.get("error")
+            reconciliation = delegation_queue.reconcile(
+                delegation_id, actor=actor, outcome=outcome,
                 note=str(arguments.get("note", "")),
                 idempotency_key=str(arguments["idempotency_key"]),
-            )}
+                result=result, error=error,
+            )
+            response = {"reconciliation": reconciliation}
+            if outcome == "confirmed_failed" or result is not None:
+                response["run"] = langgraph_run_dto(
+                    langgraph_service.resolve_unknown_delegation(
+                        delegation_id, actor=writing_actor(actor),
+                        outcome=outcome, result=result, error=error,
+                    ),
+                    can_write=True,
+                )
+            return response
         if name == "get_delegation_stats":
             return {"delegations": delegation_queue.stats(actor=actor)}
         if name == "prune_delegations":
@@ -1428,6 +1488,7 @@ def build_mcp_dispatcher(
                     "resources": {"listChanged": False},
                 },
                 "serverInfo": SERVER_INFO,
+                "instructions": SESSION_RECOVERY_INSTRUCTIONS,
             })
         if method in {"notifications/initialized", "notifications/cancelled"}:
             return None  # notifications carry no id and get no response
@@ -1627,6 +1688,61 @@ def agent_tool_routes(
         if "error" in response:
             return JSONResponse({"protocol_error": response["error"]})
         return JSONResponse({"result": response.get("result", {})})
+
+    return [Route(path, endpoint, methods=["POST"])]
+
+
+def background_delegation_routes(
+    queue: Any,
+    *, path: str = "/internal/v1/background-delegations/{operation}",
+) -> list[Route]:
+    """Private loopback protocol used by the machine background worker.
+
+    It is intentionally separate from MCP: a background worker is a daemon,
+    not an Agent conversation, and is allowed to claim across conversation
+    actors only for rows explicitly addressed to a background pool.
+    """
+
+    async def endpoint(request: Request) -> JSONResponse:
+        if request.client is None or request.client.host not in {
+            "127.0.0.1", "::1", "localhost", "testclient",
+        }:
+            return JSONResponse({"error": "loopback access required"}, status_code=403)
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return JSONResponse({"error": "request body must be JSON"}, status_code=400)
+        if not isinstance(body, Mapping):
+            return JSONResponse({"error": "expected an object"}, status_code=400)
+        operation = request.path_params["operation"]
+        try:
+            if operation == "claim":
+                item = await asyncio.to_thread(
+                    queue.claim_background,
+                    worker_id=str(body.get("worker_id", "")),
+                    pools=tuple(body.get("pools") or ("default",)),
+                    lease_seconds=int(body.get("lease_seconds", 30)),
+                )
+            elif operation == "renew":
+                item = await asyncio.to_thread(
+                    queue.renew_background, str(body.get("delegation_id", "")),
+                    worker_id=str(body.get("worker_id", "")),
+                    lease_seconds=int(body.get("lease_seconds", 30)),
+                )
+            elif operation == "complete":
+                kwargs = {
+                    "worker_id": str(body.get("worker_id", "")),
+                    "result": body.get("result"), "error": body.get("error"),
+                }
+                item = await asyncio.to_thread(
+                    queue.complete_background,
+                    str(body.get("delegation_id", "")), **kwargs,
+                )
+            else:
+                return JSONResponse({"error": "unknown operation"}, status_code=404)
+        except (LookupError, TypeError, ValueError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        return JSONResponse({"delegation": item})
 
     return [Route(path, endpoint, methods=["POST"])]
 
