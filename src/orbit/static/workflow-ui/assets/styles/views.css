@@ -622,14 +622,21 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
   display: flex; align-items: center; justify-content: space-between;
   gap: 12px; margin-bottom: 16px;
 }
-.goal-modal-close {
+/* The way out of an overlay: one control, one class, wherever the overlay is
+   a run sheet, a goal sheet, a dialog, the workflow page or its editor. Three
+   of those drew this cross and three printed the word "Close" in a button the
+   width of the word; the same gesture is now the same mark in the same
+   corner. `flex: 0 0 auto` because every head it sits in is a flex row that
+   would otherwise squeeze it. */
+.icon-close, .goal-modal-close {
   display: inline-flex; align-items: center; justify-content: center;
+  flex: 0 0 auto;
   width: 30px; height: 30px; padding: 0;
   color: var(--muted-2); background: transparent; border: 0;
-  border-radius: var(--radius); cursor: pointer;
+  border-radius: var(--radius-control); cursor: pointer;
 }
-.goal-modal-close { border-radius: var(--radius-control); }
-.goal-modal-close:hover { color: var(--text); background: var(--hover); }
+.icon-close:hover, .goal-modal-close:hover { color: var(--text); background: var(--hover); }
+.icon-close:focus-visible,
 .goal-modal-close:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
 .goal-modal-body { display: flex; flex-direction: column; gap: 16px; }
 

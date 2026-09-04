@@ -1,6 +1,6 @@
 import { ApiError } from "../api.js";
 import { dataState } from "../components/data-state.js";
-import { el, svgEl } from "../components/dom.js";
+import { closeButton, el, svgEl } from "../components/dom.js";
 import { semanticWorkflowDiff } from "../workflow-diff.js";
 import { humanResponseValue, resumeActions } from "../run-resume.js";
 import { workflowGenerationProgress } from "../workflow/generation-progress.js";
@@ -468,21 +468,9 @@ export function createViews(context) {
           workflowName = "";
         }
         const body = el("div", { class: "run-modal-body" });
-        const close = el("button", {
-          class: "goal-modal-close", type: "button",
-          "aria-label": i18n.t("action.close"),
-          title: i18n.t("action.close"),
-          onclick: () => dismiss(),
-        }, [
-          svgEl("svg", {
-            viewBox: "0 0 24 24", width: "16", height: "16",
-            "aria-hidden": "true", fill: "none", stroke: "currentColor",
-            "stroke-width": "1.8", "stroke-linecap": "round",
-          }, [
-            svgEl("path", { d: "M6 6l12 12" }),
-            svgEl("path", { d: "M18 6L6 18" }),
-          ]),
-        ]);
+        const close = closeButton(el, {
+          label: i18n.t("action.close"), onClose: () => dismiss(),
+        });
         panel.replaceChildren(
           el("header", { class: "run-modal-titlebar" }, [
             el("h1", { class: "run-modal-title", text: i18n.t("simplified.execution") }),
@@ -1610,9 +1598,8 @@ export function createViews(context) {
               class: "button", text: i18n.t("artifacts.download"),
               href: api.artifactDownloadUrl(item.artifact_id),
             }) : null,
-            el("button", {
-              class: "button", text: i18n.t("action.close"),
-              onclick: () => panel.close(),
+            closeButton(el, {
+              label: i18n.t("action.close"), onClose: () => panel.close(),
             }),
           ].filter(Boolean)),
         ]),
@@ -2328,25 +2315,14 @@ export function createViews(context) {
 
   function agentFinder(allowed, close, panel) {
     let writerAgent = defaultGenerationAgent();
-    const closeButton = el("button", {
-      class: "goal-modal-close", type: "button",
-      "aria-label": i18n.t("action.close"), title: i18n.t("action.close"),
-      onclick: () => close(),
-    }, [
-      svgEl("svg", {
-        viewBox: "0 0 24 24", width: "16", height: "16",
-        "aria-hidden": "true", fill: "none", stroke: "currentColor",
-        "stroke-width": "1.8", "stroke-linecap": "round",
-      }, [
-        svgEl("path", { d: "M6 6l12 12" }),
-        svgEl("path", { d: "M18 6L6 18" }),
-      ]),
-    ]);
+    const closeControl = closeButton(el, {
+      label: i18n.t("action.close"), onClose: () => close(),
+    });
     const stage = el("div", { class: "agent-finder-stage" });
     const shell = el("div", { class: "agent-finder" }, [
       el("div", { class: "agent-finder-head" }, [
         el("h3", { text: i18n.t("agents.find.title") }),
-        closeButton,
+        closeControl,
       ]),
       stage,
     ]);
@@ -2930,21 +2906,9 @@ export function createViews(context) {
             el("h2", {
               class: "goal-section-title", text: i18n.t("goal.heading.goal"),
             }),
-            el("button", {
-              class: "goal-modal-close", type: "button",
-              "aria-label": i18n.t("action.close"),
-              title: i18n.t("action.close"),
-              onclick: () => dismiss(),
-            }, [
-              svgEl("svg", {
-                viewBox: "0 0 24 24", width: "16", height: "16",
-                "aria-hidden": "true", fill: "none", stroke: "currentColor",
-                "stroke-width": "1.8", "stroke-linecap": "round",
-              }, [
-                svgEl("path", { d: "M6 6l12 12" }),
-                svgEl("path", { d: "M18 6L6 18" }),
-              ]),
-            ]),
+            closeButton(el, {
+              label: i18n.t("action.close"), onClose: () => dismiss(),
+            }),
           ]),
           body,
         );
@@ -2994,13 +2958,19 @@ export function createViews(context) {
                 ? el("p", { class: "workflow-detail-desc", text: value.description })
                 : null,
             ]),
-            el("button", {
-              class: "button workflow-detail-back", id: "backToWorkflows",
-              text: i18n.t(dismiss ? "action.close" : "action.back"),
-              onclick: () => dismiss
-                ? dismiss()
-                : navigate({ view: "workflows", runId: null }),
-            }),
+            // Closing an overlay and going back a page are not the same
+            // gesture, so only one of them is the corner cross. Back stays a
+            // word: it says where it goes, which a mark cannot.
+            dismiss
+              ? closeButton(el, {
+                  label: i18n.t("action.close"), id: "backToWorkflows",
+                  onClose: () => dismiss(),
+                })
+              : el("button", {
+                  class: "button workflow-detail-back", id: "backToWorkflows",
+                  text: i18n.t("action.back"),
+                  onclick: () => navigate({ view: "workflows", runId: null }),
+                }),
           ]),
           deletedNotice(value),
           engineRefusalNotice(value),
@@ -3083,10 +3053,9 @@ export function createViews(context) {
               // because a reader who cannot see the workflow page behind this
               // one has nowhere else to learn it. See .workflow-editing-version.
               editingVersion,
-              el("button", {
-                class: "button", id: "closeWorkflowEditor",
-                text: i18n.t("action.close"),
-                onclick: () => navigate({ view: "workflows", runId: null }),
+              closeButton(el, {
+                label: i18n.t("action.close"), id: "closeWorkflowEditor",
+                onClose: () => navigate({ view: "workflows", runId: null }),
               }),
             ]),
           ]),

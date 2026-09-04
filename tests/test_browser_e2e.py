@@ -518,9 +518,12 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
             }
             return body
 
+        # Only Download is a word here now: the way out of an overlay is the
+        # corner cross every other overlay uses, so it carries its name in
+        # `aria-label` rather than in print. Checked below, once, as itself.
         for label, filename, expected in (
-            ("a port value", None, ["Close"]),
-            ("a named file", "report.md", ["Download", "Close"]),
+            ("a port value", None, []),
+            ("a named file", "report.md", ["Download"]),
         ):
             with self.subTest(artifact=label):
                 context = self.browser.new_context(locale="en-US")
@@ -561,10 +564,17 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
                 page.wait_for_selector(".artifact-card-main")
                 page.click(".artifact-card-main")
                 page.wait_for_selector(".artifact-dialog .actions")
-                self.assertEqual(
-                    expected,
-                    page.locator(".artifact-dialog .actions").inner_text().split("\n"),
-                )
+                written = [
+                    line for line in
+                    page.locator(".artifact-dialog .actions").inner_text().split("\n")
+                    if line.strip()
+                ]
+                self.assertEqual(expected, written)
+                # And the way out is there, named for a reader who cannot see
+                # the mark.
+                self.assertEqual(1, page.locator(
+                    ".artifact-dialog .actions .icon-close[aria-label='Close']"
+                ).count())
                 page.close()
 
     def test_run_detail_has_no_runtime_tabs(self) -> None:
