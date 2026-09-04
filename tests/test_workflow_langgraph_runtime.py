@@ -530,34 +530,6 @@ class WorkspaceAccessCompilerTests(unittest.TestCase):
         ).invoke({"value": 7})
         self.assertEqual(7, result["result"])
 
-    def test_file_allowlist_capability_without_files_is_rejected(self) -> None:
-        ir = self._ir(config={"mode": "read_only"})
-        with self.assertRaisesRegex(
-            ValueError, "requires config.files on this deployment",
-        ):
-            compile_workflow(
-                ir,
-                LangGraphHandlerRegistry([
-                    binding(
-                        "action", lambda values, config, context: values,
-                        capabilities=frozenset({"workspace.read.files"}),
-                    )
-                ]),
-            )
-
-    def test_file_allowlist_capability_with_files_is_accepted(self) -> None:
-        ir = self._ir(config={"mode": "read_only", "files": ["a.txt"]})
-        result = compile_workflow(
-            ir,
-            LangGraphHandlerRegistry([
-                binding(
-                    "action", lambda values, config, context: values,
-                    capabilities=frozenset({"workspace.read.files"}),
-                )
-            ]),
-        ).invoke({"value": 7})
-        self.assertEqual(7, result["result"])
-
     def test_multiple_workspace_access_policies_on_one_node_are_rejected(self) -> None:
         action = node("action", inputs=("value",), outputs=("value",))
         action = IRNode(
@@ -605,13 +577,14 @@ class WorkspaceAccessCompilerTests(unittest.TestCase):
             LangGraphHandlerRegistry([
                 binding(
                     "action", invoke,
-                    capabilities=frozenset({"workspace.read.files"}),
+                    capabilities=frozenset({"workspace.read"}),
                 )
             ]),
         ).invoke({"value": 7})
 
         self.assertEqual(
-            {"mode": "read_only", "files": ["a.txt"]}, seen["workspace_access"],
+            {"mode": "read_only", "isolation": "worktree"},
+            seen["workspace_access"],
         )
 
     def test_a_node_without_the_policy_is_unaffected(self) -> None:

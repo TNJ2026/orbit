@@ -15,7 +15,7 @@ policies:
     config: {}
 ```
 
-`mode`、`isolation`、`files`、`protect` 等旧字段暂时仍可读取，以便已发布定义迁移，但不再决定生产运行方式。项目类型由 Runtime 检测，操作者只使用一个授权开关：
+`isolation`、`files`、`protect` 等旧字段暂时仍可读取，以便已发布定义通过结构校验，但不再决定生产运行方式。`mode: read_only` 仍保持只读意图：Git 使用不回流的 worktree；非 Git direct 因无法对任意 Agent CLI 强制只读而拒绝。项目类型由 Runtime 检测，只使用一个授权开关：
 
 ```shell
 orbit serve --workspace-path /absolute/project --agent-project-access
@@ -68,7 +68,8 @@ Runtime 在委托请求中携带：
 
 - Git grant 使用部署能力 `workspace.read`；非 Git direct 使用 `workspace.project.read` 与 `workspace.project.write`。
 - 部署能力只进入 `HandlerRegistration.granted_capabilities`，不得写入 `HandlerManifest`，否则会改变 manifest fingerprint 并破坏已发布版本绑定。
-- `FileAllowlistGrant`、旧读写开关及配额参数只保留代码/API 兼容性，不再进入生产组合路径。旧 `--agent-project-read` / `--agent-project-write` 当前等价映射为统一授权，CLI 帮助中隐藏，后续可在迁移窗口结束后删除。
+- `FileAllowlistGrant`、`workspace.read.files`、旧读写开关及其配额参数已经删除。CLI 和 `create_app()` 只接受 `agent_project_access`。
+- Hub 授权文件中的旧布尔 `true` 或 `legacy_read` 不再视为有效授权；只有重新执行 `hub register --agent-project-access` 才写入 `read_write`。因此旧授权不会在升级后静默变成非 Git direct-write。
 
 ## 6. 生命周期与失败原则
 

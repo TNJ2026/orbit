@@ -176,7 +176,7 @@ class RuntimeComposition:
         # they can see the size of on the Ops page.
         self.run_retention_days = run_retention_days
         # The grant `--agent-project-access` built (a `GitWorktreeGrant` or a
-        # `FileAllowlistGrant`), or `None` when the switch is off. Only used to
+        # `GitWorktreeGrant`), or `None` when the switch is off. Only used to
         # drive the cleanup loop below — the grant itself was already handed
         # to the Agent client that acquires from it.
         self.project_workspace_grant = project_workspace_grant
@@ -490,11 +490,6 @@ def create_app(
     serve_mcp: bool = True,
     workspace_path: Path | str | None = None,
     agent_project_access: bool = False,
-    agent_project_access_max_bytes: int | None = None,
-    agent_project_access_min_free_bytes: int | None = None,
-    agent_project_access_min_free_fraction: float | None = None,
-    agent_project_read: bool = False,
-    agent_project_write: bool = False,
 ) -> Starlette:
     """Build the Runtime application.
 
@@ -523,9 +518,6 @@ def create_app(
     # The real project directory for non-git direct access.
     project_root_for_agents: Path | None = None
     grant_capabilities: frozenset[str] = frozenset()
-    agent_project_access = bool(
-        agent_project_access or agent_project_read or agent_project_write
-    )
     if agent_project_access:
         from ..platform.projects import project_state_dir
         from ..workspace import (

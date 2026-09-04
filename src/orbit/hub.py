@@ -221,14 +221,17 @@ class ProjectAccessGrants:
         ).expanduser()
         self._lock = threading.Lock()
 
+    def mode(self, identifier: str) -> str | None:
+        return self._read().get(identifier)
+
     def granted(self, identifier: str) -> bool:
-        return bool(self._read().get(identifier))
+        return self.mode(identifier) is not None
 
     def set(self, identifier: str, *, allowed: bool) -> None:
         with self._lock:
             entries = self._read()
             if allowed:
-                entries[identifier] = True
+                entries[identifier] = "read_write"
             else:
                 entries.pop(identifier, None)
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -240,7 +243,7 @@ class ProjectAccessGrants:
             )
             temporary.replace(self.path)
 
-    def _read(self) -> dict[str, bool]:
+    def _read(self) -> dict[str, str]:
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
         except (FileNotFoundError, json.JSONDecodeError, OSError):
@@ -248,13 +251,15 @@ class ProjectAccessGrants:
         values = payload.get("project_access", {}) if isinstance(payload, dict) else {}
         if not isinstance(values, dict):
             return {}
-        # Only `true` is a grant. A file edited by hand into something else is
-        # not consent, and reading it as one is the failure this whole switch
-        # exists to make impossible.
-        return {
-            str(key): True for key, value in values.items()
-            if isinstance(key, str) and value is True
-        }
+        result: dict[str, str] = {}
+        for key, value in values.items():
+            if not isinstance(key, str):
+                continue
+            # Old boolean/legacy-read records are not consent to the current
+            # non-git direct-write contract. The operator must re-authorize.
+            if value == "read_write":
+                result[key] = value
+        return result
 
 
 def workspace_urls(identifier: str, hub_url: str = "http://127.0.0.1:8848") -> dict[str, str]:
@@ -373,7 +378,8 @@ class WorkspaceRuntimeManager:
             sys.executable, "-m", "orbit", "serve", "--host", "127.0.0.1",
             "--port", "0", "--project-root", str(workspace),
         ]
-        if self.grants.granted(project_id(workspace)):
+        grant_mode = self.grants.mode(project_id(workspace))
+        if grant_mode == "read_write":
             arguments.append("--agent-project-access")
         return arguments
 

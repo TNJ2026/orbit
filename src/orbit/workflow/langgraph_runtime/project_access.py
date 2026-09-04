@@ -65,7 +65,7 @@ class ProjectAccessNeed:
         return self.required
 
 
-def project_access_need(ir: Any, *, direct: bool = True) -> ProjectAccessNeed:
+def project_access_need(ir: Any) -> ProjectAccessNeed:
     """Read the run's project access off the workflow, once, before it starts.
 
     A node reference is what asks, but the answer is run-wide: if any node
@@ -86,9 +86,11 @@ def project_access_need(ir: Any, *, direct: bool = True) -> ProjectAccessNeed:
         return ProjectAccessNeed()
     return ProjectAccessNeed(
         required=True,
-        # Both selected workspace shapes are writable. `direct` only selects
-        # whether the real project must be claimed by the coordinator.
-        write=True,
+        write=any(policy.config.get("mode", "read_write") != "read_only"
+                  for policy in asked),
+        protect=tuple(dict.fromkeys(
+            item for policy in asked for item in policy.config.get("protect", ())
+        )),
         agent_nodes=tuple(
             node.id for node in ir.nodes
             if node.handler is not None and (
@@ -221,7 +223,7 @@ class ProjectAccessCoordinator:
         if need.write and not self.write_granted:
             raise ProjectAccessUnavailable(
                 "workflow asks to write the project directory but this "
-                "Runtime was not started with --agent-project-write"
+                "Runtime was not started with --agent-project-access"
             )
         check = getattr(self.recovery_points, "preflight", None)
         if check is not None:
@@ -239,7 +241,7 @@ class ProjectAccessCoordinator:
         if need.write and not self.write_granted:
             raise ProjectAccessUnavailable(
                 "workflow asks to write the project directory but this "
-                "Runtime was not started with --agent-project-write"
+                "Runtime was not started with --agent-project-access"
             )
         claim = self.registry.claim(self.project_root, run_id=run_id)
         # Between holding the project and letting anything run in it — §6.

@@ -14,11 +14,7 @@ from .git import (
     has_commits,
     is_git_repo,
 )
-from .project_access import (
-    FileAllowlistGrant,
-    GitWorktreeGrant,
-    QuotaExceeded,
-)
+from .project_access import GitWorktreeGrant
 
 __all__ = [
     "GitWorkspaceProvider",
@@ -28,7 +24,5 @@ __all__ = [
     "git_available",
     "has_commits",
     "is_git_repo",
-    "FileAllowlistGrant",
     "GitWorktreeGrant",
-    "QuotaExceeded",
 ]

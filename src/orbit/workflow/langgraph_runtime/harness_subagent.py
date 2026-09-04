@@ -736,10 +736,16 @@ class HarnessSubagentHandler:
         else:
             if self.project_workspace is None:
                 raise HandlerPermanentError("git worktree workspace is unavailable")
-            path = self.project_workspace.acquire(run_id)
+            path = self.project_workspace.acquire(
+                run_id, files=access.get("files"),
+            )
             kind = "git_worktree"
         provider = getattr(self.project_workspace, "provider", None)
-        project_root = self.project_root or getattr(provider, "project_root", None) or path
+        project_root = (
+            self.project_root
+            or getattr(provider, "project_root", None)
+            or path
+        )
         return {
             "kind": kind, "path": str(path),
             "project_root": str(project_root),

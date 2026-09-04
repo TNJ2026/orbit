@@ -57,7 +57,7 @@ class ProjectAccessEndpointTests(unittest.TestCase):
 
     def test_corrupt_record_is_reported_instead_of_500(self):
         from orbit.platform.project_occupancy import ProjectOccupancyRegistry
-        app = self.app(discover_agents=True, agent_project_write=True)
+        app = self.app(discover_agents=True, agent_project_access=True)
         access = app.state.runtime.langgraph_service.project_access
         access.registry = ProjectOccupancyRegistry(self.root / "occupancy")
         claim = access.registry.claim(self.project, run_id="broken")
@@ -76,7 +76,7 @@ class ProjectAccessEndpointTests(unittest.TestCase):
         — which is not somewhere the operator reading the page can go.
         """
 
-        app = self.app(discover_agents=True, agent_project_write=True)
+        app = self.app(discover_agents=True, agent_project_access=True)
         access = app.state.runtime.langgraph_service.project_access
         from orbit.workflow.langgraph_runtime.project_access import ProjectAccessNeed
 
@@ -136,7 +136,7 @@ class ProjectAccessEndpointTests(unittest.TestCase):
         must not clear the second hold.
         """
 
-        app = self.app(discover_agents=True, agent_project_write=True)
+        app = self.app(discover_agents=True, agent_project_access=True)
         access = app.state.runtime.langgraph_service.project_access
         from orbit.workflow.langgraph_runtime.project_access import ProjectAccessNeed
 
@@ -165,7 +165,7 @@ class ProjectAccessEndpointTests(unittest.TestCase):
         self.assertEqual(["run-1"], [item["run_id"] for item in after["occupancies"]])
 
     def test_reader_cannot_discover_or_execute_repair_commands(self) -> None:
-        app = self.app(discover_agents=True, agent_project_write=True)
+        app = self.app(discover_agents=True, agent_project_access=True)
         access = app.state.runtime.langgraph_service.project_access
         with AsgiHarness(app) as client:
             for corrupt in (False, True):
@@ -192,7 +192,7 @@ class ProjectAccessEndpointTests(unittest.TestCase):
                     )
 
     def test_a_corrupt_record_can_be_resolved_by_its_file_name(self) -> None:
-        app = self.app(discover_agents=True, agent_project_write=True)
+        app = self.app(discover_agents=True, agent_project_access=True)
         access = app.state.runtime.langgraph_service.project_access
         claim = access.registry.claim(self.project, run_id="broken")
         record = next((self.root / "occupancy").glob("*.json"))
@@ -221,7 +221,7 @@ class ProjectAccessEndpointTests(unittest.TestCase):
         self.assertIn("grants no project-directory access", payload["reason"])
 
     def test_it_reports_the_project_and_what_was_granted(self) -> None:
-        app = self.app(discover_agents=True, agent_project_write=True)
+        app = self.app(discover_agents=True, agent_project_access=True)
         with AsgiHarness(app) as client:
             payload = client.get("/api/v1/project-access", actor="local").json()["data"]
 
@@ -232,7 +232,7 @@ class ProjectAccessEndpointTests(unittest.TestCase):
         self.assertEqual([], payload["allowed_commands"])
 
     def test_a_held_project_names_its_holder_and_its_way_back(self) -> None:
-        app = self.app(discover_agents=True, agent_project_write=True)
+        app = self.app(discover_agents=True, agent_project_access=True)
         access = app.state.runtime.langgraph_service.project_access
         from orbit.workflow.langgraph_runtime.project_access import ProjectAccessNeed
 
@@ -254,7 +254,7 @@ class ProjectAccessEndpointTests(unittest.TestCase):
         """Not "free": §4 requires somebody to resolve it, and the page is
         where they would find out it needs resolving."""
 
-        app = self.app(discover_agents=True, agent_project_write=True)
+        app = self.app(discover_agents=True, agent_project_access=True)
         access = app.state.runtime.langgraph_service.project_access
         from orbit.workflow.langgraph_runtime.project_access import ProjectAccessNeed
 
@@ -296,7 +296,7 @@ class RunChangesEndpointTests(ProjectAccessEndpointTests):
         self.assertFalse(payload["complete_record"])
 
     def test_a_non_git_run_reports_that_no_complete_diff_is_available(self) -> None:
-        app = self.app(discover_agents=True, agent_project_write=True)
+        app = self.app(discover_agents=True, agent_project_access=True)
         access = app.state.runtime.langgraph_service.project_access
         from orbit.workflow.langgraph_runtime.project_access import ProjectAccessNeed
 

@@ -194,8 +194,8 @@ class GitWorkspaceProvider:
             return False
         return bool(status.stdout.strip())
 
-    def project_is_dirty(self) -> bool:
-        """Whether the source checkout differs from HEAD, including untracked files.
+    def project_status_porcelain(self) -> tuple[str, ...]:
+        """Porcelain status lines for the source checkout, including untracked files.
 
         A run worktree starts from HEAD. Refusing a dirty source checkout keeps
         "full project access" honest: otherwise local edits or untracked input
@@ -216,7 +216,12 @@ class GitWorkspaceProvider:
             raise WorkspaceError(
                 f"could not inspect source checkout {self.project_root}: {detail}"
             )
-        return bool(status.stdout.strip())
+        return tuple(line for line in status.stdout.splitlines() if line.strip())
+
+    def project_is_dirty(self) -> bool:
+        """Whether the source checkout differs from HEAD."""
+
+        return bool(self.project_status_porcelain())
 
     # -- lifecycle --------------------------------------------------------
 

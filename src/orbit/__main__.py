@@ -520,14 +520,6 @@ def _serve(args) -> None:
             serve_mcp=False,
             workspace_path=project_root,
             agent_project_access=args.agent_project_access,
-            agent_project_access_max_bytes=args.agent_project_access_max_bytes,
-            agent_project_access_min_free_bytes=(
-                args.agent_project_access_min_free_bytes
-            ),
-            agent_project_read=(
-                args.agent_project_read or args.agent_project_write
-            ),
-            agent_project_write=args.agent_project_write,
             delegation_queue=delegation_queue,
         )
     except MixedSchemaError as exc:
@@ -833,26 +825,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     serve_cmd.add_argument(
-        "--agent-project-access-max-bytes",
-        type=int, default=None, metavar="BYTES",
-        help=argparse.SUPPRESS,
-    )
-    serve_cmd.add_argument(
-        "--agent-project-access-min-free-bytes",
-        type=int, default=None, metavar="BYTES",
-        help=argparse.SUPPRESS,
-    )
-    serve_cmd.add_argument(
-        "--agent-project-read",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    serve_cmd.add_argument(
-        "--agent-project-write",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    serve_cmd.add_argument(
         "--structured-agent",
         action="append",
         default=None,
@@ -988,9 +960,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--agent-project-access",
         dest="project_access", action="store_true", default=None,
         help=(
-            "Remember that this workspace may hand real project files to a "
-            "workflow node declaring a workspace_access policy, and start its "
-            "Runtimes with --agent-project-access from now on. Recorded "
+            "Persist read/write project access for this workspace. Git projects "
+            "use a disposable Run worktree; non-git projects expose the real "
+            "directory with no automatic rollback. Start future Runtimes with "
+            "--agent-project-access. Recorded "
             "rather than applied: an ordinary re-registration leaves the "
             "decision alone, and a Runtime already running keeps whatever it "
             "was started with until it is restarted."
@@ -1192,10 +1165,12 @@ def main() -> None:
             create_hub_app, workspace_urls,
         )
         from .platform.projects import project_id, resolve_project_root
+        from .workspace.git import is_git_repo
 
         registry = WorkspaceRegistry()
         if args.hub_action == "register":
             identifier, _ = registry.register(args.workspace)
+            registered_workspace = registry.resolve(identifier)
             grants = ProjectAccessGrants()
             if args.project_access is not None:
                 grants.set(identifier, allowed=args.project_access)
@@ -1206,6 +1181,14 @@ def main() -> None:
                 {
                     **workspace_urls(identifier),
                     "agent_project_access": grants.granted(identifier),
+                    "agent_project_access_mode": grants.mode(identifier),
+                    "effective_project_access": (
+                        "git_worktree"
+                        if grants.mode(identifier) and is_git_repo(registered_workspace)
+                        else "non_git_direct_read_write_no_rollback"
+                        if grants.mode(identifier) == "read_write"
+                        else "disabled"
+                    ),
                 },
                 sort_keys=True,
             ))

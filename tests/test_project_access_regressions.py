@@ -395,9 +395,14 @@ class RunWideGrantRegressions(unittest.TestCase):
                 binding(second.id, invoke, capabilities=capabilities),
             ]))
 
-        with self.assertRaisesRegex(ValueError, "Runtime was not started to grant"):
+        with self.assertRaisesRegex(ValueError, "granted workspace access"):
             compiled("read_only", frozenset())
         # Non-git direct access is one full read/write grant.
         compiled("read_write", frozenset({
             "workspace.project.read", "workspace.project.write",
         }))
+
+        with self.assertRaisesRegex(ValueError, "read_only.*cannot be enforced"):
+            compiled("read_only", frozenset({
+                "workspace.project.read", "workspace.project.write",
+            }))

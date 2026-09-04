@@ -203,6 +203,19 @@ class ProjectAccessGrantTests(unittest.TestCase):
 
             self.assertIn("--agent-project-access", manager._serve_arguments(workspace))
 
+    def test_a_legacy_boolean_grant_is_not_consent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "project-access.json"
+            identifier, workspace, manager = self.manager(
+                root, ProjectAccessGrants(path),
+            )
+            path.write_text(json.dumps({"project_access": {identifier: True}}))
+
+            arguments = manager._serve_arguments(workspace)
+            self.assertNotIn("--agent-project-access", arguments)
+            self.assertFalse(ProjectAccessGrants(path).granted(identifier))
+
     def test_the_grant_is_taken_back_by_asking(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -237,18 +250,20 @@ class ProjectAccessGrantTests(unittest.TestCase):
                 ProjectAccessGrants(root / "project-access.json").granted(identifier)
             )
 
-    def test_only_a_true_in_the_file_is_consent(self) -> None:
-        """Anything else on disk is not a grant, however suggestive it looks."""
+    def test_only_known_persisted_grant_shapes_are_consent(self) -> None:
 
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "project-access.json"
             path.write_text(json.dumps({"project_access": {
-                "yes": True, "truthy": 1, "worded": "true", "off": False,
+                "legacy": True, "read": "legacy_read", "write": "read_write",
+                "truthy": 1, "worded": "true", "off": False,
             }}), encoding="utf-8")
             grants = ProjectAccessGrants(path)
 
-            self.assertTrue(grants.granted("yes"))
-            for identifier in ("truthy", "worded", "off", "absent"):
+            self.assertEqual("read_write", grants.mode("write"))
+            for identifier in (
+                "legacy", "read", "truthy", "worded", "off", "absent",
+            ):
                 with self.subTest(identifier=identifier):
                     self.assertFalse(grants.granted(identifier))
 
@@ -304,6 +319,11 @@ class ProjectAccessGrantTests(unittest.TestCase):
             self.assertTrue(granted["agent_project_access"])
             self.assertTrue(again["agent_project_access"])
             self.assertFalse(revoked["agent_project_access"])
+            self.assertEqual("read_write", granted["agent_project_access_mode"])
+            self.assertEqual(
+                "non_git_direct_read_write_no_rollback",
+                granted["effective_project_access"],
+            )
             self.assertEqual(plain["workspace_id"], granted["workspace_id"])
 
 

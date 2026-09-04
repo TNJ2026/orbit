@@ -2558,7 +2558,7 @@ class LangGraphWorkflowService:
             return None
         from .project_access import project_access_need
 
-        need = project_access_need(ir, direct=True)
+        need = project_access_need(ir)
         return need if need.required else None
 
     def _require_project_available(self, need) -> None:

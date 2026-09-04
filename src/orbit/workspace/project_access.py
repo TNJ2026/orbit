@@ -1,94 +1,44 @@
-"""Project workspaces granted by ``orbit serve --agent-project-access``.
+"""Run-scoped Git worktrees granted by ``--agent-project-access``.
 
-The production path uses one shared Git worktree per Run when the project is
-a usable repository. Non-Git projects are intentionally handled by direct
-access to the real project root in the Runtime layer and do not use a copy.
-
-``FileAllowlistGrant`` remains readable for compatibility and focused tests,
-but no production composition selects it.
-
-Both grants are plain, lock-free dataclasses on purpose. `acquire()` for one
-ref and `sweep()` deciding another ref is dead can run concurrently in
-different *processes* — `--execution-workers` (nonzero by default) runs Agent
-Handlers in a worker pool, not the process the cleanup loop runs in — so an
-in-process lock could never make the two mutually exclusive; it would only
-make every grant instance unpicklable, and multiprocessing sends this exact
-object to each worker. `sweep()`'s grace period is what actually closes that
-gap: see its docstring.
+Non-Git projects use their real project root directly and therefore need no
+workspace-copy implementation here. The grant stays lock-free and pickleable:
+execution workers receive it through multiprocessing, while cleanup is safely
+guarded by the provider's age-based sweep.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-import os
+from dataclasses import dataclass
 from pathlib import Path
-import secrets
-import shutil
-import time
 from typing import Iterable, Sequence
 
-from .git import GitWorkspaceProvider, WorkspaceError, workspace_slug
+from .git import GitWorkspaceProvider, WorkspaceError
 
 
-# A quota this generous still bounds a run-away grant; it is not meant to be
-# the right number for every deployment; `orbit serve` accepts CLI flags to
-# change it (see `--agent-project-access-max-bytes`).
-DEFAULT_MAX_BYTES = 2 * 1024**3
-# Two ways to describe "leave the disk alone": an absolute floor and a
-# fraction of the volume, whichever is larger — a tiny disk keeps its
-# absolute floor, a huge one is not allowed to fill to within a few bytes of
-# empty just because 10 GiB is a small fraction of it.
-DEFAULT_MIN_FREE_BYTES = 10 * 1024**3
-DEFAULT_MIN_FREE_FRACTION = 0.10
-# How long `sweep()` leaves a not-live-looking directory alone before
-# trusting that. Generous on purpose: the actual gap it protects — between a
-# caller reading "what's live" and this reaching that one directory — is
-# milliseconds to low seconds even in the worst case, and the cleanup loop
-# itself never polls faster than every 5 minutes, so ten minutes of headroom
-# costs nothing real while making the race essentially impossible to hit.
 DEFAULT_MIN_AGE_SECONDS = 600.0
-# Bumped whenever a destination's on-disk shape changes in a way new code
-# cannot tell apart from old code's by inspecting it — `acquire()`'s "a
-# non-empty destination is a complete one" trust depends entirely on that
-# being true. Before this constant existed, a destination could be left
-# non-empty but incomplete by a failure partway through a direct copy (the
-# very first version of this class, predating the atomic staging-then-rename
-# invariant `acquire()` uses below); a directory built by that code and left
-# on disk across an upgrade is otherwise indistinguishable, by name alone,
-# from one this invariant actually produced. Folding the version into the
-# directory name means new code only ever looks at a path old code never
-# wrote to, rather than re-deriving completeness at read time.
-STORAGE_VERSION = 2
-
-
-class QuotaExceeded(RuntimeError):
-    """A grant would exceed the configured size or disk-headroom limit.
-
-    Deliberately its own type, not `WorkspaceError`: a quota is a policy this
-    deployment chose, not evidence that the mechanism itself is broken, and a
-    caller may reasonably want to tell the two apart.
-    """
 
 
 @dataclass
 class GitWorktreeGrant:
-    """Whole-tree access to a git Workspace, via an isolated worktree."""
+    """Whole-project access through one isolated Git worktree per Run."""
 
     provider: GitWorkspaceProvider
     min_age_seconds: float = DEFAULT_MIN_AGE_SECONDS
 
     def acquire(self, ref: str, *, files: Sequence[str] | None = None) -> Path:
-        # `files` is accepted and ignored: a worktree already isolates the
-        # whole tracked tree cheaply and safely, and narrowing it further on
-        # top of that isolation would only add complexity for no real gain.
-        # `files` matters to `FileAllowlistGrant`, the other implementation of
-        # this same interface — a caller that does not know which one it is
-        # talking to should never have to care.
-        if self.provider.project_is_dirty():
+        # ``files`` remains accepted because Handler callers use one interface;
+        # a Git worktree always exposes the complete committed tree.
+        dirty = self.provider.project_status_porcelain()
+        if dirty:
+            preview = "\n".join(f"  {line}" for line in dirty[:10])
+            remainder = (
+                "" if len(dirty) <= 10
+                else f"\n  ... and {len(dirty) - 10} more"
+            )
             raise WorkspaceError(
                 f"source checkout {self.provider.project_root} has uncommitted "
                 "or untracked changes; commit or stash them before starting a "
-                "workflow that needs project access"
+                f"workflow that needs project access:\n{preview}{remainder}"
             )
         return self.provider.acquire(ref).path
 
@@ -96,184 +46,3 @@ class GitWorktreeGrant:
         return self.provider.sweep(
             frozenset(live_refs), min_age_seconds=self.min_age_seconds,
         )
-
-
-@dataclass
-class FileAllowlistGrant:
-    """Access to a caller-named allowlist of files, copied into a disposable
-    directory — the answer for a Workspace that is not a usable git repository.
-    """
-
-    project_root: Path
-    state_dir: Path
-    max_bytes: int = DEFAULT_MAX_BYTES
-    min_free_bytes: int = DEFAULT_MIN_FREE_BYTES
-    min_free_fraction: float = DEFAULT_MIN_FREE_FRACTION
-    min_age_seconds: float = DEFAULT_MIN_AGE_SECONDS
-    _root: Path = field(init=False, repr=False)
-    _staging_root: Path = field(init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        self.project_root = Path(self.project_root).resolve()
-        self.state_dir = Path(self.state_dir)
-        self._root = self.state_dir / f"project-files-v{STORAGE_VERSION}"
-        # A sibling of `_root`, not a child of it: `sweep()` only ever
-        # iterates `_root` for reuse-checking, so a copy still being staged
-        # here never collides on a name with a finished destination. Kept on
-        # the same filesystem as `_root` (both direct children of
-        # `state_dir`) so the rename in `acquire()` below is atomic.
-        self._staging_root = self.state_dir / f"project-files-staging-v{STORAGE_VERSION}"
-
-    def _destination(self, ref: str) -> Path:
-        return self._root / workspace_slug(ref)
-
-    def acquire(self, ref: str, *, files: Sequence[str] | None = None) -> Path:
-        if not files:
-            raise WorkspaceError(
-                "FileAllowlistGrant.acquire requires a non-empty files allowlist"
-            )
-        destination = self._destination(ref)
-        # Idempotent reattach, the same guarantee `GitWorkspaceProvider.acquire`
-        # already gives: a retry of one node is meant to see what an earlier
-        # attempt left, not a freshly re-copied directory. Safe to trust on
-        # sight: nothing below ever creates `destination` except by renaming
-        # a fully-populated staging directory onto it in one atomic step, so
-        # its existing at this path at all *is* "an earlier attempt finished
-        # copying everything it was asked to" — never a partial copy a failed
-        # attempt left behind. That trust depends on `STORAGE_VERSION`: it is
-        # what keeps a directory some *other* version of this code produced
-        # (which may not carry the same guarantee) from ever being found at
-        # this path in the first place.
-        if destination.exists() and any(destination.iterdir()):
-            return destination
-
-        staging = self._staging_root / f"{workspace_slug(ref)}.{secrets.token_hex(8)}"
-        try:
-            matches = self._resolve(files)
-            if not matches:
-                raise WorkspaceError(
-                    f"workspace access for {ref!r} matched no files under "
-                    f"{self.project_root} for {list(files)!r}"
-                )
-            total_bytes = sum(size for _source, _relative, size in matches)
-            self._check_quota(total_bytes, ref)
-            staging.mkdir(parents=True, exist_ok=True)
-            for source, relative, _size in matches:
-                target = staging / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, target)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                os.replace(staging, destination)
-            except OSError:
-                # A concurrent acquire() for the same ref finished first —
-                # in this process or another one; nothing here assumes which.
-                # Rename onto an existing non-empty directory always fails,
-                # so this is expected, not a real failure — reuse the winner
-                # and drop our own now-redundant copy.
-                if destination.exists() and any(destination.iterdir()):
-                    shutil.rmtree(staging, ignore_errors=True)
-                    return destination
-                raise
-        except QuotaExceeded:
-            shutil.rmtree(staging, ignore_errors=True)
-            raise
-        except WorkspaceError:
-            shutil.rmtree(staging, ignore_errors=True)
-            raise
-        except OSError as exc:
-            shutil.rmtree(staging, ignore_errors=True)
-            raise WorkspaceError(
-                f"could not provision workspace access for {ref!r}: {exc}"
-            ) from exc
-        return destination
-
-    def _resolve(self, patterns: Sequence[str]) -> list[tuple[Path, Path, int]]:
-        """Every file a glob pattern names, checked to still be inside the project.
-
-        A symlink resolving outside `project_root` is refused outright, not
-        silently skipped — the whole point of an allowlist is that every file
-        it names either lands in the copy or the request fails loudly; a
-        pattern that quietly matched fewer files than the author expected is
-        the same shape of surprise this feature exists to end.
-        """
-
-        matches: dict[Path, Path] = {}
-        for pattern in patterns:
-            for candidate in sorted(self.project_root.glob(pattern)):
-                if not candidate.is_file():
-                    continue
-                resolved = candidate.resolve()
-                try:
-                    relative = resolved.relative_to(self.project_root)
-                except ValueError:
-                    raise WorkspaceError(
-                        f"{pattern!r} matched {candidate} which resolves outside "
-                        f"{self.project_root} (a symlink pointing out of the "
-                        "project); refusing rather than copying it"
-                    ) from None
-                matches[resolved] = relative
-        return [
-            (source, relative, source.stat().st_size)
-            for source, relative in matches.items()
-        ]
-
-    def _check_quota(self, total_bytes: int, ref: str) -> None:
-        if total_bytes > self.max_bytes:
-            raise QuotaExceeded(
-                f"workspace access for {ref!r} would copy {total_bytes} bytes, "
-                f"over the {self.max_bytes} byte limit"
-            )
-        usage_root = self.state_dir if self.state_dir.exists() else self.state_dir.parent
-        usage = shutil.disk_usage(usage_root)
-        headroom = max(
-            self.min_free_bytes, int(usage.total * self.min_free_fraction)
-        )
-        if usage.free - total_bytes < headroom:
-            raise QuotaExceeded(
-                f"workspace access for {ref!r} would leave less than "
-                f"{headroom} bytes free on {usage_root}"
-            )
-
-    def sweep(self, live_refs: Iterable[str]) -> tuple[str, ...]:
-        """Reclaim a destination no longer live, and any abandoned staging copy.
-
-        No lock: `acquire()` for a workspace this Runtime is about to consider
-        dead, and this call deciding that, can run in different *processes* —
-        `--execution-workers` (nonzero by default) runs Agent Handlers in a
-        worker pool, not the process the cleanup loop runs in, so a
-        `threading.Lock` here would exclude nothing it needed to. Age is what
-        actually closes the gap instead: `min_age_seconds` (a caller's
-        liveness snapshot is always taken slightly before this reaches any
-        one directory) is skipped over regardless of live_refs, live or not —
-        including a staging copy some other process might still be writing
-        into, which by construction is never in `live_refs` at all (it is
-        only ever a ref *destinations* are keyed by).
-        """
-
-        now = time.time()
-        reclaimed: list[str] = []
-        if self._staging_root.exists():
-            for child in sorted(self._staging_root.iterdir()):
-                if not child.is_dir() or self._age(child, now) < self.min_age_seconds:
-                    continue
-                shutil.rmtree(child, ignore_errors=True)
-        if not self._root.exists():
-            return tuple(reclaimed)
-        live_slugs = {workspace_slug(ref) for ref in live_refs}
-        for child in sorted(self._root.iterdir()):
-            if child.name in live_slugs:
-                continue
-            if self._age(child, now) < self.min_age_seconds:
-                continue
-            shutil.rmtree(child, ignore_errors=True)
-            reclaimed.append(child.name)
-        return tuple(reclaimed)
-
-    @staticmethod
-    def _age(path: Path, now: float) -> float:
-        try:
-            return now - path.stat().st_mtime
-        except OSError:
-            # Gone already, or unreadable: nothing left to protect by waiting.
-            return float("inf")

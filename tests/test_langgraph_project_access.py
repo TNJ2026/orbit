@@ -34,7 +34,7 @@ class NeedTests(unittest.TestCase):
 
     def test_git_worktree_access_is_run_wide(self):
         need = project_access_need(
-            ir([node("a", policies=("pa",))], [COPY]), direct=False,
+            ir([node("a", policies=("pa",))], [COPY]),
         )
         self.assertTrue(need.required)
         self.assertEqual(("a",), need.agent_nodes)
@@ -43,9 +43,9 @@ class NeedTests(unittest.TestCase):
         need = project_access_need(ir([node("a", policies=("pa",))], [DIRECT]))
         self.assertTrue(need.required); self.assertTrue(need.write)
 
-    def test_non_git_access_is_always_full_write_access(self):
+    def test_read_only_intent_is_preserved(self):
         need = project_access_need(ir([node("a", policies=("pa",))], [DIRECT_RO]))
-        self.assertTrue(need.required); self.assertTrue(need.write)
+        self.assertTrue(need.required); self.assertFalse(need.write)
 
     def test_every_agent_node_gets_the_directory_not_just_the_declaring_one(self):
         need = project_access_need(ir(
@@ -559,7 +559,7 @@ class ServiceSeamTests(unittest.TestCase):
                 "workflow:linear", {"value": 1}, idempotency_key="k",
                 actor="local",
             )
-        self.assertIn("--agent-project-write", str(caught.exception))
+        self.assertIn("--agent-project-access", str(caught.exception))
         self.assertEqual([], list(self.service.list_runs()))
 
 

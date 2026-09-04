@@ -1116,12 +1116,22 @@ def compile_workflow(
         "workspace.project.read" in bound[node.id].capabilities
         for node in ir.nodes if node.id in bound
     )
-    project_need = project_access_need(ir, direct=direct_project)
+    project_need = project_access_need(ir)
+    git_project = any(
+        "workspace.read" in bound[node.id].capabilities
+        for node in ir.nodes if node.id in bound
+    )
     run_workspace_access = None
     if project_need:
+        if direct_project and not project_need.write:
+            raise LangGraphCompileError(
+                "workspace_access mode 'read_only' cannot be enforced for a "
+                "non-git real project directory; use explicit read_write "
+                "access"
+            )
         run_workspace_access = {
             "isolation": "none" if direct_project else "worktree",
-            "mode": "read_write",
+            "mode": "read_write" if project_need.write else "read_only",
         }
         # Which capability is missing is the whole of what the author has to
         # act on, so it is said here rather than collapsed into one message:
@@ -1142,7 +1152,7 @@ def compile_workflow(
                         f"node {node_id!r} asks to write the project directory, "
                         "which this Runtime was not started to grant"
                     )
-            elif "workspace.read" not in granted:
+            elif git_project and "workspace.read" not in granted:
                 raise LangGraphCompileError(
                     f"node {node_id!r} works in the Git worktree this run "
                     "takes, which this Runtime was not started to grant"
@@ -1211,7 +1221,9 @@ def compile_workflow(
             granted = bound[node.id].capabilities if node.id in bound else frozenset()
             config = (
                 run_workspace_access
-                if run_workspace_access is not None and node.id in project_need.agent_nodes
+                if run_workspace_access is not None and (
+                    node.id in project_need.agent_nodes or workspace_policies
+                )
                 else {"mode": "read_write", "isolation": "worktree"}
                 if "workspace.read" in granted
                 else workspace_policies[0].config or {}
@@ -1237,12 +1249,6 @@ def compile_workflow(
                     )
             elif "workspace.read" in granted:
                 pass
-            elif "workspace.read.files" in granted:
-                if not config.get("files"):
-                    raise LangGraphCompileError(
-                        f"node {node.id!r} workspace_access policy requires "
-                        "config.files on this deployment"
-                    )
             else:
                 raise LangGraphCompileError(
                     f"node {node.id!r} requires a Handler granted workspace access"
@@ -1323,7 +1329,10 @@ def compile_workflow(
             workspace_config = (
                 dict(run_workspace_access)
                 if run_workspace_access is not None
-                and current.id in project_need.agent_nodes
+                and (
+                    current.id in project_need.agent_nodes
+                    or workspace_policy is not None
+                )
                 else None
             )
             if workspace_config is None and workspace_policy is not None:

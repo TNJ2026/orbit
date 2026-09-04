@@ -26,10 +26,7 @@ from ..domain.handlers import (
     RecoveryDisposition, RecoveryResult, UnknownExternalResultError,
 )
 from ..domain.serialization import to_primitive
-from ...workspace import (
-    FileAllowlistGrant, GitWorktreeGrant, QuotaExceeded, WorkspaceError,
-    WorkspaceUnavailable,
-)
+from ...workspace import GitWorktreeGrant, WorkspaceError, WorkspaceUnavailable
 
 
 # The single output port every discovered Agent's manifest declares. The
@@ -135,7 +132,7 @@ class TrustedCliAgentClient:
         kill_grace_seconds=AGENT_KILL_GRACE_SECONDS, max_output_bytes=1_048_576,
         environment: Mapping[str, str] | None = None,
         workspace_root: Path | str | None = None,
-        project_workspace: GitWorktreeGrant | FileAllowlistGrant | None = None,
+        project_workspace: GitWorktreeGrant | None = None,
         project_root: Path | str | None = None,
     ) -> None:
         if not command or any(not item for item in command):
@@ -373,7 +370,7 @@ class TrustedCliAgentClient:
             if self.project_root is None:
                 raise HandlerValidationError(
                     "node asks for the project directory but this Runtime was "
-                    "not started with --agent-project-read"
+                    "not started with --agent-project-access"
                 )
             if not self.project_root.is_dir():
                 raise HandlerValidationError(
@@ -394,7 +391,7 @@ class TrustedCliAgentClient:
             return self.project_workspace.acquire(
                 run_id, files=granted.get("files"),
             )
-        except (WorkspaceError, WorkspaceUnavailable, QuotaExceeded) as exc:
+        except (WorkspaceError, WorkspaceUnavailable) as exc:
             # A real runtime failure — disk pressure, a permission change, a
             # quota this request exceeded, a lock this attempt never won —
             # not another way of saying "not authorized". It must fail this
