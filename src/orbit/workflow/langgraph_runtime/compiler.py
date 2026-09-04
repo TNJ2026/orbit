@@ -1543,6 +1543,9 @@ def compile_workflow(
                     **{node_id: None for node_id in invalidated},
                     current.id: route_name,
                 },
+                "join_deadlines": {
+                    node_id: None for node_id in invalidated
+                },
                 "execution_order": (current.id,),
             }
 

@@ -180,6 +180,12 @@ class HumanReworkTests(unittest.TestCase):
 
         graph, config = self.started()
 
+        # Model a deadline join that settled in the generation being rejected.
+        # The next generation must be allowed to settle that join independently.
+        graph.graph.update_state(
+            config, {"join_deadlines": {"review_context": True}},
+        )
+
         self.submit(graph, config, "reject", "再写一版")
 
         order = self.order(graph, config)
@@ -193,6 +199,10 @@ class HumanReworkTests(unittest.TestCase):
         # And the one output the back edge itself maps from survives, or there
         # would be no reason to carry across it.
         self.assertIn("route_review", held)
+        self.assertNotIn(
+            "review_context",
+            graph.graph.get_state(config).values["join_deadlines"],
+        )
 
     def test_an_approval_finishes_the_run_at_its_terminal(self) -> None:
         graph, config = self.started()
