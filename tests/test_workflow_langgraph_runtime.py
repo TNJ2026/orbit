@@ -3490,6 +3490,91 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
         # One for the first visit, one for the second.
         self.assertEqual([1, 2], timers)
 
+    def test_a_deadline_join_can_fire_again_after_a_back_edge(self) -> None:
+        """A generation's deadline is spent on that generation, not the run.
+
+        `fire_join_deadline` refuses to fire a join it has already fired, which
+        is what keeps a timer from settling one twice. The flag it reads lived
+        in state past the back edge that ended the generation, so the *next*
+        generation's join was born already-fired: its own timer came due, this
+        guard sent it away, and the run waited at that join for a deadline that
+        could never arrive again.
+
+        The state half of this is asserted in `test_workflow_rework`; this is
+        the consequence — the second generation's join actually firing.
+        """
+
+        deadline = IRPolicy(
+            "wait", "join",
+            {
+                "mode": "deadline", "merge_mode": "array_by_edge",
+                "deadline_seconds": 60, "min_successful": 1,
+            },
+        )
+        bounded = IRPolicy("again", "rework", {"max_generations": 3})
+        # One branch a person never answers, one that resolves. The join
+        # cannot proceed while the person is outstanding, so its deadline is
+        # the only thing that moves this run — which is what makes a spent
+        # deadline observable rather than merely recorded.
+        fan = node(
+            "fan", inputs=("value",), outputs=("value",), route_mode="parallel",
+        )
+        left = node(
+            "left", inputs=("value",), outputs=("value",),
+            kind="human", handler=False,
+        )
+        ready = node("ready", inputs=("value",), outputs=("value",))
+        join = node(
+            "join", inputs=("value",), outputs=("value",),
+            kind="join", handler=False,
+        )
+        join = IRNode(
+            join.id, join.kind, join.inputs, join.outputs, join.handler,
+            join.config, (deadline.id,), join.extension, join.route_mode,
+        )
+        # `route` has one outgoing edge on purpose: which way it goes is not
+        # what this is about, and a second edge would make it a question.
+        route = node(
+            "route", inputs=("value",), outputs=("value",),
+            kind="decision", handler=False,
+        )
+        ir = workflow(
+            (fan, left, ready, join, route),
+            (
+                edge("fan_left", "fan", "left"),
+                edge("fan_ready", "fan", "ready"),
+                edge("left_join", "left", "join"),
+                edge("ready_join", "ready", "join"),
+                edge("join_route", "join", "route"),
+                edge(
+                    "route_fan", "route", "fan",
+                    back_edge=True, policy_ref=bounded.id,
+                ),
+            ),
+            entry=("fan",), terminals=("route",), result=("join", "value"),
+            policies=(deadline, bounded),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("fan", lambda values, config, context: dict(values)),
+            binding("ready", lambda values, config, context: dict(values)),
+        ])
+        compiled = compile_workflow(ir, registry, checkpointer=InMemorySaver())
+        config = {"configurable": {"thread_id": "deadline-again"}}
+
+        compiled.invoke({"value": "in"}, config=config)
+        compiled.fire_join_deadline("join", config=config)
+        # That fired the join, took the back edge, and started the run over,
+        # so the person is being waited on again and so is the join.
+        compiled.fire_join_deadline("join", config=config)
+
+        order = list(compiled.graph.get_state(config).values["execution_order"])
+        # Without the invalidation the second call is a no-op: the guard reads
+        # the first generation's flag, returns the run as it stands, and the
+        # trace stops at `('fan','ready','join','route','fan','ready')` with
+        # nothing able to move it again.
+        self.assertEqual(2, order.count("join"), order)
+        self.assertEqual(3, order.count("fan"), order)
+
     def test_a_join_fed_only_by_human_branches_still_gets_its_deadline(self) -> None:
         """The one wait the deadline could not bound was the one it was for.
 
