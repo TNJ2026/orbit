@@ -2152,6 +2152,41 @@ class GoalHomeTests(BrowserE2ETestCase):
         self.assertEqual("", field.input_value())
         self.assertIn("驳回原因", dialog.inner_text())
 
+    def test_approving_asks_nothing_and_sends_what_the_ui_encoded(self) -> None:
+        """Approve is the whole answer; nobody is shown the submission.
+
+        Both facts a reply needs — the port to answer on and the `decision`
+        field the branches test — are in the interrupt the run is stopped on,
+        so the button builds the submission and sends it. Nothing is asked,
+        by this UI or by the browser, and what the run settles on is what the
+        UI encoded rather than something a reviewer retyped.
+        """
+
+        page = self.open("zh-CN")
+        page.wait_for_selector(".simplified-workspace-composer")
+        workflow_id = self.publish(page, self.runnable(human=True))
+        run = self.start(page, workflow_id, goal="approving")
+
+        page.goto(f"{self.base}/ui/#/runs/{quote(run['run_id'], safe='')}")
+        approve = page.locator(".simplified-run-state button.primary").first
+        approve.wait_for()
+        native = []
+        page.on("dialog", lambda dialog: (native.append(dialog.message), dialog.dismiss()))
+        approve.click()
+        self.wait_for_status(page, run["run_id"], "completed")
+
+        self.assertEqual([], native)
+        self.assertEqual(0, page.locator("dialog.app-dialog").count())
+        # This workflow's result *is* the submission, so the run holds the
+        # exact object the button encoded — approved, and with the `value`
+        # the Runtime requires present and empty.
+        settled = page.evaluate(
+            "id => fetch(`/api/v1/langgraph-runs/${encodeURIComponent(id)}`)"
+            ".then(r => r.json()).then(b => b.data.result)",
+            run["run_id"],
+        )
+        self.assertEqual({"decision": "approve", "value": None}, settled)
+
     def test_a_run_still_in_flight_keeps_the_composer_locked(self) -> None:
         """The other half: `interrupted` is not over, and must still lock."""
 
