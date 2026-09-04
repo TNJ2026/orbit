@@ -7,6 +7,7 @@ import pickle
 import sqlite3
 import tempfile
 from threading import Thread
+import threading
 import time
 import unittest
 
@@ -244,16 +245,20 @@ class DelegationQueueTests(unittest.TestCase):
         saved = self.queue.checkpoint(
             "delegation:checkpoint", actor="session:1", worker_id="worker:1",
             checkpoint={"stage": "researched", "artifacts": ["artifact:1"]},
-            expected_revision=0,
+            expected_revision=0, lease_seconds=5,
         )
         self.assertEqual(1, saved["checkpoint_revision"])
         self.assertEqual("researched", saved["checkpoint"]["stage"])
         replay = self.queue.checkpoint(
             "delegation:checkpoint", actor="session:1", worker_id="worker:1",
             checkpoint={"stage": "researched", "artifacts": ["artifact:1"]},
-            expected_revision=0,
+            expected_revision=0, lease_seconds=300,
         )
         self.assertEqual(1, replay["checkpoint_revision"])
+        self.assertGreater(
+            datetime.fromisoformat(replay["lease_expires_at"].replace("Z", "+00:00")),
+            datetime.fromisoformat(saved["lease_expires_at"].replace("Z", "+00:00")),
+        )
         with self.assertRaisesRegex(ValueError, "revision or worker lease"):
             self.queue.checkpoint(
                 "delegation:checkpoint", actor="session:1", worker_id="worker:2",
@@ -596,6 +601,65 @@ class HarnessSubagentHandlerTests(unittest.TestCase):
             thread.join(2)
             self.assertFalse(thread.is_alive())
             self.assertEqual({"result": {"answer": "done"}}, dict(captured[0].output))
+
+    def test_app_delegation_carries_the_runtime_selected_workspace(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            root = Path(directory).resolve()
+            handler = AppDelegationHandler(
+                DelegationQueue(root / "app.db", require_execution_lease=False),
+                project_root=root,
+            )
+            request = SimpleNamespace(
+                attempt_id="attempt:workspace", idempotency_key="workspace",
+                actor="session:app", input={"task": {"goal": "edit"}},
+                config={"target": "run_initiator"},
+                workspace_access={"mode": "read_write", "isolation": "none"},
+                run_id="run:workspace",
+                deadline=datetime.now(timezone.utc) + timedelta(minutes=5),
+            )
+
+            prepared = handler.prepare(request, SimpleNamespace(request=request))
+
+            self.assertEqual("direct", prepared.payload["workspace"]["kind"])
+            self.assertEqual(str(root), prepared.payload["workspace"]["path"])
+            self.assertEqual("read_write", prepared.payload["workspace"]["access"])
+
+    def test_app_delegation_enqueues_the_workspace_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            root = Path(directory).resolve()
+            queue = DelegationQueue(root / "app.db", require_execution_lease=False)
+            handler = AppDelegationHandler(queue, poll_seconds=0.005, project_root=root)
+            request = SimpleNamespace(
+                attempt_id="attempt:workspace-queue", idempotency_key="workspace-queue",
+                actor="session:app", input={"task": {"goal": "edit"}},
+                config={"target": "run_initiator", "max_wall_seconds": 2},
+                workspace_access={"mode": "read_write", "isolation": "none"},
+                run_id="run:workspace-queue",
+                deadline=datetime.now(timezone.utc) + timedelta(minutes=5),
+            )
+            prepared = handler.prepare(request, SimpleNamespace(request=request))
+            captured = []
+
+            thread = threading.Thread(
+                target=lambda: captured.append(handler.execute(prepared, None)),
+                daemon=True,
+            )
+            thread.start()
+            claimed = None
+            for _ in range(100):
+                claimed = queue.claim(actor="session:app", worker_id="codex-task:workspace")
+                if claimed is not None:
+                    break
+                time.sleep(0.005)
+            self.assertIsNotNone(claimed)
+            self.assertEqual(str(root), claimed["request"]["workspace"]["path"])
+            self.assertEqual("direct", claimed["request"]["workspace"]["kind"])
+            queue.complete(
+                claimed["delegation_id"], actor="session:app",
+                worker_id="codex-task:workspace", result={"ok": True},
+            )
+            thread.join(2)
+            self.assertFalse(thread.is_alive())
 
     def test_app_handler_refuses_a_legacy_background_target_at_runtime(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:

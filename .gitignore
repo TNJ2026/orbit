@@ -24,6 +24,7 @@ docs/*
 !docs/agent-cli-execution-reliability-plan.md
 !docs/agent-app-host-integration-plan.md
 !docs/codex-plugin-integration-plan.md
+!docs/project-file-access-design.md
 !docs/deepseek-harness-integration-plan.md
 !docs/background-agent-worker.md
 !agent-app.json

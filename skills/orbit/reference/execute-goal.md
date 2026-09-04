@@ -92,6 +92,12 @@ resolved workflow identity are sent to `start_run`.
    what prevents that deadlock.
 6. Execute only commands present in the latest `allowed_commands[]`. Never
    construct mutation URLs or infer a command from an earlier state.
+   When a claimed App/Harness delegation contains `request.workspace`, run the
+   delegated Agent step with its working directory set to the exact absolute
+   `workspace.path`. Treat `kind`, `project_root`, `access`, and `run_id` as
+   Runtime-selected facts: do not substitute the App session's cwd. If the host
+   cannot select that directory, fail the delegation explicitly rather than
+   running it elsewhere. All delegated steps in one Run receive the same path.
 7. If the run is interrupted, present the workflow, current step, question,
    and choices when available. Call `resume_run` only after the user supplies
    the answer, using the current revision, matching `interrupt_id`, and a fresh

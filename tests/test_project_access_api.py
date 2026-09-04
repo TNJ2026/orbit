@@ -35,12 +35,7 @@ class ProjectAccessEndpointTests(unittest.TestCase):
         publish_linear_workflow(self.db)
         self.project = self.root / "project"
         self.project.mkdir()
-        git(self.project, "init", "--initial-branch=main")
-        git(self.project, "config", "user.email", "t@e.com")
-        git(self.project, "config", "user.name", "T")
         (self.project / "tracked.txt").write_text("before\n")
-        git(self.project, "add", "-A")
-        git(self.project, "commit", "-m", "init")
 
     def app(self, **kwargs):
         app = create_app(
@@ -251,10 +246,8 @@ class ProjectAccessEndpointTests(unittest.TestCase):
         self.assertEqual([], payload["allowed_commands"])
         self.assertEqual("run-1", held["run_id"])
         self.assertTrue(held["holder_live"])
-        self.assertEqual("git", held["recovery"]["kind"])
-        self.assertIn(
-            "untracked files git is not ignoring", held["recovery"]["covered"],
-        )
+        self.assertEqual("unprotected_direct", held["recovery"]["kind"])
+        self.assertIn("no automatic rollback", held["recovery"]["uncovered"][0])
         self.assertEqual([], payload["needs_recovery"])
 
     def test_a_claim_whose_runtime_is_gone_is_flagged_for_recovery(self) -> None:
@@ -302,7 +295,7 @@ class RunChangesEndpointTests(ProjectAccessEndpointTests):
         # filesystem diff, whatever it managed to compare.
         self.assertFalse(payload["complete_record"])
 
-    def test_a_run_that_held_the_project_reports_what_git_saw(self) -> None:
+    def test_a_non_git_run_reports_that_no_complete_diff_is_available(self) -> None:
         app = self.app(discover_agents=True, agent_project_write=True)
         access = app.state.runtime.langgraph_service.project_access
         from orbit.workflow.langgraph_runtime.project_access import ProjectAccessNeed
@@ -320,10 +313,9 @@ class RunChangesEndpointTests(ProjectAccessEndpointTests):
 
         summary = payload["git"]
         self.assertEqual("run_cumulative", summary["scope"])
-        self.assertIn(
-            {"path": "tracked.txt", "status": "modified"}, summary["content"],
-        )
-        self.assertIn({"path": "made.txt", "status": "added"}, summary["content"])
+        self.assertEqual("unprotected_direct", summary["kind"])
+        self.assertEqual([], summary["content"])
+        self.assertIn("no automatic", summary["error"])
         self.assertFalse(payload["complete_record"])
         self.assertIn("not a complete filesystem diff", payload["note"])
 

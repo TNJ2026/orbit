@@ -827,53 +827,30 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Let a workflow node that declares a workspace_access policy see "
-            "real project files instead of an empty scratch directory. Opt-in "
-            "on purpose: this is the only switch that lets a workflow's Agent "
-            "read the project it runs in, so it is never the default. A git "
-            "repository is delivered as a disposable worktree; anything else "
-            "is delivered as a copy of only the files a node names."
+            "the project it runs in. Git projects use one disposable worktree "
+            "per Run; non-git projects use the complete real directory and "
+            "serialize Runs. This grants read/write access and is never the default."
         ),
     )
     serve_cmd.add_argument(
         "--agent-project-access-max-bytes",
         type=int, default=None, metavar="BYTES",
-        help=(
-            "Cap on how much a single non-git workspace_access grant may copy "
-            "(default: 2 GiB). Ignored for a git project root, which is "
-            "delivered as a worktree instead of a copy."
-        ),
+        help=argparse.SUPPRESS,
     )
     serve_cmd.add_argument(
         "--agent-project-access-min-free-bytes",
         type=int, default=None, metavar="BYTES",
-        help=(
-            "Refuse a non-git workspace_access grant that would leave less "
-            "than this much disk free (default: 10 GiB, or 10%% of the "
-            "volume, whichever is larger)."
-        ),
+        help=argparse.SUPPRESS,
     )
     serve_cmd.add_argument(
         "--agent-project-read",
         action="store_true",
-        help=(
-            "Let a workflow node declaring workspace_access with "
-            "isolation 'none' read the project directory itself, rather than "
-            "a disposable copy of it. Separate consent from "
-            "--agent-project-access: that one hands out copies, this one "
-            "hands out the developer's actual files, uncommitted work "
-            "included."
-        ),
+        help=argparse.SUPPRESS,
     )
     serve_cmd.add_argument(
         "--agent-project-write",
         action="store_true",
-        help=(
-            "Let such a node also write the project directory. Implies "
-            "--agent-project-read. This is the switch that lets an Agent CLI "
-            "edit real files with no copy in between and no undo of its own; "
-            "one run holds the project at a time, and everything it changes "
-            "is the working tree you are sitting in."
-        ),
+        help=argparse.SUPPRESS,
     )
     serve_cmd.add_argument(
         "--structured-agent",

@@ -1009,7 +1009,7 @@ class RetentionTests(unittest.TestCase):
             connection.commit()
 
         self.assertIn(
-            f"{run.run_id}:in_flight_node", self.engine.live_workspace_refs(),
+            run.run_id, self.engine.live_workspace_refs(),
         )
 
     def test_a_run_that_ended_recently_is_kept(self) -> None:

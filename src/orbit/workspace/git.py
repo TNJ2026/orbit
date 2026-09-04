@@ -194,6 +194,30 @@ class GitWorkspaceProvider:
             return False
         return bool(status.stdout.strip())
 
+    def project_is_dirty(self) -> bool:
+        """Whether the source checkout differs from HEAD, including untracked files.
+
+        A run worktree starts from HEAD. Refusing a dirty source checkout keeps
+        "full project access" honest: otherwise local edits or untracked input
+        would silently be absent from the Agent's workspace.
+        """
+
+        try:
+            status = _git(
+                self.project_root, "status", "--porcelain",
+                "--untracked-files=all", timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise WorkspaceError(
+                f"could not inspect source checkout {self.project_root}: {exc}"
+            ) from exc
+        if status.returncode != 0:
+            detail = status.stderr.strip() or "git status failed"
+            raise WorkspaceError(
+                f"could not inspect source checkout {self.project_root}: {detail}"
+            )
+        return bool(status.stdout.strip())
+
     # -- lifecycle --------------------------------------------------------
 
     def acquire(self, workspace_ref: str) -> WorkspaceLease:

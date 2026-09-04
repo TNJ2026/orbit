@@ -1124,21 +1124,13 @@ class WorkspaceAccessPolicyTests(unittest.TestCase):
         })
         self.assertEqual(("done",), analysis.outgoing["review"])
 
-    def test_a_missing_mode_is_refused(self) -> None:
-        with self.assertRaises(DiagnosticError) as caught:
-            self.analyze({})
-        found = [
-            item for item in caught.exception.diagnostics
-            if item.code == "DSL_POLICY_INVALID"
-        ]
-        self.assertTrue(found)
-        self.assertIn("read_only", found[0].message)
+    def test_empty_config_uses_runtime_selected_project_access(self) -> None:
+        analysis = self.analyze({})
+        self.assertEqual(("done",), analysis.outgoing["review"])
 
-    def test_read_write_is_not_yet_supported(self) -> None:
-        with self.assertRaises(DiagnosticError) as caught:
-            self.analyze({"mode": "read_write"})
-        codes = {item.code for item in caught.exception.diagnostics}
-        self.assertIn("DSL_POLICY_INVALID", codes)
+    def test_legacy_read_write_config_remains_accepted(self) -> None:
+        analysis = self.analyze({"mode": "read_write"})
+        self.assertEqual(("done",), analysis.outgoing["review"])
 
     def test_an_empty_files_list_is_refused(self) -> None:
         with self.assertRaises(DiagnosticError) as caught:
@@ -1295,13 +1287,15 @@ class ProjectAccessModeTests(unittest.TestCase):
         self.assertIn("left", message)
         self.assertIn("right", message)
 
-    def test_the_same_fan_out_is_fine_with_a_disposable_copy(self) -> None:
-        """Under `worktree` each node gets its own copy, so nothing overlaps."""
-
-        compiled = self.compile(self.fan_out(
-            {"mode": "read_only", "isolation": "worktree"},
-        ))
-        self.assertEqual("workflow:project_access", compiled.ir.workflow_id)
+    def test_legacy_worktree_config_does_not_enable_parallel_agents(self) -> None:
+        with self.assertRaises(DiagnosticError) as caught:
+            self.compile(self.fan_out(
+                {"mode": "read_only", "isolation": "worktree"},
+            ))
+        self.assertIn(
+            "shared project workspace",
+            " ".join(item.message for item in caught.exception.diagnostics),
+        )
 
     def test_a_sequential_agent_chain_is_accepted(self) -> None:
         compiled = self.compile(self.document(
@@ -1338,18 +1332,16 @@ class ProjectAccessModeTests(unittest.TestCase):
         message = " ".join(item.message for item in caught.exception.diagnostics)
         self.assertIn("works in its own worktree", message)
 
-    def test_read_write_requires_isolation_none(self) -> None:
-        with self.assertRaises(DiagnosticError) as caught:
-            self.compile(self.document(
-                [self.agent("first"), self.terminal("done")],
-                [self.edge("e1", "first", "done", "result")],
-                entry=["first"], terminals=["done"],
-                result={"node": "first", "port": "result"},
-                config={"mode": "read_write", "isolation": "worktree"},
-                holder="first",
-            ))
-        message = " ".join(item.message for item in caught.exception.diagnostics)
-        self.assertIn("requires isolation 'none'", message)
+    def test_legacy_read_write_worktree_combination_is_accepted(self) -> None:
+        compiled = self.compile(self.document(
+            [self.agent("first"), self.terminal("done")],
+            [self.edge("e1", "first", "done", "result")],
+            entry=["first"], terminals=["done"],
+            result={"node": "first", "port": "result"},
+            config={"mode": "read_write", "isolation": "worktree"},
+            holder="first",
+        ))
+        self.assertEqual("workflow:project_access", compiled.ir.workflow_id)
 
     def test_files_is_refused_alongside_isolation_none(self) -> None:
         with self.assertRaises(DiagnosticError) as caught:

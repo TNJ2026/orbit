@@ -1112,12 +1112,16 @@ def compile_workflow(
     }
     from .project_access import project_access_need
 
-    project_need = project_access_need(ir)
+    direct_project = any(
+        "workspace.project.read" in bound[node.id].capabilities
+        for node in ir.nodes if node.id in bound
+    )
+    project_need = project_access_need(ir, direct=direct_project)
     run_workspace_access = None
     if project_need:
         run_workspace_access = {
-            "isolation": "none",
-            "mode": "read_write" if project_need.write else "read_only",
+            "isolation": "none" if direct_project else "worktree",
+            "mode": "read_write",
         }
         # Which capability is missing is the whole of what the author has to
         # act on, so it is said here rather than collapsed into one message:
@@ -1127,15 +1131,21 @@ def compile_workflow(
         # `isolation: none` the grant is the run's, so they work there too.
         for node_id in project_need.agent_nodes:
             granted = bound[node_id].capabilities
-            if "workspace.project.read" not in granted:
+            if direct_project:
+                if "workspace.project.read" not in granted:
+                    raise LangGraphCompileError(
+                        f"node {node_id!r} works in the project directory this "
+                        "run takes, which this Runtime was not started to grant"
+                    )
+                if "workspace.project.write" not in granted:
+                    raise LangGraphCompileError(
+                        f"node {node_id!r} asks to write the project directory, "
+                        "which this Runtime was not started to grant"
+                    )
+            elif "workspace.read" not in granted:
                 raise LangGraphCompileError(
-                    f"node {node_id!r} works in the project directory this "
-                    "run takes, which this Runtime was not started to grant"
-                )
-            if project_need.write and "workspace.project.write" not in granted:
-                raise LangGraphCompileError(
-                    f"node {node_id!r} asks to write the project directory, "
-                    "which this Runtime was not started to grant"
+                    f"node {node_id!r} works in the Git worktree this run "
+                    "takes, which this Runtime was not started to grant"
                 )
     for node in ir.nodes:
         # A decision belongs here too, and its absence made every workflow
@@ -1202,6 +1212,8 @@ def compile_workflow(
             config = (
                 run_workspace_access
                 if run_workspace_access is not None and node.id in project_need.agent_nodes
+                else {"mode": "read_write", "isolation": "worktree"}
+                if "workspace.read" in granted
                 else workspace_policies[0].config or {}
             )
             if config.get("isolation") == "none":
@@ -1308,6 +1320,22 @@ def compile_workflow(
                 policy for policy in ir.policies
                 if policy.id in current.policies and policy.kind == "workspace_access"
             ), None)
+            workspace_config = (
+                dict(run_workspace_access)
+                if run_workspace_access is not None
+                and current.id in project_need.agent_nodes
+                else None
+            )
+            if workspace_config is None and workspace_policy is not None:
+                capabilities = (
+                    frozenset() if implementation is None
+                    else implementation.capabilities
+                )
+                workspace_config = (
+                    {"mode": "read_write", "isolation": "worktree"}
+                    if "workspace.read" in capabilities
+                    else to_primitive(workspace_policy.config)
+                )
             acceptance_policy = next((
                 policy for policy in ir.policies
                 if policy.id in current.policies and policy.kind == "acceptance"
@@ -1357,11 +1385,7 @@ def compile_workflow(
                             if acceptance_policy is not None else None
                         ),
                         workspace_access=(
-                            dict(run_workspace_access)
-                            if run_workspace_access is not None
-                            and current.id in project_need.agent_nodes
-                            else to_primitive(workspace_policy.config)
-                            if workspace_policy is not None else None
+                            workspace_config
                         ),
                     )
                 try:

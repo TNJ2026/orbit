@@ -658,7 +658,12 @@ def analyze_dsl(
             # generating Agent. Shape only, here: whether this Runtime can
             # actually satisfy a `files` allowlist is a fact about the
             # deployment, checked where the deployment is known, not here.
-            mode = config.get("mode")
+            # The current contract needs no knobs: project type selects a
+            # shared git worktree or the complete non-git directory. Legacy
+            # fields remain readable so already-published definitions can be
+            # republished during migration, but Runtime selection overrides
+            # them.
+            mode = config.get("mode", "read_write")
             if mode not in {"read_only", "read_write"}:
                 diagnostics.append(_diagnostic(
                     document, "DSL_POLICY_INVALID",
@@ -666,26 +671,14 @@ def analyze_dsl(
                     "'read_write'",
                     path + ("config", "mode"),
                 ))
-            # `worktree` is the disposable copy this policy has always meant:
-            # a git worktree, or a file-allowlist copy off a non-git project,
-            # one per node. `none` is the real project directory itself —
-            # current content, shared, and written through. They are separate
-            # axes from `mode`, and only three of the four combinations mean
-            # anything: writing into a disposable copy would need a defined
-            # way back out, which is a design of its own and not this one.
+            # Kept only as migration-time shape checks. Runtime project type
+            # now selects the isolation and access mode; these legacy values
+            # do not control provisioning.
             isolation = config.get("isolation", "worktree")
             if isolation not in {"worktree", "none"}:
                 diagnostics.append(_diagnostic(
                     document, "DSL_POLICY_INVALID",
                     "workspace_access isolation must be 'worktree' or 'none'",
-                    path + ("config", "isolation"),
-                ))
-            elif mode == "read_write" and isolation != "none":
-                diagnostics.append(_diagnostic(
-                    document, "DSL_POLICY_INVALID",
-                    "workspace_access mode 'read_write' requires isolation "
-                    "'none'; writing into a disposable copy has no defined "
-                    "way back into the project",
                     path + ("config", "isolation"),
                 ))
             # What must be recoverable when git cannot provide a baseline.
@@ -963,17 +956,15 @@ def analyze_dsl(
     direct = {
         policy["id"] for policy in policies
         if policy["kind"] == "workspace_access"
-        and policy["config"].get("isolation") == "none"
     }
     if direct:
-        # `isolation: none` is the real project directory: one directory, all
-        # Agents in the run, written through. Two Agents in it at once means
-        # two CLIs with full permissions editing the same files, so the run
-        # serializes them — and a graph that asks for two at once is asking
-        # for something this mode will not do.
+        # A workspace_access policy now means one run-wide writable workspace:
+        # a shared worktree for git or the real directory otherwise. Two Agent
+        # branches would therefore edit the same files concurrently.
         agents = {
             node_id for node_id, manifest in resolved.items()
             if manifest.name.startswith("agent.")
+            or manifest.name in {"app.delegate", "harness.subagent"}
         }
         for node in nodes:
             if (node.get("route_mode") or "exclusive") != "parallel":
@@ -1000,8 +991,8 @@ def analyze_dsl(
                     document, "DSL_POLICY_INVALID",
                     f"node {node['id']!r} fans out in parallel to Agent nodes "
                     f"({', '.join(overlapping)}), which cannot run together "
-                    "while the workflow holds the project directory "
-                    "(workspace_access isolation 'none'); make the fan-out "
+                    "while the workflow holds its shared project workspace; "
+                    "make the fan-out "
                     "sequential or drop the project access",
                     ("nodes", node_index[node["id"]], "route_mode"),
                 ))
@@ -1015,8 +1006,8 @@ def analyze_dsl(
                 diagnostics.append(_diagnostic(
                     document, "DSL_POLICY_INVALID",
                     f"node {node_id!r} uses {manifest.name!r}, which works in "
-                    "its own worktree, not the project directory this "
-                    "workflow asked for (workspace_access isolation 'none')",
+                    "its own worktree, not the shared project workspace this "
+                    "workflow asked for",
                     ("nodes", node_index[node_id], "handler"),
                 ))
 

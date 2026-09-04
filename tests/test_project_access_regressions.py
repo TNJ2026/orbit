@@ -373,12 +373,7 @@ class RunWideGrantRegressions(unittest.TestCase):
                 binding(first.id, invoke, capabilities=caps), binding(second.id, invoke),
             ]))
 
-    def test_the_missing_capability_is_named_read_apart_from_write(self):
-        """Which switch to turn on is the whole of what the author can act on.
-
-        Reading a developer's files and editing them are separate grants, so
-        one message covering both would send somebody to the wrong flag.
-        """
+    def test_the_unified_project_access_capability_is_required(self):
 
         from dataclasses import replace
         from tests.test_workflow_langgraph_runtime import node, edge, workflow, binding
@@ -400,7 +395,9 @@ class RunWideGrantRegressions(unittest.TestCase):
                 binding(second.id, invoke, capabilities=capabilities),
             ]))
 
-        with self.assertRaisesRegex(ValueError, "works in the project directory"):
+        with self.assertRaisesRegex(ValueError, "Runtime was not started to grant"):
             compiled("read_only", frozenset())
-        with self.assertRaisesRegex(ValueError, "asks to write the project"):
-            compiled("read_write", frozenset({"workspace.project.read"}))
+        # Non-git direct access is one full read/write grant.
+        compiled("read_write", frozenset({
+            "workspace.project.read", "workspace.project.write",
+        }))

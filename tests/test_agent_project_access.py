@@ -162,6 +162,30 @@ class GitProjectAccessTests(unittest.TestCase):
         )
         self.assertIn("README.md", response.output["files"])
 
+    def test_agent_nodes_in_one_run_share_one_worktree(self) -> None:
+        client = TrustedCliAgentClient(
+            (str(self.cli.path),), project_workspace=self.grant,
+        )
+        first = client._workspace(context(  # noqa: SLF001
+            run_id="run-shared", node_id="one",
+            workspace_access={"mode": "read_write", "isolation": "worktree"},
+        ))
+        (first / "from-first.txt").write_text("shared\n")
+        second = client._workspace(context(  # noqa: SLF001
+            run_id="run-shared", node_id="two",
+            workspace_access={"mode": "read_write", "isolation": "worktree"},
+        ))
+
+        self.assertEqual(first.resolve(), second.resolve())
+        self.assertEqual("shared\n", (second / "from-first.txt").read_text())
+
+    def test_dirty_source_checkout_is_refused(self) -> None:
+        (self.root / "untracked.txt").write_text("not in HEAD\n")
+        with self.assertRaisesRegex(
+            WorkspaceError, "commit or stash.*before starting",
+        ):
+            self.grant.acquire("run-dirty")
+
 
 class FileAllowlistProjectAccessTests(unittest.TestCase):
     """A non-git project root is delivered as a copy of only named files."""
@@ -661,6 +685,13 @@ class CreateAppGitDetectionTests(unittest.TestCase):
                 return entry.implementation.client.project_workspace
         raise AssertionError("agent.claude was not registered")
 
+    def project_root_of(self, app):
+        composition = app.state.runtime
+        for entry in composition.handler_registry.entries():
+            if entry.manifest.name == "agent.claude":
+                return entry.implementation.client.project_root
+        raise AssertionError("agent.claude was not registered")
+
     def git_repo(self) -> Path:
         root = Path(self.temp.name) / "project"
         root.mkdir()
@@ -681,11 +712,12 @@ class CreateAppGitDetectionTests(unittest.TestCase):
         app = self.build_app(self.git_repo())
         self.assertIsInstance(self.project_workspace_of(app), GitWorktreeGrant)
 
-    def test_a_non_git_project_gets_a_file_allowlist_grant(self) -> None:
+    def test_a_non_git_project_gets_the_complete_real_directory(self) -> None:
         root = Path(self.temp.name) / "project"
         root.mkdir()
         app = self.build_app(root)
-        self.assertIsInstance(self.project_workspace_of(app), FileAllowlistGrant)
+        self.assertIsNone(self.project_workspace_of(app))
+        self.assertEqual(root.resolve(), self.project_root_of(app))
 
     def test_git_missing_refuses_startup_rather_than_silently_downgrading(self) -> None:
         root = self.git_repo()

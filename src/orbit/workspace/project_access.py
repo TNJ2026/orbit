@@ -1,25 +1,11 @@
-"""Explicit, opt-in delivery of real project files into an Agent's own
-working directory — what `orbit serve --agent-project-access` grants.
+"""Project workspaces granted by ``orbit serve --agent-project-access``.
 
-Two shapes, one narrow interface (`acquire(ref, *, files=None) -> Path`),
-chosen once at Runtime startup based on whether the Workspace is a usable git
-repository:
+The production path uses one shared Git worktree per Run when the project is
+a usable repository. Non-Git projects are intentionally handled by direct
+access to the real project root in the Runtime layer and do not use a copy.
 
-* `GitWorktreeGrant` — the whole tracked tree, via an isolated `git worktree`
-  (`GitWorkspaceProvider`, already the one place in the runtime that touches a
-  real checkout). Cheap and safe because git's own object store makes "the
-  whole tree" cheap, and the worktree is disposable and never merged back.
-* `FileAllowlistGrant` — for anything that is not a usable git repository.
-  There is no equivalent "only the tracked files" boundary outside git, so
-  this never copies more than a caller-named allowlist of relative paths —
-  never a denylist over "everything except". A caller wanting the whole
-  directory says so explicitly (`files=["**/*"]`), still bounded by the same
-  size and disk-headroom limits as any narrower request.
-
-Neither grant is confinement. Nothing here stops a CLI running inside a
-granted directory from writing files of its own; what both guarantee is that
-those writes land in a disposable copy — a throwaway git branch, or a plain
-directory nothing reads from again — never the developer's real working tree.
+``FileAllowlistGrant`` remains readable for compatibility and focused tests,
+but no production composition selects it.
 
 Both grants are plain, lock-free dataclasses on purpose. `acquire()` for one
 ref and `sweep()` deciding another ref is dead can run concurrently in
@@ -98,6 +84,12 @@ class GitWorktreeGrant:
         # `files` matters to `FileAllowlistGrant`, the other implementation of
         # this same interface — a caller that does not know which one it is
         # talking to should never have to care.
+        if self.provider.project_is_dirty():
+            raise WorkspaceError(
+                f"source checkout {self.provider.project_root} has uncommitted "
+                "or untracked changes; commit or stash them before starting a "
+                "workflow that needs project access"
+            )
         return self.provider.acquire(ref).path
 
     def sweep(self, live_refs: Iterable[str]) -> tuple[str, ...]:

@@ -32,17 +32,20 @@ class NeedTests(unittest.TestCase):
     def test_no_policy_needs_nothing(self):
         self.assertFalse(project_access_need(ir([node("a")])))
 
-    def test_worktree_isolation_needs_nothing(self):
-        need = project_access_need(ir([node("a", policies=("pa",))], [COPY]))
-        self.assertFalse(need.required)
+    def test_git_worktree_access_is_run_wide(self):
+        need = project_access_need(
+            ir([node("a", policies=("pa",))], [COPY]), direct=False,
+        )
+        self.assertTrue(need.required)
+        self.assertEqual(("a",), need.agent_nodes)
 
     def test_isolation_none_is_required_and_write(self):
         need = project_access_need(ir([node("a", policies=("pa",))], [DIRECT]))
         self.assertTrue(need.required); self.assertTrue(need.write)
 
-    def test_read_only_direct_is_required_but_not_write(self):
+    def test_non_git_access_is_always_full_write_access(self):
         need = project_access_need(ir([node("a", policies=("pa",))], [DIRECT_RO]))
-        self.assertTrue(need.required); self.assertFalse(need.write)
+        self.assertTrue(need.required); self.assertTrue(need.write)
 
     def test_every_agent_node_gets_the_directory_not_just_the_declaring_one(self):
         need = project_access_need(ir(

@@ -390,10 +390,9 @@ class TrustedCliAgentClient:
                 "started with --agent-project-access"
             )
         run_id = str(getattr(context.request, "run_id", "") or "shared")
-        node_id = str(getattr(context.request, "node_id", "") or "shared")
         try:
             return self.project_workspace.acquire(
-                f"{run_id}:{node_id}", files=granted.get("files"),
+                run_id, files=granted.get("files"),
             )
         except (WorkspaceError, WorkspaceUnavailable, QuotaExceeded) as exc:
             # A real runtime failure — disk pressure, a permission change, a

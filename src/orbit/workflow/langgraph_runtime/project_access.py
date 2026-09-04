@@ -1,12 +1,10 @@
-"""Whether a run holds the real project directory, and who says so.
+"""Whether a run needs a shared project workspace, and who says so.
 
-`workspace_access` with `isolation: none` is a property of the *run*, not of
-the node that happened to declare it: every Agent in that run works in the
-same real directory, so that they can hand each other files the way they do
-in a scratch directory today. Deriving it from the whole workflow before the
-first node executes — rather than switching directories when execution
-reaches the node that asked — is what keeps a run from starting in one place
-and finishing in another. Design: docs/project-file-access-design.md §2, §4.
+``workspace_access`` is a property of the *run*, not only the declaring node.
+Every Agent/App/Harness node in that run gets the same directory: a Run-scoped
+worktree for Git projects, or the real project root for non-Git projects.
+Deriving this once before execution keeps nodes from changing workspace midway
+through a run. Design: docs/project-file-access-design.md.
 
 This module answers two questions and holds nothing else:
 
@@ -55,8 +53,8 @@ class ProjectAccessNeed:
 
     required: bool = False
     write: bool = False
-    # Files the workflow says must be recoverable. Only consulted where git
-    # cannot supply a baseline of its own (§6.2).
+    # Retained in the DTO for stored-run compatibility. The current non-git
+    # direct mode has no automatic rollback and does not consume this field.
     protect: tuple[str, ...] = ()
     # The Agent nodes that will work in the directory. Under `isolation:
     # none` that is *every* Agent node in the workflow, not only the ones
@@ -67,41 +65,95 @@ class ProjectAccessNeed:
         return self.required
 
 
-def project_access_need(ir: Any) -> ProjectAccessNeed:
+def project_access_need(ir: Any, *, direct: bool = True) -> ProjectAccessNeed:
     """Read the run's project access off the workflow, once, before it starts.
 
     A node reference is what asks, but the answer is run-wide: if any node
     asks for the project directory, every Agent node in the run works there.
     """
 
-    direct = {
+    policies = {
         policy.id: policy for policy in getattr(ir, "policies", ())
         if policy.kind == "workspace_access"
-        and (policy.config or {}).get("isolation") == "none"
     }
-    if not direct:
+    if not policies:
         return ProjectAccessNeed()
     asked = [
-        direct[policy_id] for node in ir.nodes
-        for policy_id in node.policies if policy_id in direct
+        policies[policy_id] for node in ir.nodes
+        for policy_id in node.policies if policy_id in policies
     ]
     if not asked:
         return ProjectAccessNeed()
     return ProjectAccessNeed(
         required=True,
-        write=any(
-            (policy.config or {}).get("mode") == "read_write" for policy in asked
-        ),
-        protect=tuple(sorted({
-            str(item)
-            for policy in asked
-            for item in ((policy.config or {}).get("protect") or ())
-        })),
+        # Both selected workspace shapes are writable. `direct` only selects
+        # whether the real project must be claimed by the coordinator.
+        write=True,
         agent_nodes=tuple(
             node.id for node in ir.nodes
-            if node.handler is not None and node.handler.name.startswith("agent.")
+            if node.handler is not None and (
+                node.handler.name.startswith("agent.")
+                or node.handler.name in {"app.delegate", "harness.subagent"}
+            )
         ),
     )
+
+
+class UnprotectedDirectRecoveryPoints:
+    """Honest recovery metadata for non-git direct access.
+
+    No copy is made: large projects must not be duplicated merely to run an
+    Agent. Occupancy still serializes runs, while the status explicitly says
+    that rollback is unavailable.
+    """
+
+    def __init__(self, project_root: Path | str) -> None:
+        self.project_root = Path(project_root).resolve()
+        self._points: dict[str, Any] = {}
+        self._summaries: dict[str, Mapping[str, Any]] = {}
+
+    def preflight(self, *, protect=()) -> None:
+        return None
+
+    def create(self, run_id: str, *, protect=()):
+        from ...workspace.recovery import RecoveryPoint
+        from datetime import datetime, timezone
+
+        point = RecoveryPoint(
+            run_id=run_id, project_root=self.project_root,
+            kind="unprotected_direct",
+            created_at=datetime.now(timezone.utc).isoformat(),
+            uncovered=("the entire non-git project has no automatic rollback",),
+        )
+        self._points[run_id] = point
+        return point
+
+    def finalize(self, run_id: str) -> None:
+        if run_id in self._points:
+            self._summaries[run_id] = {
+                "kind": "unprotected_direct", "scope": "run_cumulative",
+                "content": [], "staged": [],
+                "error": "non-git direct access has no automatic change summary or rollback",
+            }
+
+    def final_summary(self, run_id: str):
+        return self._summaries.get(run_id)
+
+    def load(self, run_id: str):
+        return self._points.get(run_id)
+
+    def summarize(self, point):
+        class Summary:
+            def to_primitive(self_nonlocal):
+                return {
+                    "kind": "unprotected_direct", "scope": "run_cumulative",
+                    "content": [], "staged": [],
+                    "error": "non-git direct access has no automatic change summary or rollback",
+                }
+        return Summary()
+
+    def sweep(self, live_run_ids, *, older_than_seconds=0):
+        return ()
 
 
 class ProjectAccessCoordinator:

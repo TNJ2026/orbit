@@ -1760,7 +1760,7 @@ class LangGraphWorkflowService:
             )
 
     def live_workspace_refs(self) -> frozenset[str]:
-        """Every `run_id:node_id` pair a still-open run could hold a lease on.
+        """Every still-open run that can hold its shared worktree.
 
         Exists for the project-access cleanup loop (`web/app.py`), which reaps
         on-disk git worktrees and file-allowlist copies for runs that have
@@ -1770,39 +1770,20 @@ class LangGraphWorkflowService:
         the one case that must never happen, since it is what protects an
         active run's directory from being reclaimed out from under it.
 
-        Read from `langgraph_handler_attempts`, not `execution_order`:
-        `journal.claim()` (`wiring.py`) inserts a `status='started'` row
-        *before* the Handler runs, and it stays non-terminal until
-        `journal.settle()` runs *after* — the row spans exactly the window a
-        workspace grant can be acquired and used. `execution_order`, by
-        contrast, is only appended once the node's whole step function
-        returns, which is *after* the Handler has already finished; a sweep
-        reading only that would see a long-running Agent node as never having
-        started at all, and could reclaim the workspace out from under the
-        process still writing to it.
+        Worktrees are keyed by run, not node, so every unfinished run remains
+        live even while it is between Agent nodes or waiting for a person.
         """
 
         placeholders = ",".join("?" for _ in self.PRUNABLE_STATUSES)
         with self._connect() as connection:
-            run_ids = [
+            return frozenset(
                 str(row["run_id"])
                 for row in connection.execute(
                     "SELECT run_id FROM langgraph_runs"
                     f" WHERE status NOT IN ({placeholders})",
                     self.PRUNABLE_STATUSES,
                 )
-            ]
-            if not run_ids:
-                return frozenset()
-            run_placeholders = ",".join("?" for _ in run_ids)
-            attempted = connection.execute(
-                "SELECT DISTINCT run_id, node_id FROM langgraph_handler_attempts"
-                f" WHERE run_id IN ({run_placeholders})",
-                run_ids,
-            ).fetchall()
-        return frozenset(
-            f"{row['run_id']}:{row['node_id']}" for row in attempted
-        )
+            )
 
     def _attempt_facts(self, run_id: str) -> dict[str, dict[str, Any]]:
         """Per-node outcome and timing, for the nodes that keep an attempt.
@@ -2577,7 +2558,7 @@ class LangGraphWorkflowService:
             return None
         from .project_access import project_access_need
 
-        need = project_access_need(ir)
+        need = project_access_need(ir, direct=True)
         return need if need.required else None
 
     def _require_project_available(self, need) -> None:

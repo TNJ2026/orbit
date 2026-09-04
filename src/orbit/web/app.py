@@ -517,14 +517,50 @@ def create_app(
         {} if workflow_generators is None else workflow_generators
     )
     registrations = list(handlers)
-    # Populated only when `discover_agents` and `agent_project_access` are both
-    # true; stays `None` otherwise so the composition below always has a
-    # value to pass, and the cleanup loop it drives simply never registers.
+    # Populated for a git workspace whenever project access is enabled. Agent
+    # CLIs and App/Harness delegations share this same Run-scoped grant.
     project_workspace: Any = None
-    # The real project directory, when this Runtime grants it. Set inside the
-    # discovery block below; declared here because the service is built
-    # outside it and must be told either way.
+    # The real project directory for non-git direct access.
     project_root_for_agents: Path | None = None
+    grant_capabilities: frozenset[str] = frozenset()
+    agent_project_access = bool(
+        agent_project_access or agent_project_read or agent_project_write
+    )
+    if agent_project_access:
+        from ..platform.projects import project_state_dir
+        from ..workspace import (
+            GitWorkspaceProvider, GitWorktreeGrant,
+            git_available, has_commits, is_git_repo,
+        )
+
+        if workspace_path is None:
+            raise ValueError(
+                "--agent-project-access requires workspace_path to be set "
+                "explicitly; it never defaults to the Runtime's cwd"
+            )
+        project_root = Path(workspace_path).expanduser().resolve()
+        if not project_root.is_dir():
+            raise ValueError(f"project directory does not exist: {project_root}")
+        state_dir = project_state_dir(project_root)
+        if (project_root / ".git").exists():
+            if not git_available() or not is_git_repo(project_root):
+                raise ValueError(
+                    f"--agent-project-access requires a usable git repository "
+                    f"at {project_root}"
+                )
+            if not has_commits(project_root):
+                raise ValueError(
+                    "--agent-project-access requires at least one git commit"
+                )
+            project_workspace = GitWorktreeGrant(
+                GitWorkspaceProvider(project_root, state_dir)
+            )
+            grant_capabilities = frozenset({"workspace.read"})
+        else:
+            project_root_for_agents = project_root
+            grant_capabilities = frozenset({
+                "workspace.project.read", "workspace.project.write",
+            })
     if discover_agents:
         from ..workflow.catalogs.agent_discovery import (
             catalog_entries, discover_agent_clis_cached,
@@ -546,101 +582,7 @@ def create_app(
             if agent_workspace_root is not None
             else Path(db_path).expanduser().absolute().parent / "agent-workspaces"
         )
-        # Opt-in on purpose: this is the only switch that lets an Agent CLI
-        # see real project files, so it is never the default. Off, this block
-        # never runs and every Agent is exactly as isolated as it always was.
-        grant_capabilities: frozenset[str] = frozenset()
-        project_workspace = None
-        if agent_project_access:
-            from ..platform.projects import project_state_dir
-            from ..workspace import (
-                FileAllowlistGrant, GitWorkspaceProvider, GitWorktreeGrant,
-                git_available, has_commits, is_git_repo,
-            )
-
-            if workspace_path is None:
-                # No silent fallback to wherever this process happens to have
-                # been started from — that directory is this Runtime's own
-                # working directory (its source checkout, a service
-                # manager's cwd, anything), not necessarily the Workspace an
-                # operator meant to grant. `orbit serve` always resolves and
-                # passes one; an embedder that turns this switch on without
-                # also naming a `workspace_path` gets a startup error instead
-                # of a guess.
-                raise ValueError(
-                    "--agent-project-access requires workspace_path to be set "
-                    "explicitly; it never defaults to the Runtime's own "
-                    "working directory"
-                )
-            project_root = Path(workspace_path).expanduser().resolve()
-            state_dir = project_state_dir(project_root)
-            # `is_git_repo()` itself shells out to git, so asking it first
-            # would answer "no" whenever git is simply missing — silently
-            # routing a real git project onto the weaker file-allowlist copy
-            # instead of refusing, exactly the downgrade this feature exists
-            # to forbid. A plain filesystem check answers "does this project
-            # want git isolation" without needing git installed to ask it.
-            looks_like_a_git_project = (project_root / ".git").exists()
-            if looks_like_a_git_project:
-                # A git repository gets the stronger guarantee — a disposable
-                # worktree, never the working tree itself — or nothing. Quietly
-                # handing it the weaker file-allowlist copy instead because git
-                # itself is unusable would be exactly the silent downgrade this
-                # feature exists to refuse.
-                if not git_available():
-                    raise ValueError(
-                        f"--agent-project-access requires git, but it is not "
-                        f"installed (project root {project_root} is a git "
-                        "repository)"
-                    )
-                if not is_git_repo(project_root):
-                    raise ValueError(
-                        f"--agent-project-access found {project_root}/.git but "
-                        "git could not read it as a repository"
-                    )
-                if not has_commits(project_root):
-                    raise ValueError(
-                        f"--agent-project-access requires a commit to branch "
-                        f"a workspace from, but {project_root} has none yet"
-                    )
-                project_workspace = GitWorktreeGrant(
-                    GitWorkspaceProvider(project_root, state_dir)
-                )
-                grant_capabilities = frozenset({"workspace.read"})
-            else:
-                quota_kwargs: dict[str, Any] = {}
-                if agent_project_access_max_bytes is not None:
-                    quota_kwargs["max_bytes"] = agent_project_access_max_bytes
-                if agent_project_access_min_free_bytes is not None:
-                    quota_kwargs["min_free_bytes"] = agent_project_access_min_free_bytes
-                if agent_project_access_min_free_fraction is not None:
-                    quota_kwargs["min_free_fraction"] = (
-                        agent_project_access_min_free_fraction
-                    )
-                project_workspace = FileAllowlistGrant(
-                    project_root, state_dir, **quota_kwargs
-                )
-                grant_capabilities = frozenset({"workspace.read.files"})
-        # The other axis: the project directory itself, rather than a copy of
-        # it. Its own switches, because its own consent — reading a
-        # developer's actual files is not what `--agent-project-access`
-        # asked about, and writing them is not what reading them asked
-        # about. Write implies read; neither implies the copy grants above.
-        if agent_project_read or agent_project_write:
-            if workspace_path is None:
-                raise ValueError(
-                    "--agent-project-read/--agent-project-write require "
-                    "workspace_path to be set explicitly; they never default "
-                    "to the Runtime's own working directory"
-                )
-            project_root_for_agents = Path(workspace_path).expanduser().resolve()
-            if not project_root_for_agents.is_dir():
-                raise ValueError(
-                    f"project directory does not exist: {project_root_for_agents}"
-                )
-            grant_capabilities = grant_capabilities | {"workspace.project.read"}
-            if agent_project_write:
-                grant_capabilities = grant_capabilities | {"workspace.project.write"}
+        if project_root_for_agents is not None:
             # Agents working in the project are told to put scratch files
             # under its state directory (`_run_scratch`), which is only a
             # tidier place than the project root if git is actually ignoring
@@ -725,6 +667,28 @@ def create_app(
                 # report for themselves.
                 workflow_generator = authoring_broker
 
+    # Delegated App/Harness Agents receive the same Run workspace contract as
+    # local CLIs. The Host must execute inside the returned absolute path.
+    if agent_project_access:
+        configured = []
+        for registration in registrations:
+            implementation = registration.implementation
+            configure = getattr(implementation, "configure_workspace", None)
+            if callable(configure):
+                configure(
+                    project_workspace=project_workspace,
+                    project_root=project_root_for_agents,
+                )
+                registration = HandlerRegistration(
+                    registration.manifest, implementation,
+                    registration.implementation_id,
+                    granted_capabilities=(
+                        registration.granted_capabilities | grant_capabilities
+                    ),
+                )
+            configured.append(registration)
+        registrations = configured
+
     if structured_agents:
         # Operator-configured names, so they sit *over* discovery rather than
         # under it like a connected App does — an operator who named one meant
@@ -780,7 +744,7 @@ def create_app(
             )
         from ..workflow.langgraph_runtime import build_service
         from ..workflow.langgraph_runtime.project_access import (
-            ProjectAccessCoordinator,
+            ProjectAccessCoordinator, UnprotectedDirectRecoveryPoints,
         )
 
         langgraph_service = build_service(
@@ -800,7 +764,10 @@ def create_app(
             project_access=(
                 None if project_root_for_agents is None
                 else ProjectAccessCoordinator(
-                    project_root_for_agents, write_granted=agent_project_write,
+                    project_root_for_agents, write_granted=True,
+                    recovery_points=UnprotectedDirectRecoveryPoints(
+                        project_root_for_agents,
+                    ),
                 )
             ),
         )

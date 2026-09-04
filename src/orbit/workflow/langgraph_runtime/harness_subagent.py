@@ -580,6 +580,7 @@ class DelegationQueue:
             if row is None:
                 db.rollback()
                 raise LookupError("delegation not found")
+            expires = _stamp(_now() + timedelta(seconds=lease_seconds))
             # A retry whose first response was lost is harmless and stable.
             if (
                 int(row["checkpoint_revision"]) == expected_revision + 1
@@ -587,9 +588,14 @@ class DelegationQueue:
                 and row["status"] == "leased"
                 and row["lease_owner"] == worker_id
             ):
+                db.execute(
+                    "UPDATE harness_delegations SET lease_expires_at=?,updated_at=?"
+                    " WHERE delegation_id=? AND actor=? AND status='leased'"
+                    " AND lease_owner=?",
+                    (expires, _stamp(_now()), delegation_id, actor, worker_id),
+                )
                 db.commit()
                 return self.get(delegation_id, actor=actor)
-            expires = _stamp(_now() + timedelta(seconds=lease_seconds))
             changed = db.execute(
                 "UPDATE harness_delegations SET checkpoint_json=?,"
                 "checkpoint_revision=checkpoint_revision+1,lease_expires_at=?,"
@@ -702,8 +708,43 @@ class DelegationQueue:
 
 
 class HarnessSubagentHandler:
-    def __init__(self, queue: DelegationQueue, *, poll_seconds: float = 0.1) -> None:
+    def __init__(
+        self, queue: DelegationQueue, *, poll_seconds: float = 0.1,
+        project_workspace=None, project_root: Path | str | None = None,
+    ) -> None:
         self.queue, self.poll_seconds = queue, poll_seconds
+        self.project_workspace = project_workspace
+        self.project_root = (
+            None if project_root is None else Path(project_root).resolve()
+        )
+
+    def configure_workspace(self, *, project_workspace=None, project_root=None) -> None:
+        self.project_workspace = project_workspace
+        self.project_root = (
+            None if project_root is None else Path(project_root).resolve()
+        )
+
+    def _workspace_descriptor(self, request):
+        access = getattr(request, "workspace_access", None)
+        if access is None:
+            return None
+        run_id = str(getattr(request, "run_id", "") or "shared")
+        if access.get("isolation") == "none":
+            if self.project_root is None:
+                raise HandlerPermanentError("direct project workspace is unavailable")
+            path, kind = self.project_root, "direct"
+        else:
+            if self.project_workspace is None:
+                raise HandlerPermanentError("git worktree workspace is unavailable")
+            path = self.project_workspace.acquire(run_id)
+            kind = "git_worktree"
+        provider = getattr(self.project_workspace, "provider", None)
+        project_root = self.project_root or getattr(provider, "project_root", None) or path
+        return {
+            "kind": kind, "path": str(path),
+            "project_root": str(project_root),
+            "access": "read_write", "run_id": run_id,
+        }
 
     def validate(self, manifest, config):
         issues = []
@@ -731,12 +772,13 @@ class HarnessSubagentHandler:
         return PreparedExecution({
             "delegation_id": delegation_id, "actor": str(request.actor),
             "input": request.input, "config": request.config,
+            "workspace": self._workspace_descriptor(request),
         }, delegation_id)
 
     def execute(self, prepared, context):
         payload = prepared.payload
         request = {"input": payload["input"], "config": payload["config"]}
-        for key in ("protocol", "execution"):
+        for key in ("protocol", "execution", "workspace"):
             if key in payload:
                 request[key] = payload[key]
         item = self.queue.enqueue(
@@ -827,6 +869,7 @@ class AppDelegationHandler(HarnessSubagentHandler):
         return PreparedExecution({
             "delegation_id": delegation_id, "actor": str(request.actor),
             "input": request.input, "config": request.config,
+            "workspace": self._workspace_descriptor(request),
             "protocol": {"name": "orbit-app-delegation", "version": "1"},
             "execution": {
                 "attempt_id": str(request.attempt_id),
