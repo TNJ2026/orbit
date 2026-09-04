@@ -1993,7 +1993,12 @@ class GoalHomeTests(BrowserE2ETestCase):
         state.locator("button.danger").wait_for()
 
         self.assertEqual("取消执行", state.locator("button.danger").inner_text())
-        self.assertEqual("继续", state.locator("button.primary").first.inner_text())
+        # An approval is the two answers it has, named as a person would say
+        # them — not one button borrowing the command's own label.
+        self.assertEqual("通过", state.locator("button.primary").first.inner_text())
+        self.assertEqual(
+            "拒绝", state.locator("button", has_text="拒绝").first.inner_text(),
+        )
 
         # The browser's own confirm would arrive as a `dialog` event and
         # never reach the page; this one is the page.
@@ -2112,11 +2117,14 @@ class GoalHomeTests(BrowserE2ETestCase):
                          })"""))
 
     def test_answering_a_step_is_asked_in_the_page(self) -> None:
-        """Resume took a JSON value through the browser's prompt box.
+        """A rejection asks why, in the page, in this UI's words.
 
-        A one-line platform input is a poor place to write JSON, and it
-        carried none of this UI's words: the field had no label a translation
-        could reach and the buttons were the operating system's.
+        Answering an approval used to mean editing JSON — first in the
+        browser's own prompt box, which carried none of this UI's words, and
+        then in a labelled field that still asked a reviewer to know the port
+        to reply on and the `decision` field the branches test. Approving is
+        now a button; rejecting is the one that still asks something, because
+        why is the part the UI cannot supply.
         """
 
         page = self.open("zh-CN")
@@ -2126,20 +2134,23 @@ class GoalHomeTests(BrowserE2ETestCase):
         self.addCleanup(self.cancel, page, run)
 
         page.goto(f"{self.base}/ui/#/runs/{quote(run['run_id'], safe='')}")
-        resume = page.locator(".simplified-run-state button.primary").first
-        resume.wait_for()
+        approve = page.locator(".simplified-run-state button.primary").first
+        approve.wait_for()
+        self.assertEqual("通过", approve.inner_text().strip())
         native = []
         page.on("dialog", lambda dialog: (native.append(dialog.message), dialog.dismiss()))
-        resume.click()
+        reject = page.locator(".simplified-run-state button", has_text="拒绝").first
+        reject.click()
 
         dialog = page.locator("dialog.app-dialog")
         dialog.wait_for()
         self.assertEqual([], native)
-        # A labelled multi-line field, prefilled with the shape to edit.
+        # A labelled field for the reason — empty, because it is the
+        # reviewer's sentence and not a shape to edit.
         field = dialog.locator("textarea")
         self.assertTrue(field.is_visible())
-        self.assertIn("decision", field.input_value())
-        self.assertIn("的值（JSON）", dialog.inner_text())
+        self.assertEqual("", field.input_value())
+        self.assertIn("驳回原因", dialog.inner_text())
 
     def test_a_run_still_in_flight_keeps_the_composer_locked(self) -> None:
         """The other half: `interrupted` is not over, and must still lock."""

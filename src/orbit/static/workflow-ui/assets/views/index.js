@@ -2,7 +2,7 @@ import { ApiError } from "../api.js";
 import { dataState } from "../components/data-state.js";
 import { el, svgEl } from "../components/dom.js";
 import { semanticWorkflowDiff } from "../workflow-diff.js";
-import { resumeActions } from "../run-resume.js";
+import { humanResponseValue, resumeActions } from "../run-resume.js";
 import { workflowGenerationProgress } from "../workflow/generation-progress.js";
 import { embeddedGraph } from "../workflow/definition-views.js";
 import { askConfirm, askText } from "../components/dialog.js";
@@ -528,26 +528,62 @@ export function createViews(context) {
       // which engine and which surface — and a person looking at their own
       // run needs the verb, in their own language.
       const actions_ = resumeActions(run, resume, i18n.t("run.resume"));
-      for (const action of actions_) actions.push(el("button", {
-        class: "button primary", text: action.label,
-        onclick: async () => {
-          const raw = await askText(el, i18n, {
-            title: i18n.t("run.resume.title"),
-            label: action.nodeId
-              ? i18n.t("run.resume.labelNamed", { node: action.nodeId })
-              : i18n.t("run.resume.label"),
-            value: JSON.stringify(action.payload.value, null, 2),
-            confirmLabel: i18n.t("run.resume.submit"),
-          });
-          if (raw === null) return;
+      for (const action of actions_) {
+        const send = async (value) => {
           try {
-            await api.execute(action.command, {
-              ...action.payload, value: JSON.parse(raw),
-            });
+            await api.execute(action.command, { ...action.payload, value });
             await render();
           } catch (error) { reportError(error); }
-        },
-      }));
+        };
+        if (action.approval) {
+          /* A yes/no question is answered by choosing. Editing JSON to say
+             yes asked a reviewer to know the port to reply on and the
+             `decision` field the branches test, and to retype both without a
+             typo; the run said all of it in the interrupt already.
+
+             Approving needs nothing else, so it goes straight through.
+             Rejecting asks why, because that answer is not the panel's to
+             supply and a workflow that sends the work back to its Agent
+             carries it across as the next attempt's brief. */
+          actions.push(el("button", {
+            class: "button primary", text: `${i18n.t("run.approve")}${action.suffix}`,
+            onclick: () => send(humanResponseValue(action.interrupt, "approve")),
+          }));
+          actions.push(el("button", {
+            class: "button", text: `${i18n.t("run.reject")}${action.suffix}`,
+            onclick: async () => {
+              const reason = await askText(el, i18n, {
+                title: i18n.t("run.reject.title"),
+                label: action.nodeId
+                  ? i18n.t("run.reject.labelNamed", { node: action.nodeId })
+                  : i18n.t("run.reject.label"),
+                confirmLabel: i18n.t("run.reject.submit"),
+              });
+              if (reason === null) return;
+              await send(humanResponseValue(action.interrupt, "reject", reason));
+            },
+          }));
+          continue;
+        }
+        // Anything this UI cannot shape still takes the value itself. Not a
+        // fallback for a malformed approval: an interrupt with no single
+        // output port is a different question, not a broken one.
+        actions.push(el("button", {
+          class: "button primary", text: action.label,
+          onclick: async () => {
+            const raw = await askText(el, i18n, {
+              title: i18n.t("run.resume.title"),
+              label: action.nodeId
+                ? i18n.t("run.resume.labelNamed", { node: action.nodeId })
+                : i18n.t("run.resume.label"),
+              value: JSON.stringify(action.payload.value, null, 2),
+              confirmLabel: i18n.t("run.resume.submit"),
+            });
+            if (raw === null) return;
+            await send(JSON.parse(raw));
+          },
+        }));
+      }
     }
     if (cancel) actions.push(el("button", {
       class: "button danger", text: i18n.t("run.cancel"),

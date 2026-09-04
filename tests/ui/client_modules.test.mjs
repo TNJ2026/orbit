@@ -125,6 +125,20 @@ test("human resume defaults to the declared result port", () => {
     interrupt_id: "interrupt:review",
     value: { result: { decision: "approve", value: null } },
   });
+  // An approval is answered by choosing, so the view draws two buttons for
+  // it rather than a field of JSON to edit.
+  assert.equal(action.approval, true);
+});
+
+test("an interrupt that is not an approval is left to the raw answer", () => {
+  // Not a broken approval — a question with no single port to reply on is a
+  // different question, and pretending it is a yes/no would send nonsense.
+  const [action] = resumeActions({ interrupts: [{
+    id: "interrupt:form",
+    value: { node_id: "form", output_ports: [{ id: "a" }, { id: "b" }] },
+  }] }, { command: "langgraph_run.resume", label: "Resume" });
+
+  assert.equal(action.approval, false);
 });
 
 test("human decisions share one canonical approve and reject encoder", () => {
@@ -136,6 +150,23 @@ test("human decisions share one canonical approve and reject encoder", () => {
     result: { decision: "reject", value: null },
   });
   assert.throws(() => humanResponseValue(interrupt, "approved"), /approve or reject/);
+});
+
+test("a rejection carries the reason it was rejected for", () => {
+  const interrupt = { value: { output_ports: [{ id: "result" }] } };
+  assert.deepEqual(humanResponseValue(interrupt, "reject", "缺少版本号"), {
+    result: { decision: "reject", value: "缺少版本号" },
+  });
+  // Nothing typed is `null` rather than an empty string: an approval's
+  // declared schema is checked against the answer given when there is no
+  // reason, and `null` is the one it is checked with.
+  assert.deepEqual(humanResponseValue(interrupt, "reject", "   "), {
+    result: { decision: "reject", value: null },
+  });
+  // Approving takes no reason at all, and never grows a key for one.
+  assert.deepEqual(humanResponseValue(interrupt, "approve"), {
+    result: { decision: "approve", value: null },
+  });
 });
 
 /* -- error mapping -------------------------------------------------------- */

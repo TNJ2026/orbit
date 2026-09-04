@@ -253,6 +253,17 @@
   background: var(--dsw-alias-bg-module-platform, rgb(128 128 128 / 8%));
 }
 .confirmText { color: var(--dsw-alias-label-secondary, GrayText); font-size: 12px; line-height: 1.5; }
+/* The bar asks for a sentence as well as a decision when it is a rejection.
+   Same field as the one in `.actions`, laid out by the bar's own grid. */
+.confirmBar input {
+  padding: 4px 8px;
+  border: 1px solid var(--dsw-alias-border-l3, rgb(128 128 128 / 16%));
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-1, Canvas);
+  color: var(--dsw-alias-label-primary);
+  font-size: 11px;
+  min-width: 0;
+}
 .confirmActions { display: flex; justify-content: flex-end; gap: 8px; }
 .confirmCancel,
 .confirmGo {

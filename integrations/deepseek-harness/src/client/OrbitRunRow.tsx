@@ -361,6 +361,7 @@ function RunControls(
 ) {
   const [answer, setAnswer] = useState('')
   const [busy, setBusy] = useState(false)
+  const [rejecting, setRejecting] = useState(false)
   const [error, setError] = useState<PanelError | null>(null)
   const cancelAt = commandRevision(run, 'langgraph_run.cancel')
   const resumeAt = commandRevision(run, 'langgraph_run.resume')
@@ -400,33 +401,27 @@ function RunControls(
              `decision` field the branches test — is in the question already,
              so a person was being asked to retype two facts the panel had.
 
-             The box beside the buttons is the one thing the panel cannot
-             supply: why. A workflow that sends rejected work back to its Agent
-             carries this across the back edge as the next attempt's brief, and
-             without it the Agent is asked to try again knowing only that the
-             last try was refused. Optional, and it rides with either decision
-             — silently dropping something a person typed would be worse than
-             sending a note nobody reads. */
+             Approving needs nothing else and goes straight through. Rejecting
+             asks the one thing the panel cannot supply: why. A workflow that
+             sends rejected work back to its Agent carries that across the back
+             edge as the next attempt's brief, and without it the Agent is
+             asked to try again knowing only that the last try was refused. */
           <>
-            <input
-              value={answer}
-              placeholder={t('reason')}
-              onChange={event => setAnswer(event.currentTarget.value)}
-            />
-            {(['approve', 'reject'] as const).map(decision => (
-              <Button
-                key={decision}
-                size="sm"
-                variant={decision === 'approve' ? 'primary' : 'outline'}
-                disabled={busy}
-                onClick={() => act(
-                  'langgraph_run.resume', resumeAt,
-                  approvalValue(approval, decision, answer), approval.id,
-                )}
-              >
-                {busy ? t('working') : t(decision === 'approve' ? 'approve' : 'reject')}
-              </Button>
-            ))}
+            <Button
+              size="sm" variant="primary" disabled={busy}
+              onClick={() => act(
+                'langgraph_run.resume', resumeAt,
+                approvalValue(approval, 'approve'), approval.id,
+              )}
+            >
+              {busy ? t('working') : t('approve')}
+            </Button>
+            <Button
+              size="sm" variant="outline" disabled={busy}
+              onClick={() => setRejecting(true)}
+            >
+              {t('reject')}
+            </Button>
           </>
         ) : (
           /* Anything else still takes a typed answer: this panel knows the
@@ -439,6 +434,42 @@ function RunControls(
           </>
         )}
       </div>
+      {/* The second step of a rejection, in the panel's own confirm surface
+          rather than a platform prompt box — the same one Stop Orbit uses.
+          Empty is allowed and arrives as no reason at all: a reviewer with
+          nothing to add should not be held at a dialog, and the workflow that
+          reads this has to handle its absence anyway. */}
+      {rejecting && approval !== undefined && resumeAt !== undefined ? (
+        <div className={styles.confirmBar} role="alertdialog" aria-label={t('reject')}>
+          <span className={styles.confirmText}>{t('rejectAsk')}</span>
+          <input
+            value={answer}
+            placeholder={t('reason')}
+            autoFocus
+            onChange={event => setAnswer(event.currentTarget.value)}
+          />
+          <div className={styles.confirmActions}>
+            <button
+              type="button" className={styles.confirmCancel}
+              onClick={() => { setRejecting(false); setAnswer('') }}
+            >
+              {t('rejectCancel')}
+            </button>
+            <button
+              type="button" className={styles.confirmGo} disabled={busy}
+              onClick={() => {
+                setRejecting(false)
+                act(
+                  'langgraph_run.resume', resumeAt,
+                  approvalValue(approval, 'reject', answer), approval.id,
+                )
+              }}
+            >
+              {busy ? t('working') : t('reject')}
+            </button>
+          </div>
+        </div>
+      ) : null}
       <PanelErrorText t={t} error={error} />
     </>
   )
