@@ -118,7 +118,15 @@ class HumanReworkTests(unittest.TestCase):
 
         self.submit(graph, config, "reject", "缺少版本号和日期")
 
-        self.assertEqual(["起草发布说明", "缺少版本号和日期"], self.briefs)
+        self.assertEqual("起草发布说明", self.briefs[0])
+        self.assertEqual(
+            {
+                "original_request": "起草发布说明",
+                "previous_document": "<draft 1>",
+                "rework_reason": "缺少版本号和日期",
+            },
+            self.briefs[1],
+        )
 
     def test_the_reviewer_is_asked_again_with_what_the_rework_produced(self) -> None:
         """A rework is re-reviewed, not silently accepted."""
@@ -147,7 +155,10 @@ class HumanReworkTests(unittest.TestCase):
         self.submit(graph, config, "reject", "再写一版")
 
         self.assertEqual(
-            ["draft", "render", "review", "draft", "render"],
+            [
+                "draft", "render", "review", "review_context", "route_review",
+                "draft", "render",
+            ],
             self.order(graph, config),
         )
 
@@ -157,8 +168,9 @@ class HumanReworkTests(unittest.TestCase):
         self.submit(graph, config, "reject", "再写一版")
         self.submit(graph, config, "approve")
 
-        self.assertEqual("publish", self.order(graph, config)[-1])
+        self.assertEqual("done", self.order(graph, config)[-1])
         self.assertEqual((), graph.graph.get_state(config).next)
+        self.assertEqual("approved", graph.resume({}, config=config)["result"]["status"])
 
     # --- the bound --------------------------------------------------------
 
@@ -173,9 +185,12 @@ class HumanReworkTests(unittest.TestCase):
         for attempt in range(1, 4):
             self.submit(graph, config, "reject", f"第 {attempt} 次驳回")
 
-        self.assertEqual("abandon", self.order(graph, config)[-1])
+        self.assertEqual("done", self.order(graph, config)[-1])
         self.assertEqual((), graph.graph.get_state(config).next)
         self.assertEqual(3, len(self.briefs))
+        self.assertEqual(
+            "rework_exhausted", graph.resume({}, config=config)["result"]["status"],
+        )
 
     def test_without_an_error_route_the_spent_bound_fails_the_run(self) -> None:
         """`exhaustion: fail` is a run failure, which is why the example does
@@ -186,10 +201,23 @@ class HumanReworkTests(unittest.TestCase):
         document = self.document()
         document["policies"][0]["config"]["exhaustion"] = "fail"
         document["edges"].remove(self.edge(document, "out_of_generations"))
+        document["edges"].remove(self.edge(document, "abandoned_finalize"))
+        document["edges"].remove(self.edge(document, "approved_finalize"))
+        document["edges"].remove(self.edge(document, "finalize_done"))
+        document["edges"].append({
+            "id": "approved_done",
+            "from": {"node": "approved_result", "port": "result"},
+            "to": {"node": "done", "port": "result"},
+        })
         document["nodes"] = [
-            node for node in document["nodes"] if node["id"] != "abandon"
+            node for node in document["nodes"]
+            if node["id"] not in {"abandoned_result", "finalize"}
         ]
-        document["terminals"].remove("abandon")
+        document["policies"] = [
+            policy for policy in document["policies"]
+            if policy["id"] != "final_outcome_any"
+        ]
+        document["result"] = {"node": "approved_result", "port": "result"}
         graph, config = self.started(document)
 
         self.submit(graph, config, "reject", "第 1 次驳回")
@@ -223,7 +251,7 @@ class HumanReworkTests(unittest.TestCase):
         """
 
         document = self.document()
-        self.edge(document, "rejected")["condition"] = (
+        self.edge(document, "review_context")["condition"] = (
             "source.submission.value == 'content'"
         )
 
@@ -244,55 +272,13 @@ class HumanReworkTests(unittest.TestCase):
         """
 
         document = self.document()
-        document["nodes"].append({
-            "id": "triage",
-            "kind": "decision",
-            "label": "Where does this go back to",
-            "inputs": [
-                {"id": "submission", "schema_id": "example://submission/1.0"}
-            ],
-            "outputs": [
-                {"id": "submission", "schema_id": "example://submission/1.0"}
-            ],
-        })
-        rejected = self.edge(document, "rejected")
-        rejected["to"] = {"node": "triage", "port": "submission"}
-        del rejected["back_edge"]
-        del rejected["policy"]
-        del rejected["mapping"]
-        # Exhaustion is answered by whichever node owns the back edge, so the
-        # error route moves to `triage` with it.
-        self.edge(document, "out_of_generations")["from"] = {
-            "node": "triage", "port": "submission",
-        }
-        for target, port, area, schema in (
-            ("draft", "brief", "content", "example://brief/1.0"),
-            ("render", "draft", "rendering", "example://document/1.0"),
-        ):
-            document["edges"].append({
-                "id": f"redo_{area}",
-                "from": {"node": "triage", "port": "submission"},
-                "to": {"node": target, "port": port},
-                "condition": f"source.submission.value.area == '{area}'",
-                "back_edge": True,
-                "policy": "bounded_rework",
-                "mapping": {
-                    "schema_id": schema,
-                    "value": "$source.submission.value.note",
-                },
-            })
-        graph, config = self.started(document)
-
-        self.submit(
-            graph, config, "reject", {"area": "rendering", "note": "排版不对"},
+        route = next(node for node in document["nodes"] if node["id"] == "route_review")
+        self.assertEqual("decision", route["kind"])
+        self.assertEqual(
+            "source.context.submission.decision == 'reject'",
+            self.edge(document, "rejected")["condition"],
         )
-        after_rendering = self.order(graph, config)
-        self.submit(
-            graph, config, "reject", {"area": "content", "note": "内容不对"},
-        )
-
-        self.assertEqual(["draft", "render", "review", "triage", "render"], after_rendering)
-        self.assertEqual(["起草发布说明", "内容不对"], self.briefs)
+        self.compile(document)
 
 
 if __name__ == "__main__":

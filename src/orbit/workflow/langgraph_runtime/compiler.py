@@ -301,10 +301,14 @@ class LangGraphHandlerRegistry:
 
 
 def _merge_dicts(left: Mapping[str, Any], right: Mapping[str, Any]) -> dict[str, Any]:
-    """Merge parallel results and let a loop replace its prior node output."""
+    """Merge parallel results and let a new loop generation invalidate old state."""
 
     merged = dict(left)
-    merged.update(right)
+    for key, value in right.items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = value
     return merged
 
 
@@ -1307,6 +1311,27 @@ def compile_workflow(
                 (join.id, ordered, threshold)
             )
 
+    # A back edge starts a new generation. Outputs produced downstream of its
+    # target belong to the generation that just ended and must not satisfy a
+    # join before those nodes run again. Simple chains happened to overwrite
+    # their values in order; joins made the stale state observable.
+    back_edge_invalidations: dict[str, frozenset[str]] = {}
+    for back_edge in (edge for edge in ir.edges if edge.back_edge):
+        stale: set[str] = set()
+        frontier = [back_edge.target_node]
+        while frontier:
+            node_id = frontier.pop()
+            if node_id in stale:
+                continue
+            stale.add(node_id)
+            frontier.extend(
+                edge.target_node for edge in ir.edges
+                if edge.source_node == node_id and not edge.back_edge
+            )
+        # The source's freshly produced value is needed to map the back edge.
+        stale.discard(back_edge.source_node)
+        back_edge_invalidations[back_edge.id] = frozenset(stale)
+
     for node in ir.nodes:
         handler = bound.get(node.id)
 
@@ -1455,19 +1480,19 @@ def compile_workflow(
                             "without a selected error route"
                         )
                     route_name = "error"
+            outgoing = outgoing_edges(ir, current)
+            selected_for_route = [
+                edge for edge in outgoing
+                if edge.route == route_name and evaluate_condition(
+                    edge.condition,
+                    output,
+                    workflow_inputs=state["workflow_inputs"],
+                )
+            ]
+            if (current.route_mode or "exclusive") != "parallel":
+                selected_for_route = selected_for_route[:1]
             run_id = str(config.get("configurable", {}).get("thread_id", ""))
             if run_id:
-                outgoing = outgoing_edges(ir, current)
-                selected_for_route = [
-                    edge for edge in outgoing
-                    if edge.route == route_name and evaluate_condition(
-                        edge.condition,
-                        output,
-                        workflow_inputs=state["workflow_inputs"],
-                    )
-                ]
-                if (current.route_mode or "exclusive") != "parallel":
-                    selected_for_route = selected_for_route[:1]
                 for join_id, incoming, threshold in early_joins_by_source.get(
                     current.id, ()
                 ):
@@ -1492,9 +1517,19 @@ def compile_workflow(
                             if nodes_by_id[node_id].handler is not None
                         },
                     )
+            invalidated = set().union(*(
+                back_edge_invalidations.get(edge.id, frozenset())
+                for edge in selected_for_route if edge.back_edge
+            )) if any(edge.back_edge for edge in selected_for_route) else set()
             return {
-                "node_outputs": {current.id: output},
-                "node_routes": {current.id: route_name},
+                "node_outputs": {
+                    **{node_id: None for node_id in invalidated},
+                    current.id: output,
+                },
+                "node_routes": {
+                    **{node_id: None for node_id in invalidated},
+                    current.id: route_name,
+                },
                 "execution_order": (current.id,),
             }
 
