@@ -398,21 +398,36 @@ function RunControls(
           /* A yes/no question is answered by choosing, not by describing the
              choice. What the next step reads — the port to reply on and the
              `decision` field the branches test — is in the question already,
-             so a person was being asked to retype two facts the panel had. */
-          (['approve', 'reject'] as const).map(decision => (
-            <Button
-              key={decision}
-              size="sm"
-              variant={decision === 'approve' ? 'primary' : 'outline'}
-              disabled={busy}
-              onClick={() => act(
-                'langgraph_run.resume', resumeAt,
-                approvalValue(approval, decision), approval.id,
-              )}
-            >
-              {busy ? t('working') : t(decision === 'approve' ? 'approve' : 'reject')}
-            </Button>
-          ))
+             so a person was being asked to retype two facts the panel had.
+
+             The box beside the buttons is the one thing the panel cannot
+             supply: why. A workflow that sends rejected work back to its Agent
+             carries this across the back edge as the next attempt's brief, and
+             without it the Agent is asked to try again knowing only that the
+             last try was refused. Optional, and it rides with either decision
+             — silently dropping something a person typed would be worse than
+             sending a note nobody reads. */
+          <>
+            <input
+              value={answer}
+              placeholder={t('reason')}
+              onChange={event => setAnswer(event.currentTarget.value)}
+            />
+            {(['approve', 'reject'] as const).map(decision => (
+              <Button
+                key={decision}
+                size="sm"
+                variant={decision === 'approve' ? 'primary' : 'outline'}
+                disabled={busy}
+                onClick={() => act(
+                  'langgraph_run.resume', resumeAt,
+                  approvalValue(approval, decision, answer), approval.id,
+                )}
+              >
+                {busy ? t('working') : t(decision === 'approve' ? 'approve' : 'reject')}
+              </Button>
+            ))}
+          </>
         ) : (
           /* Anything else still takes a typed answer: this panel knows the
              shape of an approval and nothing about the rest. */

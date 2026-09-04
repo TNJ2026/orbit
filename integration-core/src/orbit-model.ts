@@ -92,11 +92,21 @@ export function toInterrupts(items: readonly unknown[] | undefined): RunInterrup
  * Which is why this is built rather than typed. A person asked to approve
  * something was being handed a text box and expected to know both of those
  * facts — and to spell them without a typo, minutes after the question.
+ *
+ * `value` is always written, including as `null`. The Runtime refuses an
+ * approval submission whose keys are not exactly `decision` and `value`, so
+ * leaving it out is not "no reason given" — it is an answer the Runtime will
+ * not take, for either decision. And when there is a reason, `value` is where
+ * it goes: a workflow that sends rejected work back to its Agent carries this
+ * string across the back edge as the next attempt's brief.
  */
 export function approvalValue(
-  interrupt: RunInterrupt, decision: 'approve' | 'reject',
+  interrupt: RunInterrupt, decision: 'approve' | 'reject', reason?: string,
 ): Record<string, unknown> {
-  return { [interrupt.outputPort]: { decision } }
+  const said = (reason ?? '').trim()
+  return {
+    [interrupt.outputPort]: { decision, value: said === '' ? null : said },
+  }
 }
 
 export function toRow(run: RunDto, workflowName?: string): OrbitRunRow {

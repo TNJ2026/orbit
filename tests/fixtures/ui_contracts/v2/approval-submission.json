@@ -1,0 +1,34 @@
+{
+  "$comment": "What an approval node accepts as its answer. The Runtime side is checked by tests/test_ui_contract_goldens.py against validate_human_response; the client side by integration-core/tests/orbit-model.test.mjs against approvalValue. Neither can drift without the other noticing, which is the whole reason this file is not written twice.",
+  "output_port": "result",
+  "accepted": [
+    {
+      "case": "approved, with nothing to say about it",
+      "submission": {"result": {"decision": "approve", "value": null}}
+    },
+    {
+      "case": "rejected, with the reason the next attempt will read",
+      "submission": {"result": {"decision": "reject", "value": "缺少版本号和日期"}}
+    }
+  ],
+  "refused": [
+    {
+      "case": "no value at all, which is what the panel used to send",
+      "submission": {"result": {"decision": "approve"}}
+    },
+    {
+      "case": "the reason under a name of its own",
+      "submission": {"result": {"decision": "reject", "note": "缺少版本号"}}
+    },
+    {
+      "case": "a field beside the two the contract names",
+      "submission": {
+        "result": {"decision": "reject", "value": "缺少版本号", "actor": "me"}
+      }
+    },
+    {
+      "case": "neither approved nor rejected",
+      "submission": {"result": {"decision": "maybe", "value": null}}
+    }
+  ]
+}

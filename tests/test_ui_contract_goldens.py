@@ -78,6 +78,52 @@ class FrozenSchemaTests(unittest.TestCase):
                     )
 
 
+class ApprovalSubmissionTests(unittest.TestCase):
+    """The answer to an approval, as the Runtime actually judges it.
+
+    `approval-submission.json` is the one statement of this shape. The panel's
+    `approvalValue` is checked against the same file from the JavaScript side,
+    which is the part that was missing: the client had its own sample, the
+    Runtime had its own sample, they disagreed, and each suite passed. Every
+    approval the panel sent was refused.
+    """
+
+    def node(self, port_id: str):
+        from orbit.workflow.domain.definitions import IRNode, IRPort
+
+        return IRNode(
+            "review", "human", (),
+            (IRPort(port_id, "example://submission/1.0", True, False, None, ""),),
+            None,
+            {"task_kind": "approval", "participants": ["reviewer"],
+             "quorum": "any"},
+            (), None,
+        )
+
+    def test_the_accepted_samples_are_accepted(self) -> None:
+        from orbit.workflow.langgraph_runtime.compiler import (
+            validate_human_response,
+        )
+
+        contract = load("approval-submission.json")
+        node = self.node(contract["output_port"])
+        for case in contract["accepted"]:
+            with self.subTest(case=case["case"]):
+                validate_human_response(node, case["submission"])
+
+    def test_the_refused_samples_are_refused(self) -> None:
+        from orbit.workflow.langgraph_runtime.compiler import (
+            validate_human_response,
+        )
+
+        contract = load("approval-submission.json")
+        node = self.node(contract["output_port"])
+        for case in contract["refused"]:
+            with self.subTest(case=case["case"]):
+                with self.assertRaises(ValueError):
+                    validate_human_response(node, case["submission"])
+
+
 class ServedPayloadTests(unittest.TestCase):
     """The shape as the Runtime actually emits it, not only as described."""
 

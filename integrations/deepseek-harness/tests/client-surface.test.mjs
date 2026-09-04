@@ -1649,14 +1649,17 @@ test('an approval is two buttons, and anything else still takes an answer', asyn
   const body = fn.slice(0, fn.indexOf('\n}'))
   // Chosen from what the Run is actually stopped on, not assumed.
   assert.match(body, /run\.interrupts\.find\(item => item\.taskKind === 'approval'\)/)
-  assert.match(body, /approvalValue\(approval, decision\)/)
+  assert.match(body, /approvalValue\(approval, decision, answer\)/)
   // Answered against that interrupt, not just against the Run.
-  assert.match(body, /approvalValue\(approval, decision\), approval\.id/)
+  assert.match(body, /approvalValue\(approval, decision, answer\), approval\.id/)
+  // And with somewhere to say why: a rejection with no reason sends the Agent
+  // back to work knowing only that the last attempt was refused.
+  assert.match(body, /placeholder=\{t\('reason'\)\}/)
   // The typed answer survives for the questions this panel cannot shape.
   assert.match(body, /placeholder=\{t\('answer'\)\}/)
   assert.match(body, /approval !== undefined \? \(/)
   const locales = sources[names.indexOf('locales.ts')]
-  for (const key of ['approve:', 'reject:']) assert.ok(locales.includes(key), key)
+  for (const key of ['approve:', 'reject:', 'reason:']) assert.ok(locales.includes(key), key)
 })
 
 /**

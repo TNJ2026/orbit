@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 import {
@@ -387,12 +388,46 @@ test('a node that wants something other than a yes or no keeps its own kind', ()
 test('an answer names the port, because a mapping *is* the outputs', () => {
   // `{decision: …}` on its own would look for a port called `decision`.
   const [asked] = toInterrupts([APPROVAL])
-  assert.deepEqual(approvalValue(asked, 'approve'), { result: { decision: 'approve' } })
-  assert.deepEqual(approvalValue(asked, 'reject'), { result: { decision: 'reject' } })
+  assert.deepEqual(approvalValue(asked, 'approve'), { result: { decision: 'approve', value: null } })
+  assert.deepEqual(approvalValue(asked, 'reject'), { result: { decision: 'reject', value: null } })
   // And `decision` is the field the branches test: every approval workflow
   // here routes on `source.<port>.decision == "approve"`.
   assert.deepEqual(
     approvalValue({ id: 'x', nodeId: 'n', taskKind: 'approval', outputPort: 'confirmation' }, 'approve'),
-    { confirmation: { decision: 'approve' } },
+    { confirmation: { decision: 'approve', value: null } },
   )
+})
+
+test('a rejection carries the reason it was rejected for', () => {
+  const [asked] = toInterrupts([APPROVAL])
+  assert.deepEqual(
+    approvalValue(asked, 'reject', '缺少版本号和日期'),
+    { result: { decision: 'reject', value: '缺少版本号和日期' } },
+  )
+  // Whitespace is nothing said, and nothing said is `null` rather than an
+  // empty string: an approval's declared schema has to accept the answer
+  // given when there is no reason, and `null` is the one it is checked with.
+  assert.deepEqual(approvalValue(asked, 'reject', '   '), { result: { decision: 'reject', value: null } })
+})
+
+test('the answer is the one the Runtime accepts, not one of our own', () => {
+  // The same file `tests/test_ui_contract_goldens.py` feeds to
+  // `validate_human_response`. Reaching across the repository for it is the
+  // point: this module and the Runtime each had a sample of this shape, the
+  // two disagreed, both suites passed, and every approval the panel sent was
+  // refused for not carrying a `value`.
+  const contract = JSON.parse(readFileSync(
+    new URL('../../tests/fixtures/ui_contracts/v2/approval-submission.json', import.meta.url),
+    'utf8',
+  ))
+  const asked = {
+    id: 'i', nodeId: 'review', taskKind: 'approval',
+    outputPort: contract.output_port,
+  }
+  const built = contract.accepted.map(item => {
+    const { decision, value } = item.submission[contract.output_port]
+    return approvalValue(asked, decision, value ?? undefined)
+  })
+
+  assert.deepEqual(built, contract.accepted.map(item => item.submission))
 })
