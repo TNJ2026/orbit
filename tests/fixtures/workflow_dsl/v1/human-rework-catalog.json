@@ -1,0 +1,50 @@
+{
+  "handlers": [
+    {
+      "name": "agent_task",
+      "version": "1.0.0",
+      "node_kinds": ["action"],
+      "inputs": {"brief": "example://brief/1.0"},
+      "outputs": {"draft": "example://document/1.0"},
+      "config_schema": {"type": "object", "additionalProperties": false},
+      "execution_safety": "replay_safe",
+      "resource_profile": {
+        "max_input_tokens": 0,
+        "max_output_tokens": 0,
+        "max_tool_calls": 0,
+        "max_duration_seconds": 60,
+        "max_cost_microunits": 0,
+        "cost_class": "free"
+      },
+      "result_schema_id": "example://document/1.0"
+    },
+    {
+      "name": "render",
+      "version": "1.0.0",
+      "node_kinds": ["action"],
+      "inputs": {"draft": "example://document/1.0"},
+      "outputs": {"document": "example://document/1.0"},
+      "config_schema": {"type": "object", "additionalProperties": false},
+      "execution_safety": "replay_safe",
+      "resource_profile": {
+        "max_input_tokens": 0,
+        "max_output_tokens": 0,
+        "max_tool_calls": 0,
+        "max_duration_seconds": 60,
+        "max_cost_microunits": 0,
+        "cost_class": "free"
+      },
+      "result_schema_id": "example://document/1.0"
+    }
+  ],
+  "schemas": {
+    "example://brief/1.0": {"type": "string"},
+    "example://document/1.0": {"type": "string"},
+    "example://submission/1.0": {
+      "type": "object",
+      "properties": {"decision": {"enum": ["approve", "reject"]}},
+      "required": ["decision", "value"]
+    }
+  },
+  "extensions": []
+}

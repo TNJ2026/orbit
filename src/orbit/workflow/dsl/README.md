@@ -38,13 +38,26 @@ Definition Hash 使用 Step 1 的 Canonical JSON 和 SHA-256，只覆盖完整 W
 
 ## Core 图和引用规则
 
-- DSL Core 1.0 是 DAG；普通 Edge 形成环时编译失败。
+- DSL Core 1.0 是 DAG；普通 Edge 形成环时编译失败。唯一的例外是显式声明的回边，见「回边与返工」。
 - Entry 和 Terminal 必须显式声明。所有 Node 必须从 Entry 可达，并且存在到 Terminal 的路径。
 - Entry 可以是任意 Node Kind；Entry 同时为 Terminal 表示合法的零执行步骤 Workflow。只有 `terminals` 集合中的节点被强制要求 `kind=terminal`。
 - Terminal Node 不得有出边。
 - Edge 必须从输出 Port 指向输入 Port；单值输入只能有一个 Writer。
 - Port Schema v1 采用保守兼容：源和目标必须引用相同的版本化 Schema ID。Mapping 必须声明结果 Schema ID。
 - Edge 条件和 Mapping 只能读取 `source.<当前源端口>` 与 `workflow.inputs.<端口>`；跨节点历史读取必须通过显式 Port/Artifact 建模。
+
+## 回边与返工
+
+`back_edge: true` 的 Edge 不参与环检测，代价是它必须引用一个 `loop`（`max_iterations`）或 `rework`（`max_generations`）Policy：没有无界回边可写。两者在 Runtime 是同一套计数，键名和诊断文案不同。
+
+- **计数落在回边的源节点上**，数的是这个 Run 里它执行过多少次。`max_generations: N` 允许源节点比第一次多跑 N 次，也就是 N 次返工。
+- **耗尽的处置由 `exhaustion` 决定**：`fail` 让 Run 以 `<kind> policy '<id>' exceeded <限额字段>` 失败；`error_route` 改走该节点的 `error` 出边，一条都选不中时仍然失败——不会静默继续。
+- **回边可以跨过中间节点**，直接指向上游任意节点的输入 Port，并覆盖该 Port 原有的 ingress。这是「单值输入只能有一个 Writer」唯一的豁免，也正是返工原因被交到那个节点手上的方式。
+- **重跑的是回边目标往下的整段**，不只是目标本身。有副作用的步骤放在这一段里，每一代都会再发生一次。
+
+人工审批节点的提交固定是 `{decision, value}`（`decision` 只能是 `approve`/`reject`），因此它的输出 Port Schema 必须能接受 `{"decision": "approve", "value": null}`——「驳回必须填原因」无法用 Schema 表达。以审批节点为源的 Edge，条件只能读 `source.<端口>.decision`；要按 `value` 里的原因决定退回哪一步，在审批节点后面接一个 `decision` 节点，它的出边不受这条限制。
+
+可运行的完整例子是 `tests/fixtures/workflow_dsl/v1/human-rework.json`，由 `tests/test_workflow_rework.py` 驱动。
 
 ## Handler 版本
 

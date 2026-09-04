@@ -1,0 +1,95 @@
+{
+  "dsl_version": "1.0",
+  "metadata": {
+    "id": "human_rework",
+    "name": "Draft, review, rework",
+    "description": "An Agent drafts, a person reviews, and a rejection goes back to the Agent carrying the reason it was rejected for."
+  },
+  "nodes": [
+    {
+      "id": "draft",
+      "kind": "action",
+      "label": "Draft",
+      "inputs": [{"id": "brief", "schema_id": "example://brief/1.0"}],
+      "outputs": [{"id": "draft", "schema_id": "example://document/1.0"}],
+      "handler": {"name": "agent_task", "version": "^1.0"}
+    },
+    {
+      "id": "render",
+      "kind": "action",
+      "label": "Render",
+      "inputs": [{"id": "draft", "schema_id": "example://document/1.0"}],
+      "outputs": [{"id": "document", "schema_id": "example://document/1.0"}],
+      "handler": {"name": "render", "version": "^1.0"}
+    },
+    {
+      "id": "review",
+      "kind": "human",
+      "label": "Review",
+      "inputs": [{"id": "document", "schema_id": "example://document/1.0"}],
+      "outputs": [{"id": "submission", "schema_id": "example://submission/1.0"}],
+      "config": {
+        "task_kind": "approval",
+        "participants": ["reviewer"],
+        "quorum": "any"
+      }
+    },
+    {
+      "id": "publish",
+      "kind": "terminal",
+      "label": "Publish",
+      "inputs": [{"id": "submission", "schema_id": "example://submission/1.0"}]
+    },
+    {
+      "id": "abandon",
+      "kind": "terminal",
+      "label": "Give up",
+      "inputs": [{"id": "submission", "schema_id": "example://submission/1.0"}]
+    }
+  ],
+  "edges": [
+    {
+      "id": "draft_render",
+      "from": {"node": "draft", "port": "draft"},
+      "to": {"node": "render", "port": "draft"}
+    },
+    {
+      "id": "render_review",
+      "from": {"node": "render", "port": "document"},
+      "to": {"node": "review", "port": "document"}
+    },
+    {
+      "id": "approved",
+      "from": {"node": "review", "port": "submission"},
+      "to": {"node": "publish", "port": "submission"},
+      "condition": "source.submission.decision == 'approve'"
+    },
+    {
+      "id": "rejected",
+      "from": {"node": "review", "port": "submission"},
+      "to": {"node": "draft", "port": "brief"},
+      "condition": "source.submission.decision == 'reject'",
+      "back_edge": true,
+      "policy": "bounded_rework",
+      "mapping": {
+        "schema_id": "example://brief/1.0",
+        "value": "$source.submission.value"
+      }
+    },
+    {
+      "id": "out_of_generations",
+      "from": {"node": "review", "port": "submission"},
+      "to": {"node": "abandon", "port": "submission"},
+      "route": "error"
+    }
+  ],
+  "policies": [
+    {
+      "id": "bounded_rework",
+      "kind": "rework",
+      "config": {"max_generations": 2, "exhaustion": "error_route"}
+    }
+  ],
+  "entry": ["draft"],
+  "terminals": ["publish", "abandon"]
+}
