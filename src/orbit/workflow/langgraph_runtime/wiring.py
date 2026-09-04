@@ -13,7 +13,7 @@ from typing import Any
 import uuid
 
 from ..domain.deadlines import MIN_AGENT_DURATION_SECONDS
-from ..domain.handlers import UnknownExternalResultError
+from ..domain.handlers import RecoveryDisposition, UnknownExternalResultError
 from ..domain.durable_execution import ExecutionSafety
 from ..domain.serialization import canonical_json
 from ..data.secrets import assert_no_secret_values
@@ -608,15 +608,6 @@ def _tool_adapter(
         if not validation.valid:
             issue = validation.issues[0]
             raise ValueError(f"Tool Handler validation {issue.path}: {issue.message}")
-        replay = journal.claim(
-            context,
-            handler_name=manifest.name,
-            retry_failed=(
-                manifest.execution_safety is ExecutionSafety.REPLAY_SAFE
-            ),
-        )
-        if replay is not None:
-            return replay
         deadline = datetime.now(timezone.utc) + timedelta(
             seconds=manifest.resource_profile.max_duration_seconds
         )
@@ -634,6 +625,37 @@ def _tool_adapter(
             output=_console_sink(console, context),
             clock=lambda: datetime.now(timezone.utc),
         )
+        recovery_ref = journal.stale_execution_ref(context.attempt_id)
+        if recovery_ref is not None and isinstance(
+            implementation, HarnessSubagentHandler,
+        ):
+            try:
+                recovered = implementation.recover(recovery_ref, handler_context)
+            except Exception as exc:
+                journal.settle(
+                    context.attempt_id, "unknown",
+                    error=f"recovery_failed:{type(exc).__name__}",
+                )
+                raise LangGraphUnknownExternalResult(
+                    f"Agent delegation {recovery_ref} recovery failed"
+                ) from exc
+            if recovered.disposition is RecoveryDisposition.FOUND:
+                output = dict(recovered.result.output)
+                journal.settle(context.attempt_id, "succeeded", output=output)
+                return output
+            journal.settle(context.attempt_id, "unknown", error="recovery_unknown")
+            raise LangGraphUnknownExternalResult(
+                f"Agent delegation {recovery_ref} outcome is unknown"
+            )
+        replay = journal.claim(
+            context,
+            handler_name=manifest.name,
+            retry_failed=(
+                manifest.execution_safety is ExecutionSafety.REPLAY_SAFE
+            ),
+        )
+        if replay is not None:
+            return replay
         if consume_pruned(context.attempt_id):
             return pruned_outcome(context)
         try:
@@ -654,6 +676,10 @@ def _tool_adapter(
             prepared = implementation.prepare(
                 request, SimpleNamespace(request=request)
             )
+            if prepared.execution_ref is not None:
+                journal.record_execution(
+                    context.attempt_id, prepared.execution_ref,
+                )
             with active_lock:
                 stranded = context.run_id in cancelled
                 pruned_while_preparing = consume_pruned_locked(context.attempt_id)
@@ -703,7 +729,7 @@ def _tool_adapter(
                     )
                     delegation_id = exc.failure.provider_request_id or context.attempt_id
                     raise LangGraphUnknownExternalResult(
-                        "reconciliation_required: Harness delegation "
+                        "reconciliation_required: Agent delegation "
                         f"{delegation_id} outcome is unknown"
                     ) from None
                 journal.settle(

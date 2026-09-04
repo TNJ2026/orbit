@@ -31,7 +31,8 @@ from .platform.projects import project_id, resolve_project_root
 from .platform.runtime_ownership import DiscoveredRuntime, discover_runtimes
 from .web.mcp import (
     INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR,
-    PROTOCOL_VERSION, SERVER_INFO, McpSessionRegistry,
+    PROTOCOL_VERSION, SERVER_INFO, SESSION_RECOVERY_INSTRUCTIONS,
+    McpSessionRegistry,
 )
 from .web.mcp_app import ORBIT_DASHBOARD_MIME_TYPE, ORBIT_MCP_APP_RESOURCES
 
@@ -462,6 +463,7 @@ def create_hub_app(
                     "resources": {"listChanged": False},
                 },
                 "serverInfo": SERVER_INFO,
+                "instructions": SESSION_RECOVERY_INSTRUCTIONS,
             })
         if method in {"notifications/initialized", "notifications/cancelled"}:
             return None
@@ -731,6 +733,60 @@ def create_hub_app(
             "semantics": "sum_of_workspace_runtime_statistics",
         })
 
+    async def background_delegations(request: Request) -> Response:
+        """Route the one machine worker without exposing Runtime ports to it."""
+        if request.client is None or request.client.host not in {
+            "127.0.0.1", "::1", "localhost", "testclient",
+        }:
+            return JSONResponse({"error": "loopback access required"}, status_code=403)
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return JSONResponse({"error": "request body must be JSON"}, status_code=400)
+        if not isinstance(body, Mapping):
+            return JSONResponse({"error": "expected an object"}, status_code=400)
+        operation = request.path_params["operation"]
+        identifier = str(body.get("workspace_id", ""))
+        candidates: list[tuple[str, str]]
+        if operation == "claim":
+            candidates = [
+                (str(item["workspace_id"]), str(item["path"]))
+                for item in await anyio.to_thread.run_sync(runtimes.registry.list)
+                if item.get("available", True)
+            ]
+        elif identifier:
+            try:
+                resolved = await anyio.to_thread.run_sync(runtimes.registry.resolve, identifier)
+            except HubError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=404)
+            candidates = [(identifier, str(resolved))]
+        else:
+            return JSONResponse({"error": "workspace_id is required"}, status_code=400)
+        for candidate, workspace_path in candidates:
+            try:
+                base = await anyio.to_thread.run_sync(runtimes.find_live, candidate)
+                if base is None:
+                    continue
+                status, payload = await anyio.to_thread.run_sync(lambda: _runtime_json(
+                    f"{base}/internal/v1/background-delegations/{operation}",
+                    method="POST", body=body, timeout=10,
+                ))
+            except HubError:
+                continue
+            if status >= 400:
+                if operation != "claim":
+                    return JSONResponse(payload, status_code=status)
+                continue
+            delegation = payload.get("delegation")
+            if delegation is not None:
+                return JSONResponse({
+                    "workspace_id": candidate, "workspace_path": workspace_path,
+                    "delegation": delegation,
+                })
+            if operation != "claim":
+                return JSONResponse({"workspace_id": candidate, "delegation": None})
+        return JSONResponse({"workspace_id": None, "delegation": None})
+
     async def mcp(request: Request) -> Response:
         explicit_identifier = request.path_params.get("workspace_id")
         session_id = request.headers.get("mcp-session-id")
@@ -827,6 +883,10 @@ def create_hub_app(
     app = Starlette(routes=[
         Route("/health/ready", ready, methods=["GET"]),
         Route("/api/v1/global/agent-stats", global_agent_stats, methods=["GET"]),
+        Route(
+            "/internal/v1/background-delegations/{operation}",
+            background_delegations, methods=["POST"],
+        ),
         Route("/api/v1/workflow-templates", template_catalog, methods=["GET", "POST"]),
         Route("/api/v1/workflow-templates/{template_id}", template_item, methods=["GET", "DELETE"]),
         Route("/api/v1/workflow-templates/{template_id}/instantiate", instantiate_template, methods=["POST"]),

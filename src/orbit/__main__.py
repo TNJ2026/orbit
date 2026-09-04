@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import signal
 import sqlite3
+import subprocess
 import sys
 
 import uvicorn
@@ -456,6 +457,22 @@ def _serve(args) -> None:
 
     structured_agents = _structured_agents(getattr(args, "structured_agent", None))
 
+    from .web.app import HandlerRegistration
+    from .workflow.langgraph_runtime.harness_subagent import (
+        APP_DELEGATE_MANIFEST, AppDelegationHandler, DelegationQueue,
+    )
+    # Interactive App delegation deliberately has no unattended execution
+    # lease. The actor-scoped MCP conversation is the worker and a leased item
+    # still becomes unknown if that conversation disappears.
+    delegation_queue = DelegationQueue(
+        Path(db_path).parent / "langgraph-runs.sqlite3",
+        require_execution_lease=False,
+    )
+    handlers.append(HandlerRegistration(
+        APP_DELEGATE_MANIFEST, AppDelegationHandler(delegation_queue),
+        "app.delegate@1.0.0",
+    ))
+
     def request_shutdown() -> None:
         # Uvicorn owns graceful shutdown and lifespan cleanup. Raising the same
         # signal as Ctrl-C keeps its public `run` entrypoint (and embedders that
@@ -511,6 +528,7 @@ def _serve(args) -> None:
                 args.agent_project_read or args.agent_project_write
             ),
             agent_project_write=args.agent_project_write,
+            delegation_queue=delegation_queue,
         )
     except MixedSchemaError as exc:
         ownership.release()
@@ -939,6 +957,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true",
         help="Machine-readable output, for a client discovering a Runtime",
     )
+
+    worker_cmd = sub.add_parser(
+        "agent-worker", help="Run the machine-wide unattended Agent worker",
+    )
+    worker_cmd.add_argument(
+        "--command", dest="agent_command", required=True,
+        help="Child command; receives delegation JSON on stdin and returns a JSON object",
+    )
+    worker_cmd.add_argument("--hub-url", default="http://127.0.0.1:8848")
+    worker_cmd.add_argument(
+        "--pool", action="append", default=None,
+        help="Background pool to serve (repeatable; default: default)",
+    )
+    worker_cmd.add_argument("--lease-seconds", type=int, default=30)
+    worker_cmd.add_argument("--poll-seconds", type=float, default=1.0)
+    worker_cmd.add_argument("--parent-pid", type=int, default=None, help=argparse.SUPPRESS)
     runtimes_cmd.add_argument(
         "--root", default=None,
         help="Directory to search (default: ~/.orbit)",
@@ -949,6 +983,18 @@ def build_parser() -> argparse.ArgumentParser:
     hub_serve = hub_sub.add_parser("serve", help="Serve the stable workspace router")
     hub_serve.add_argument("--host", default="127.0.0.1")
     hub_serve.add_argument("--port", type=int, default=8848)
+    hub_serve.add_argument(
+        "--background-agent-command",
+        default=os.environ.get("ORBIT_BACKGROUND_AGENT_COMMAND"),
+        help=(
+            "Start one machine background Agent worker using this JSON "
+            "stdin/stdout child command (or ORBIT_BACKGROUND_AGENT_COMMAND)"
+        ),
+    )
+    hub_serve.add_argument(
+        "--background-agent-pool", action="append", default=None,
+        help="Pool served by the background Agent (repeatable; default: default)",
+    )
     hub_register = hub_sub.add_parser("register", help="Register a workspace and print its URLs")
     hub_register.add_argument("workspace")
     hub_forget = hub_sub.add_parser(
@@ -1125,6 +1171,17 @@ def main() -> None:
         _runtimes(args)
         return
 
+    if args.command == "agent-worker":
+        from .background_agent import BackgroundAgentWorker
+
+        BackgroundAgentWorker(
+            args.agent_command, hub_url=args.hub_url,
+            pools=tuple(args.pool or ("default",)),
+            lease_seconds=args.lease_seconds, poll_seconds=args.poll_seconds,
+            parent_pid=args.parent_pid,
+        ).serve_forever()
+        return
+
     if args.command == "hub":
         from .hub import (
             WorkspaceRegistry, WorkspaceRuntimeManager, create_hub_app, workspace_urls,
@@ -1161,10 +1218,33 @@ def main() -> None:
         from .global_control import WorkflowTemplateStore
 
         templates = WorkflowTemplateStore()
-        uvicorn.run(
-            create_hub_app(template_store=templates),
-            host=args.host, port=args.port, log_level="info",
-        )
+        background = None
+        if args.background_agent_command:
+            command = [
+                sys.executable, "-m", "orbit", "agent-worker",
+                "--hub-url", f"http://127.0.0.1:{args.port}",
+                "--command", args.background_agent_command,
+                "--parent-pid", str(os.getpid()),
+            ]
+            for pool in args.background_agent_pool or ("default",):
+                command.extend(("--pool", pool))
+            background = subprocess.Popen(
+                command, stdin=subprocess.DEVNULL,
+                start_new_session=os.name != "nt",
+            )
+        try:
+            uvicorn.run(
+                create_hub_app(template_store=templates),
+                host=args.host, port=args.port, log_level="info",
+            )
+        finally:
+            if background is not None and background.poll() is None:
+                background.terminate()
+                try:
+                    background.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    background.kill()
+                    background.wait(timeout=5)
         return
 
 

@@ -68,6 +68,8 @@ class HandshakeTests(ApiTestCase):
             self.assertEqual("orbit", body["result"]["serverInfo"]["name"])
             self.assertIn("tools", body["result"]["capabilities"])
             self.assertIn("resources", body["result"]["capabilities"])
+            self.assertIn("first user turn", body["result"]["instructions"])
+            self.assertIn("list_delegations", body["result"]["instructions"])
 
     def test_dashboard_resource_is_discoverable_and_readable(self) -> None:
         with AsgiHarness(self.app) as client:
@@ -394,6 +396,7 @@ class DiscoveryTests(ApiTestCase):
                 client, "get_capabilities", {}, actor="reader",
             ))
         self.assertEqual("orbit-harness/1", payload["integration_protocol"])
+        self.assertIn("orbit-app-delegation/1", payload["integration_protocols"])
         self.assertEqual("full", payload["tool_profile"])
         self.assertIn("langgraph_run/1", payload["event_schemas"])
 

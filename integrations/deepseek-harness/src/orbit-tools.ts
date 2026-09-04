@@ -46,6 +46,64 @@ export class OrbitToolBridge {
         object({ ready_only: { type: 'boolean' } }), 'list_workflows', true),
       this.definition('orbit_list_runs', 'List Orbit workflow runs owned by this Harness Session.',
         object({ status: { type: 'string' }, limit: { type: 'integer', minimum: 1, maximum: 200 } }), 'list_runs', true),
+      this.definition('orbit_list_delegations',
+        'Check once on the first turn of this Session for resumable Orbit Agent work. Stay silent when the returned list is empty.',
+        object({
+          statuses: { type: 'array', items: { type: 'string' }, maxItems: 6 },
+          limit: { type: 'integer', minimum: 1, maximum: 200 },
+        }), 'list_delegations', true),
+      {
+        name: 'orbit_claim_delegation',
+        description: 'Claim the next queued Orbit Agent step for this Harness Session.',
+        parameters: object({ lease_seconds: { type: 'integer', minimum: 5, maximum: 300 } }),
+        output: JSON_OUTPUT, timeoutMs: 60_000,
+        execute: async (value, exec) => {
+          const input = args(value), { workspace, session } = await this.route(exec)
+          return await this.gateway.call(workspace, String(session.id), 'claim_delegation', {
+            worker_id: `harness-session:${String(session.id)}`,
+            ...(input.lease_seconds === undefined ? {} : { lease_seconds: input.lease_seconds }),
+          }) as JsonValue
+        },
+      },
+      {
+        name: 'orbit_renew_delegation',
+        description: 'Renew an Orbit Agent-step lease held by this Harness Session.',
+        parameters: object({
+          delegation_id: { type: 'string' },
+          lease_seconds: { type: 'integer', minimum: 5, maximum: 300 },
+        }, ['delegation_id']), output: JSON_OUTPUT, timeoutMs: 60_000,
+        execute: async (value, exec) => {
+          const input = args(value), { workspace, session } = await this.route(exec)
+          return await this.gateway.call(workspace, String(session.id), 'renew_delegation', {
+            delegation_id: input.delegation_id,
+            worker_id: `harness-session:${String(session.id)}`,
+            ...(input.lease_seconds === undefined ? {} : { lease_seconds: input.lease_seconds }),
+          }) as JsonValue
+        },
+      },
+      {
+        name: 'orbit_complete_delegation',
+        description: 'Return exactly one result object or error for an Orbit Agent step.',
+        parameters: object({
+          delegation_id: { type: 'string' }, result: { type: 'object' },
+          error: { type: 'string' },
+        }, ['delegation_id']), output: JSON_OUTPUT, timeoutMs: 60_000,
+        execute: async (value, exec) => {
+          const input = args(value), { workspace, session } = await this.route(exec)
+          return await this.gateway.call(workspace, String(session.id), 'complete_delegation', {
+            ...input, worker_id: `harness-session:${String(session.id)}`,
+          }) as JsonValue
+        },
+      },
+      this.definition('orbit_reconcile_delegation',
+        'Submit a user-verified outcome for unknown Orbit Agent work; never execute unknown work again.',
+        object({
+          delegation_id: { type: 'string' },
+          outcome: { type: 'string', enum: ['confirmed_succeeded', 'confirmed_failed'] },
+          note: { type: 'string' }, result: { type: 'object' }, error: { type: 'string' },
+          idempotency_key: { type: 'string' },
+        }, ['delegation_id', 'outcome', 'idempotency_key']),
+        'reconcile_delegation', false),
       this.definition('orbit_inspect_run', 'Inspect one Orbit Run, including status, revision, interrupts and allowed commands.',
         object({ run_id: { type: 'string' } }, ['run_id']), 'inspect_run', true),
       {

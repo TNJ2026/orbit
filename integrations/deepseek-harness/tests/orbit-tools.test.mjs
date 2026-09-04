@@ -30,10 +30,30 @@ function fixture() {
 test('registers the bounded Orbit MCP tool surface', () => {
   const { definitions } = fixture()
   assert.deepEqual([...definitions.keys()], [
-    'orbit_list_workflows', 'orbit_list_runs', 'orbit_inspect_run',
+    'orbit_list_workflows', 'orbit_list_runs', 'orbit_list_delegations',
+    'orbit_claim_delegation', 'orbit_renew_delegation',
+    'orbit_complete_delegation', 'orbit_reconcile_delegation', 'orbit_inspect_run',
     'orbit_start_run', 'orbit_generate_workflow', 'orbit_get_authoring_job',
     'orbit_cancel_run', 'orbit_resume_run',
   ])
+})
+
+test('delegation tools bind leases to the current Harness Session', async () => {
+  const { definitions, calls, exec } = fixture()
+  await definitions.get('orbit_list_delegations').execute({}, exec)
+  await definitions.get('orbit_claim_delegation').execute({}, exec)
+  await definitions.get('orbit_renew_delegation').execute({ delegation_id: 'd:1' }, exec)
+  await definitions.get('orbit_complete_delegation').execute({
+    delegation_id: 'd:1', result: { answer: 'done' },
+  }, exec)
+
+  assert.deepEqual(calls.map(call => call.name), [
+    'list_delegations', 'claim_delegation', 'renew_delegation',
+    'complete_delegation',
+  ])
+  for (const call of calls.slice(1)) {
+    assert.equal(call.args.worker_id, 'harness-session:session:abc')
+  }
 })
 
 test('generate owns idempotency and tells the panel before it answers', async () => {

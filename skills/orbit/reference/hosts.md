@@ -155,6 +155,19 @@ timeout. Do not open one speculatively. Instead:
   to the Orbit UI to click Generate. Then the block is the point: the task has
   nothing else to do until the request arrives.
 
+## First-turn recovery prompt
+
+Every supported Agent App checks recovery on the first user turn of a
+conversation, not when the desktop application launches. Call
+`list_delegations` once with its default open statuses. Say nothing when it is
+empty. When it contains work, tell the user what can be resumed and ask before
+continuing or reconciling it; an `unknown` delegation is never executed again.
+
+Codex and WorkBuddy receive this rule from the MCP server's initialization
+instructions. DeepSeek Harness contributes the same rule to the first system
+prompt assembly for each Session and exposes Session-bound delegation tools;
+its worker id is derived by the integration rather than supplied by the model.
+
 ## Being listed is not being selected
 
 Registering does not make Orbit write with this App by default. Connected App

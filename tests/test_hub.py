@@ -308,6 +308,9 @@ class HubHttpTests(unittest.TestCase):
             })
 
         self.assertEqual("orbit", response.json()["result"]["serverInfo"]["name"])
+        self.assertIn(
+            "list_delegations", response.json()["result"]["instructions"],
+        )
         self.assertTrue(response.headers["mcp-session-id"])
         self.assertEqual([], manager.identifiers)
 
@@ -365,6 +368,39 @@ class HubHttpTests(unittest.TestCase):
         self.assertEqual(24, app.state.forward_limiter.total_tokens)
         with self.assertRaisesRegex(ValueError, "must be positive"):
             create_hub_app(self.Manager(), forward_concurrency=0)
+
+    def test_background_worker_claim_is_routed_across_online_workspaces(self) -> None:
+        class Registry:
+            def list(self):
+                return [{
+                    "workspace_id": "workspace-a", "path": "/projects/a",
+                    "available": True,
+                }]
+
+            def resolve(self, identifier):
+                self.assertEqual("workspace-a", identifier)
+
+        class Manager:
+            registry = Registry()
+
+            def find_live(self, identifier):
+                return "http://127.0.0.1:41001" if identifier == "workspace-a" else None
+
+        payload = {"delegation": {"delegation_id": "app:one"}}
+        with mock.patch(
+            "orbit.hub._runtime_json", return_value=(200, payload),
+        ) as forwarded, AsgiHarness(create_hub_app(Manager())) as client:
+            response = client.request(
+                "POST", "/internal/v1/background-delegations/claim",
+                body={"worker_id": "machine-worker", "pools": ["default"]},
+            )
+
+        self.assertEqual("workspace-a", response.json()["workspace_id"])
+        self.assertEqual("/projects/a", response.json()["workspace_path"])
+        self.assertIn(
+            "/internal/v1/background-delegations/claim",
+            forwarded.call_args.args[0],
+        )
 
     def test_list_workspaces_reports_unavailable_registrations(self) -> None:
         manager = self.Manager()

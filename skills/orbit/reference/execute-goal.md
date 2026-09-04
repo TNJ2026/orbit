@@ -66,6 +66,26 @@ resolved workflow identity are sent to `start_run`.
    until an interrupt or terminal state; `terminal` follows until a terminal
    state or until user input is required. Use `wait_app_event` when available,
    or bounded repeated inspection. Re-inspect after every event or conflict.
+   Before following a new or resumed Run, call `list_delegations` with its
+   default open statuses. Surface any `unknown` item for reconciliation; do
+   not execute it again. When the user verifies it succeeded, call
+   `reconcile_delegation` with `outcome: "confirmed_succeeded"` and the exact
+   object result; Orbit restores that node from the recorded result and
+   continues the existing Run without invoking the Agent again. For a verified
+   failure, submit `outcome: "confirmed_failed"` and `error`. Continue or
+   observe a still-leased item only when its
+   `worker_id` is this task's stable worker ID. Then, while following, call
+   `claim_delegation` with that stable worker ID for this
+   task. This actor-scoped claim path excludes every `background_pool` item;
+   those are owned by the machine Background Agent Worker and the Runtime
+   resumes the Run when that worker completes. A non-null delegation is a
+   `run_initiator` `app.delegate` Agent step assigned to the current
+   conversation: follow its request, execute it with the App's normal
+   tools, renew before its lease expires when necessary, then call
+   `complete_delegation` with exactly one of `result` or `error`. Continue
+   claiming until none is queued. Never wait synchronously for a Run while it
+   may be waiting for this same conversation; `start_run(wait=false)` above is
+   what prevents that deadlock.
 6. Execute only commands present in the latest `allowed_commands[]`. Never
    construct mutation URLs or infer a command from an earlier state.
 7. If the run is interrupted, present the workflow, current step, question,
@@ -80,6 +100,9 @@ resolved workflow identity are sent to `start_run`.
 8. Stop following when its selected follow condition is met, the user asks to
    stop, or further progress requires user input. Do not cancel a run merely
    because the current task is ending.
+   If this task is interrupted after claiming a delegation, do not let another
+   task retry it: lease expiry deliberately makes the outcome unknown. On the
+   next inspection, surface the Runtime's reconciliation requirement.
 9. On completion, summarize the terminal status, workflow and version, run ID,
    failed step when applicable, and relevant committed artifacts. Read
    sensitive console output only when the request requires it.

@@ -51,6 +51,35 @@ HARNESS_SUBAGENT_MANIFEST = HandlerManifest(
     "schema://object/1.0", ("agent.invoke",), (), True, True,
 )
 
+# Host-neutral delegation to the Agent App that initiated the Run. Unlike the
+# Harness-specific handler it does not select a provider: the current App is
+# already the provider boundary. The queue remains actor-scoped, so another
+# conversation cannot pick up this conversation's work.
+APP_DELEGATE_MANIFEST = HandlerManifest(
+    "app.delegate", "1.0.0", ("action",),
+    {"task": "schema://object/1.0"}, {"result": "schema://object/1.0"},
+    {
+        "type": "object",
+        "properties": {
+            "target": {
+                "type": "string", "enum": ["run_initiator", "background_pool"],
+            },
+            "pool": {"type": "string", "minLength": 1},
+            "max_wall_seconds": {"type": "integer", "minimum": 1, "maximum": 7200},
+            "effects": {"type": "string", "enum": ["read", "write"]},
+            "isolation_mode": {
+                "type": "string",
+                "enum": ["shared", "exclusive", "worktree", "snapshot"],
+            },
+            "max_concurrency": {"type": "integer", "minimum": 1, "maximum": 1},
+        },
+        "required": ["target"], "additionalProperties": False,
+    },
+    ExecutionSafety.UNKNOWN_ON_LEASE_LOSS,
+    ResourceProfile(0, 0, 0, 7200, 0, "app-delegate"),
+    "schema://object/1.0", ("agent.invoke",), (), True, True,
+)
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -99,11 +128,14 @@ class DelegationQueue:
     @staticmethod
     def _dto(row) -> dict[str, Any]:
         return {
-            "delegation_id": row["delegation_id"], "status": row["status"],
+            "delegation_id": row["delegation_id"], "actor": row["actor"],
+            "status": row["status"],
             "request": json.loads(row["request_json"]),
             "result": None if row["result_json"] is None else json.loads(row["result_json"]),
             "error": row["error"], "lease_expires_at": row["lease_expires_at"],
+            "worker_id": row["lease_owner"],
             "cancel_requested": bool(row["cancel_requested"]),
+            "created_at": row["created_at"], "updated_at": row["updated_at"],
         }
 
     def enqueue(self, delegation_id: str, *, actor: str, request: Mapping[str, Any]):
@@ -203,7 +235,7 @@ class DelegationQueue:
 
     def reconcile(
         self, delegation_id: str, *, actor: str, outcome: str, note: str,
-        idempotency_key: str,
+        idempotency_key: str, result=None, error: str | None = None,
     ) -> Mapping[str, Any]:
         if outcome not in {"confirmed_succeeded", "confirmed_failed"}:
             raise ValueError("outcome must be confirmed_succeeded or confirmed_failed")
@@ -211,6 +243,12 @@ class DelegationQueue:
             raise ValueError("idempotency_key is required")
         if len(note) > 4000:
             raise ValueError("reconciliation note is too long")
+        if result is not None and not isinstance(result, Mapping):
+            raise ValueError("reconciled delegation result must be an object")
+        if outcome == "confirmed_succeeded" and error is not None:
+            raise ValueError("a successful reconciliation cannot include error")
+        if outcome == "confirmed_failed" and result is not None:
+            raise ValueError("a failed reconciliation cannot include result")
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             existing = db.execute(
@@ -229,7 +267,7 @@ class DelegationQueue:
                 db.commit()
                 return dict(existing)
             job = db.execute(
-                "SELECT status FROM harness_delegations"
+                "SELECT * FROM harness_delegations"
                 " WHERE delegation_id=? AND actor=?", (delegation_id, actor),
             ).fetchone()
             if job is None:
@@ -241,6 +279,19 @@ class DelegationQueue:
                 "INSERT INTO harness_delegation_reconciliations VALUES (?,?,?,?,?,?)",
                 (delegation_id, actor, outcome, note, idempotency_key, created_at),
             )
+            if outcome == "confirmed_succeeded" and result is not None:
+                db.execute(
+                    "UPDATE harness_delegations SET status='succeeded',result_json=?,"
+                    "error=NULL,updated_at=? WHERE delegation_id=? AND actor=?",
+                    (canonical_json(result), created_at, delegation_id, actor),
+                )
+            elif outcome == "confirmed_failed":
+                db.execute(
+                    "UPDATE harness_delegations SET status='failed',error=?,updated_at=?"
+                    " WHERE delegation_id=? AND actor=?",
+                    (error or note or "delegation was confirmed failed", created_at,
+                     delegation_id, actor),
+                )
             db.commit()
         return self.reconciliation(delegation_id, actor=actor)
 
@@ -267,6 +318,40 @@ class DelegationQueue:
             "by_status": {str(row["status"]): int(row["count"]) for row in rows},
             "reconciled": int(reconciled),
         }
+
+    def list(
+        self, *, actor: str, statuses: tuple[str, ...] = (), limit: int = 100,
+    ) -> tuple[Mapping[str, Any], ...]:
+        allowed = {"queued", "leased", "succeeded", "failed", "cancelled", "unknown"}
+        selected = tuple(dict.fromkeys(statuses or ("queued", "leased", "unknown")))
+        if not 1 <= limit <= 200:
+            raise ValueError("limit must be between 1 and 200")
+        if not selected or any(status not in allowed for status in selected):
+            raise ValueError("statuses contains an unsupported delegation status")
+        placeholders = ",".join("?" for _ in selected)
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._expire(db, actor=actor)
+            rows = db.execute(
+                "SELECT * FROM harness_delegations WHERE actor=?"
+                f" AND status IN ({placeholders})"
+                " ORDER BY created_at,delegation_id",
+                (actor, *selected),
+            ).fetchall()
+            db.commit()
+        visible = []
+        for row in rows:
+            config = json.loads(row["request_json"]).get("config") or {}
+            # Healthy background work belongs to the daemon. An unknown item
+            # still belongs in the actor's recovery view because only a human
+            # verdict may reconcile an ambiguous external effect.
+            if (config.get("target") == "background_pool"
+                    and row["status"] != "unknown"):
+                continue
+            visible.append(self._dto(row))
+            if len(visible) == limit:
+                break
+        return tuple(visible)
 
     def prune(self, *, before: str, limit: int = 100) -> Mapping[str, Any]:
         if not 1 <= limit <= 1000:
@@ -340,10 +425,16 @@ class DelegationQueue:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             self._expire(db, actor=actor)
-            row = db.execute(
+            rows = db.execute(
                 "SELECT * FROM harness_delegations WHERE actor=? AND status='queued'"
-                " ORDER BY created_at,delegation_id LIMIT 1", (actor,),
-            ).fetchone()
+                " ORDER BY created_at,delegation_id", (actor,),
+            ).fetchall()
+            # Conversation workers must never race the machine worker for a
+            # background delegation. Old Harness rows have no target and keep
+            # their original actor-scoped behaviour.
+            row = next((candidate for candidate in rows if
+                        (json.loads(candidate["request_json"]).get("config") or {})
+                        .get("target") != "background_pool"), None)
             if row is None:
                 db.commit(); return None
             refusal = self._admit(db, row, actor=actor)
@@ -368,6 +459,65 @@ class DelegationQueue:
             db.commit()
         return self.get(row["delegation_id"], actor=actor)
 
+    def claim_background(
+        self, *, worker_id: str, pools: tuple[str, ...] = ("default",),
+        lease_seconds: int = 30,
+    ):
+        """Lease one background-pool item across actors.
+
+        Actor identity remains attached to the row and is returned to the
+        worker; crossing actors here is intentional and confined to the
+        private loopback worker endpoint, never the public MCP tools.
+        """
+        if not worker_id.strip() or not 5 <= lease_seconds <= 300:
+            raise ValueError("worker_id and lease_seconds between 5 and 300 are required")
+        selected = tuple(dict.fromkeys(str(pool).strip() for pool in pools if str(pool).strip()))
+        if not selected:
+            raise ValueError("at least one background pool is required")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute(
+                "SELECT * FROM harness_delegations WHERE status='queued'"
+                " ORDER BY created_at,delegation_id"
+            ).fetchall()
+            row = None
+            for candidate in rows:
+                request = json.loads(candidate["request_json"])
+                config = request.get("config") or {}
+                if (config.get("target") == "background_pool"
+                        and str(config.get("pool", "default")) in selected):
+                    row = candidate
+                    break
+            if row is None:
+                db.commit()
+                return None
+            expires = _stamp(_now() + timedelta(seconds=lease_seconds))
+            changed = db.execute(
+                "UPDATE harness_delegations SET status='leased',lease_owner=?,"
+                "lease_expires_at=?,updated_at=? WHERE delegation_id=? AND status='queued'",
+                (worker_id, expires, _stamp(_now()), row["delegation_id"]),
+            ).rowcount
+            db.commit()
+        return None if changed != 1 else self.get(row["delegation_id"])
+
+    def renew_background(
+        self, delegation_id: str, *, worker_id: str, lease_seconds: int = 30,
+    ):
+        item = self.get(delegation_id)
+        return self.renew(
+            delegation_id, actor=str(item["actor"]), worker_id=worker_id,
+            lease_seconds=lease_seconds,
+        )
+
+    def complete_background(
+        self, delegation_id: str, *, worker_id: str, result=None, error=None,
+    ):
+        item = self.get(delegation_id)
+        return self.complete(
+            delegation_id, actor=str(item["actor"]), worker_id=worker_id,
+            result=result, error=error,
+        )
+
     def renew(self, delegation_id: str, *, actor: str, worker_id: str, lease_seconds: int = 30):
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -386,6 +536,8 @@ class DelegationQueue:
     def complete(self, delegation_id: str, *, actor: str, worker_id: str, result=None, error=None):
         if (result is None) == (error is None):
             raise ValueError("exactly one of result or error is required")
+        if result is not None and not isinstance(result, Mapping):
+            raise ValueError("delegation result must be an object")
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             self._expire(db, actor=actor)
@@ -422,6 +574,32 @@ class DelegationQueue:
                 )
             db.commit()
         return CancelAck(CancelDisposition.CONFIRMED_STOPPED if row["status"] == "queued" else CancelDisposition.UNKNOWN)
+
+    def timeout(self, delegation_id: str, *, actor: str):
+        """Close an unclaimed request, or make a leased outcome unknown."""
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT status FROM harness_delegations WHERE delegation_id=? AND actor=?",
+                (delegation_id, actor),
+            ).fetchone()
+            if row is not None and row["status"] == "queued":
+                db.execute(
+                    "UPDATE harness_delegations SET status='failed',error=?,updated_at=?"
+                    " WHERE delegation_id=? AND actor=? AND status='queued'",
+                    ("delegation was not claimed before its deadline", _stamp(_now()),
+                     delegation_id, actor),
+                )
+            elif row is not None and row["status"] == "leased":
+                db.execute(
+                    "UPDATE harness_delegations SET status='unknown',error=?,"
+                    "cancel_requested=1,updated_at=? WHERE delegation_id=? AND actor=?"
+                    " AND status='leased'",
+                    ("delegation exceeded its deadline; reconciliation required",
+                     _stamp(_now()), delegation_id, actor),
+                )
+            db.commit()
+        return self.get(delegation_id, actor=actor)
 
     def get(self, delegation_id: str, *, actor: str | None = None):
         with self._connect() as db:
@@ -485,21 +663,29 @@ class HarnessSubagentHandler:
 
     def execute(self, prepared, context):
         payload = prepared.payload
+        request = {"input": payload["input"], "config": payload["config"]}
+        for key in ("protocol", "execution"):
+            if key in payload:
+                request[key] = payload[key]
         item = self.queue.enqueue(
             payload["delegation_id"], actor=payload["actor"],
-            request={"input": payload["input"], "config": payload["config"]},
+            request=request,
         )
         deadline = time.monotonic() + int(payload["config"].get("max_wall_seconds", 1800))
         while item["status"] in {"queued", "leased"} and time.monotonic() < deadline:
             time.sleep(self.poll_seconds)
             item = self.queue.get(payload["delegation_id"], actor=payload["actor"])
+        if item["status"] in {"queued", "leased"}:
+            item = self.queue.timeout(
+                payload["delegation_id"], actor=payload["actor"],
+            )
         if item["status"] == "succeeded":
             output = {"result": item["result"]}
             return RawHandlerResult(output, None, payload["delegation_id"], ExternalEffect.KNOWN_APPLIED)
         if item["status"] == "failed":
-            raise HandlerPermanentError(item["error"] or "Harness subagent failed")
+            raise HandlerPermanentError(item["error"] or "delegated Agent failed")
         raise UnknownExternalResultError(
-            item["error"] or "Harness delegation outcome is unknown",
+            item["error"] or "Agent delegation outcome is unknown",
             provider_request_id=payload["delegation_id"],
             details={"resolution": {"kind": "reconciliation_required"}},
         )
@@ -523,3 +709,63 @@ class HarnessSubagentHandler:
             HandlerResultStatus.SUCCEEDED, output, None, None, True,
             ExternalEffect.KNOWN_APPLIED, recovery_ref,
         ), recovery_ref)
+
+
+class AppDelegationHandler(HarnessSubagentHandler):
+    """Delegate one Agent step to the App conversation that owns the Run."""
+
+    def validate(self, manifest, config):
+        issues = []
+        if manifest.execution_safety is not ExecutionSafety.UNKNOWN_ON_LEASE_LOSS:
+            issues.append(HandlerValidationIssue(
+                ("execution_safety",), "App delegation requires unknown_on_lease_loss",
+            ))
+        if config.get("target") not in {"run_initiator", "background_pool"}:
+            issues.append(HandlerValidationIssue(
+                ("target",), "target must be run_initiator or background_pool",
+            ))
+        if config.get("target") == "run_initiator" and "pool" in config:
+            issues.append(HandlerValidationIssue(
+                ("pool",), "pool is only valid for background_pool",
+            ))
+        if (config.get("target") == "background_pool"
+                and not str(config.get("pool", "default")).strip()):
+            issues.append(HandlerValidationIssue(
+                ("pool",), "pool must be non-empty",
+            ))
+        effects = config.get("effects", "read")
+        isolation = config.get("isolation_mode", "shared")
+        if effects == "write" and isolation not in {"exclusive", "worktree"}:
+            issues.append(HandlerValidationIssue(
+                ("isolation_mode",),
+                "write delegations require exclusive or worktree isolation",
+            ))
+        if config.get("max_concurrency", 1) != 1:
+            issues.append(HandlerValidationIssue(
+                ("max_concurrency",), "App delegation enforces max_concurrency=1",
+            ))
+        return HandlerValidationResult(tuple(issues))
+
+    def prepare(self, request, context):
+        digest = hashlib.sha256(str(request.idempotency_key).encode()).hexdigest()
+        delegation_id = f"app_delegation:{digest}"
+        return PreparedExecution({
+            "delegation_id": delegation_id, "actor": str(request.actor),
+            "input": request.input, "config": request.config,
+            "protocol": {"name": "orbit-app-delegation", "version": "1"},
+            "execution": {
+                "attempt_id": str(request.attempt_id),
+                "idempotency_key": str(request.idempotency_key),
+                "deadline": request.deadline.isoformat(),
+            },
+        }, delegation_id)
+
+    def execute(self, prepared, context):
+        # Reuse the proven durable queue and polling semantics. A synthetic
+        # provider marker makes diagnostics explicit without exposing a model
+        # choice in the Workflow definition.
+        payload = prepared.payload
+        prepared = PreparedExecution({
+            **payload, "config": {**payload["config"], "provider": "current-app"},
+        }, prepared.execution_ref)
+        return super().execute(prepared, context)
