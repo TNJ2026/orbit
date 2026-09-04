@@ -961,9 +961,14 @@ def build_parser() -> argparse.ArgumentParser:
     worker_cmd = sub.add_parser(
         "agent-worker", help="Run the machine-wide unattended Agent worker",
     )
-    worker_cmd.add_argument(
-        "--command", dest="agent_command", required=True,
-        help="Child command; receives delegation JSON on stdin and returns a JSON object",
+    worker_backend = worker_cmd.add_mutually_exclusive_group()
+    worker_backend.add_argument(
+        "--backend", choices=("codex",), default="codex",
+        help="Built-in Agent backend (default: codex)",
+    )
+    worker_backend.add_argument(
+        "--command", dest="agent_command",
+        help="Custom child command; receives delegation JSON and returns a JSON object",
     )
     worker_cmd.add_argument("--hub-url", default="http://127.0.0.1:8848")
     worker_cmd.add_argument(
@@ -990,6 +995,11 @@ def build_parser() -> argparse.ArgumentParser:
             "Start one machine background Agent worker using this JSON "
             "stdin/stdout child command (or ORBIT_BACKGROUND_AGENT_COMMAND)"
         ),
+    )
+    hub_serve.add_argument(
+        "--background-agent-backend", choices=("codex",),
+        default=os.environ.get("ORBIT_BACKGROUND_AGENT_BACKEND"),
+        help="Enable the supervised worker with a built-in backend (or set the environment variable)",
     )
     hub_serve.add_argument(
         "--background-agent-pool", action="append", default=None,
@@ -1192,7 +1202,7 @@ def main() -> None:
         from .background_agent import BackgroundAgentWorker
 
         BackgroundAgentWorker(
-            args.agent_command, hub_url=args.hub_url,
+            args.agent_command, backend=args.backend, hub_url=args.hub_url,
             pools=tuple(args.pool or ("default",)),
             lease_seconds=args.lease_seconds, poll_seconds=args.poll_seconds,
             parent_pid=args.parent_pid,
@@ -1249,13 +1259,20 @@ def main() -> None:
 
         templates = WorkflowTemplateStore()
         background = None
-        if args.background_agent_command:
+        if args.background_agent_command and args.background_agent_backend:
+            raise SystemExit(
+                "choose either --background-agent-command or --background-agent-backend"
+            )
+        if args.background_agent_command or args.background_agent_backend:
             command = [
                 sys.executable, "-m", "orbit", "agent-worker",
                 "--hub-url", f"http://127.0.0.1:{args.port}",
-                "--command", args.background_agent_command,
                 "--parent-pid", str(os.getpid()),
             ]
+            if args.background_agent_command:
+                command.extend(("--command", args.background_agent_command))
+            else:
+                command.extend(("--backend", args.background_agent_backend))
             for pool in args.background_agent_pool or ("default",):
                 command.extend(("--pool", pool))
             background = subprocess.Popen(

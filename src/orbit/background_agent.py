@@ -11,8 +11,10 @@ import json
 import os
 from pathlib import Path
 import shlex
+import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -49,12 +51,18 @@ def _post(base_url: str, operation: str, body: Mapping[str, Any]) -> Mapping[str
 
 class BackgroundAgentWorker:
     def __init__(
-        self, command: str, *, hub_url: str = "http://127.0.0.1:8848",
+        self, command: str | None = None, *, backend: str = "codex",
+        hub_url: str = "http://127.0.0.1:8848",
         pools: tuple[str, ...] = ("default",), lease_seconds: int = 30,
         poll_seconds: float = 1.0, worker_id: str | None = None,
         parent_pid: int | None = None,
     ) -> None:
-        argv = tuple(shlex.split(command))
+        if command is not None and backend != "codex":
+            raise ValueError("command and a non-default backend cannot both be set")
+        argv = (
+            tuple(shlex.split(command)) if command is not None
+            else (sys.executable, "-m", "orbit.background_agent_adapter", backend)
+        )
         if not argv:
             raise ValueError("background Agent command is required")
         if not 10 <= lease_seconds <= 300:
@@ -68,6 +76,17 @@ class BackgroundAgentWorker:
         self.worker_id = worker_id or (
             f"background:{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         )
+
+    @staticmethod
+    def _stop_process(process: subprocess.Popen, *, force: bool = False) -> None:
+        if process.poll() is not None:
+            return
+        if os.name != "nt":
+            os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
+        elif force:
+            process.kill()
+        else:
+            process.terminate()
 
     def _lease_body(self, workspace_id: str, delegation_id: str) -> dict[str, Any]:
         return {
@@ -96,10 +115,14 @@ class BackgroundAgentWorker:
             process.stdin.write(json.dumps(item["request"], sort_keys=True))
             process.stdin.close()
             cancelled = False
+            cancelled_at: float | None = None
             next_renewal = time.monotonic() + self.lease_seconds / 3
             try:
                 while process.poll() is None:
                     time.sleep(min(0.5, max(0.05, next_renewal - time.monotonic())))
+                    if cancelled_at is not None and time.monotonic() - cancelled_at >= 5:
+                        self._stop_process(process, force=True)
+                        continue
                     if time.monotonic() < next_renewal:
                         continue
                     renewed = _post(
@@ -107,18 +130,19 @@ class BackgroundAgentWorker:
                         self._lease_body(workspace_id, delegation_id),
                     ).get("delegation")
                     if isinstance(renewed, Mapping) and renewed.get("cancel_requested"):
-                        process.terminate()
+                        self._stop_process(process)
                         cancelled = True
+                        cancelled_at = cancelled_at or time.monotonic()
                     next_renewal = time.monotonic() + self.lease_seconds / 3
             except BaseException:
                 # Losing the Hub means losing the authority to keep working.
                 # Stop the child and leave the lease to become unknown; never
                 # claim success for an execution whose ownership was lost.
-                process.terminate()
+                self._stop_process(process)
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    process.kill()
+                    self._stop_process(process, force=True)
                     process.wait(timeout=5)
                 raise
             output.seek(0)
