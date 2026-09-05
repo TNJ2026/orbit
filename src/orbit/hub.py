@@ -12,18 +12,19 @@ import time
 import uuid
 from typing import Any, Callable, Container, Iterable, Mapping
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 from urllib.request import Request as UrlRequest, urlopen
 
 import anyio
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse, RedirectResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 from websockets.asyncio.client import connect as websocket_connect
 
 from .agent_apps.host import default_workspace
+from .web.hub_ui import render_hub_ui
 from .global_control import (
     WorkflowTemplateError, WorkflowTemplateStorageError, WorkflowTemplateStore,
 )
@@ -349,6 +350,28 @@ class WorkspaceRuntimeManager:
                 f"multiple Orbit Runtimes are live for {workspace}"
             )
         return matches[0] if matches else None
+
+    def live_ui_entries(self) -> list[dict[str, str]]:
+        """Discover healthy Runtime UIs without launching any workspace."""
+        entries = {}
+        for runtime in self.runtime_discovery():
+            path = runtime.facts.get("project_root")
+            base = runtime.base_url
+            if not isinstance(path, str) or not path or not base:
+                continue
+            try:
+                address = urlsplit(base)
+                if (address.scheme != "http" or address.hostname not in
+                        {"127.0.0.1", "localhost", "::1"} or address.port is None
+                        or address.username is not None or address.password is not None):
+                    continue
+                if not self.health_check(base):
+                    continue
+            except (OSError, ValueError):
+                continue
+            url = base.rstrip("/") + "/ui/"
+            entries[(path, url)] = {"path": path, "url": url}
+        return sorted(entries.values(), key=lambda entry: (entry["path"], entry["url"]))
 
     def find_live(self, identifier: str) -> str | None:
         """Return an already-live Runtime without starting an offline Workspace."""
@@ -911,6 +934,9 @@ def create_hub_app(
     async def ui(request: Request) -> Response:
         identifier = request.path_params.get("workspace_id")
         tail = request.path_params.get("path", "")
+        if identifier is None and not tail:
+            entries = await anyio.to_thread.run_sync(runtimes.live_ui_entries)
+            return HTMLResponse(render_hub_ui(entries), headers={"Cache-Control": "no-store"})
         try:
             base = await anyio.to_thread.run_sync(runtimes.ensure, identifier)
         except HubError as exc:
