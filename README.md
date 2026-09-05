@@ -59,7 +59,9 @@ uv sync --extra dev
 uv run orbit serve
 ```
 
-The UI is available at `http://127.0.0.1:8848/ui`.
+The UI is available at `http://127.0.0.1:8848/ui`. That page lists the
+Workspace Runtimes running on this machine and links into each one's UI; it
+starts nothing, so a Workspace whose Runtime is not up does not appear there.
 
 There is one UI, one catalog and one published Workflow library. A Workflow
 names the Agents its author chose and runs on them wherever they exist.
