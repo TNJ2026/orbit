@@ -667,16 +667,33 @@ def _tool_adapter(
                     if port["data_policy"]["transport"] != "artifact_ref":
                         continue
                     value = output[port["id"]]
-                    types = port["data_policy"]["content_types"]
+                    types = tuple(port["data_policy"]["content_types"])
                     if not types:
                         raise ValueError("App artifact output needs a declared content type")
-                    content_type = types[0]
-                    if content_type == "application/json":
-                        content = canonical_json(value)
-                    elif isinstance(value, Mapping) and isinstance(value.get("text"), str):
-                        content = value["text"]
+                    # What the App produced decides the type, not the position
+                    # of a type in the port's list. `content_types` is a sorted
+                    # set of what the port accepts, so reading `[0]` as the
+                    # primary type wrote prose as a JSON string whenever the
+                    # port happened to accept `application/json` as well —
+                    # silently, and the downstream node read JSON where the
+                    # author wrote a document.
+                    prose = (
+                        isinstance(value, Mapping)
+                        and isinstance(value.get("text"), str)
+                    )
+                    text_type = next(
+                        (item for item in types if item.startswith("text/")), None,
+                    )
+                    if prose and text_type is not None:
+                        content_type, content = text_type, value["text"]
+                    elif "application/json" in types:
+                        content_type, content = "application/json", canonical_json(value)
                     else:
-                        raise ValueError("App text artifact result must contain a text string")
+                        raise ValueError(
+                            "App artifact result must be prose for a text port "
+                            "or an object for a JSON one; this port accepts "
+                            + ", ".join(types)
+                        )
                     output[port["id"]] = {"artifact_id": artifacts.write(
                         name=port["id"], content=content.encode("utf-8"),
                         content_type=content_type,

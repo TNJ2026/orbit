@@ -135,6 +135,78 @@ class CurrentAppExecutionTests(unittest.TestCase):
         self.complete(second_item, {"text": "approved"})
         self.finished(engine, run)
 
+    def test_a_port_accepting_several_types_is_judged_by_all_of_them(self):
+        """`content_types` is a sorted set, not a preference order.
+
+        Reading `[0]` as "the primary type" answered a question about
+        alphabetical order: a markdown port that also accepted PDF was refused
+        because `application/pdf` sorts first, and a JSON port that also
+        accepted PNG was admitted because `application/json` does. What
+        decides is whether an App — which produces prose or JSON and nothing
+        else — can satisfy the port at all.
+        """
+
+        from orbit.workflow.langgraph_runtime.current_app import bind_current_app
+
+        for label, declared, adaptable in (
+            ("markdown, and PDF too", ("text/markdown", "application/pdf"), True),
+            ("JSON, and PNG too", ("application/json", "image/png"), True),
+            ("nothing an App can write", ("image/png", "application/pdf"), False),
+        ):
+            with self.subTest(port=label):
+                policy = PortDataPolicy(PortTransport.ARTIFACT_REF, 4096, declared)
+                step = replace(
+                    agent_step(), outputs=(replace(port("result"), data_policy=policy),),
+                )
+                ir = single_step_workflow(step)
+                if adaptable:
+                    bind_current_app(ir, self.registry)
+                else:
+                    with self.assertRaisesRegex(ValueError, "text or JSON artifact"):
+                        bind_current_app(ir, self.registry)
+
+    def test_prose_is_written_as_text_even_where_json_is_also_accepted(self):
+        """The result decides the type; the port only says what it accepts.
+
+        A port accepting both `application/json` and `text/markdown` used to
+        take the first of those alphabetically — so an App's document was
+        stored as a JSON string containing it, and the next node read JSON
+        where the author wrote prose.
+        """
+
+        policy = PortDataPolicy(
+            PortTransport.ARTIFACT_REF, 4096, ("text/markdown", "application/json"),
+        )
+        first = replace(
+            agent_step("first"), outputs=(replace(port("result"), data_policy=policy),),
+        )
+        second = replace(
+            agent_step("second"), inputs=(replace(port("prompt"), data_policy=policy),),
+        )
+        ir = replace(
+            single_step_workflow(first), nodes=(first, second), terminals=("second",),
+            edges=(IREdge(
+                "next", "first", "result", "second", "prompt", "success",
+                {"op": "literal", "value": True}, {"op": "identity"},
+            ),),
+            result=IRResult("second", "result"),
+        )
+        engine = self.engine(ir)
+        run = engine.start(
+            ir.workflow_id, {"prompt": {}}, actor=ACTOR,
+            idempotency_key="both-types", execution_mode="current_app",
+        )
+
+        self.complete(self.claim(), {"text": "# Draft"})
+        second_item = self.claim()
+
+        # The document, not `{"text": "# Draft"}` rendered as JSON.
+        self.assertEqual(
+            "# Draft", second_item["request"]["input"]["task"]["input"]["prompt"],
+        )
+        self.complete(second_item, {"text": "approved"})
+        self.finished(engine, run)
+
     def test_invalid_mode_or_missing_app_handler_creates_no_run(self):
         from orbit.workflow.langgraph_runtime.compiler import LangGraphHandlerRegistry
         ir = single_step_workflow(agent_step())

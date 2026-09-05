@@ -43,8 +43,18 @@ def bind_current_app(ir, registry):
             raise ValueError(f"current_app cannot adapt Agent node {node.id!r}: expected action with result output")
         for port in node.outputs:
             if port.data_policy.transport.value == "artifact_ref":
+                # Every declared type, not the first one. `content_types` is
+                # normalized to a *sorted set* — it says which types the port
+                # accepts, in no order the author chose — so reading `[0]` as
+                # "the primary type" both refused a markdown port that also
+                # accepted PDF and admitted a JSON one that also accepted PNG.
+                # The question is whether an App, which can produce prose or
+                # JSON and nothing else, can satisfy this port at all.
                 types = port.data_policy.content_types
-                if not types or not (types[0].startswith("text/") or types[0] == "application/json"):
+                if not any(
+                    item.startswith("text/") or item == "application/json"
+                    for item in types
+                ):
                     raise ValueError(f"current_app needs a text or JSON artifact output on node {node.id!r}")
         config = to_primitive(node.config)
         if node.handler.name == "app.delegate":
