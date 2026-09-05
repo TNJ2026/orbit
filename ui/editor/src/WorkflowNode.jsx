@@ -39,23 +39,6 @@ export default function WorkflowNode({ id, data, selected }) {
       data-node-id={id}
     >
       <header>
-        {/* Kind and state share one row, not one each. They are the same
-            register of small print about the same node, and a card drawing a
-            run was a whole line taller than the same card drawing its
-            definition — enough for a two-line label to reach out of its lane
-            and into the node below it. */}
-        <span className="meta">
-          <span className="kind">{data.kind}</span>
-          {/* Where a run got to, when one is being drawn. Spelled as well as
-              coloured: a picture whose only difference is a hue is unreadable
-              to anyone who cannot see the hue, and this canvas already refuses
-              to let meaning ride on colour for routes. */}
-          {data.status ? (
-            <span className={`run-status run-status-${data.status}`}>
-              {RUN_STATUS_TEXT[data.status] ?? data.status}
-            </span>
-          ) : null}
-        </span>
         {/* The label is the one part of a node this canvas can already change,
             so it is edited in place rather than behind a panel. `nodrag` stops
             xyflow from treating a click in the field as the start of a drag,
@@ -79,6 +62,32 @@ export default function WorkflowNode({ id, data, selected }) {
             onChange={(event) => data.onLabelChange?.(id, event.target.value)}
           />
         )}
+        {/* The corner, after the name rather than above it. What a node *is*
+            is small print beside the thing a reader came for, and a line of
+            its own above the label pushed every card a line taller and read
+            as a heading over a heading.
+
+            Kind and state stay one span, not one each. They are the same
+            register of small print about the same node, and a card drawing a
+            run was a whole line taller than the same card drawing its
+            definition — enough for a two-line label to reach out of its lane
+            and into the node below it.
+
+            Last in the DOM as well as on the right, so the card is read as
+            "Draft · action" rather than "action · Draft": the name is what
+            identifies it. */}
+        <span className="meta">
+          <span className="kind">{data.kind}</span>
+          {/* Where a run got to, when one is being drawn. Spelled as well as
+              coloured: a picture whose only difference is a hue is unreadable
+              to anyone who cannot see the hue, and this canvas already refuses
+              to let meaning ride on colour for routes. */}
+          {data.status ? (
+            <span className={`run-status run-status-${data.status}`}>
+              {RUN_STATUS_TEXT[data.status] ?? data.status}
+            </span>
+          ) : null}
+        </span>
       </header>
       {/* What the definition names, and — when the Runtime substitutes one
           — what will really run it. Both, never one instead of the other: a

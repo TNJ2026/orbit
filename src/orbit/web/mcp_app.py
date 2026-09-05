@@ -624,6 +624,12 @@ _WORKFLOW_LIST_STYLE = r"""
   color: light-dark(#303034, #e4e4e8); background: light-dark(#e5e5e8, #303034) !important;
   cursor: pointer; }
 .listGoal:hover { background: light-dark(#d9d9dd, #3a3a40) !important; }
+/* Why there is no 新目标 on this one. Small print, wrapping, and in the row
+   rather than replacing the description: a reader still needs to know which
+   workflow it is. */
+.refusal { margin-top: 4px; padding: 0 12px 8px; color: var(--warn, #b26a00);
+  font-size: 11px; line-height: 1.45; white-space: normal; overflow-wrap: anywhere; }
+.workflowRow .refusal { padding: 0; }
 .viewHead { display: flex; align-items: center; gap: 8px; padding: 10px 12px;
   border-bottom: 1px solid var(--line); background: var(--bg); }
 .back { width: 30px; height: 30px; border: 1px solid var(--line); border-radius: 8px;
@@ -634,6 +640,19 @@ _WORKFLOW_LIST_STYLE = r"""
 
 ORBIT_WORKFLOWS_HTML = _card("Orbit · Workflows", r"""
 const card=document.getElementById('card');let current=null;
+/* Whether this Runtime can run it, which is not what `goal_readiness` says.
+   Readiness is about binding a goal to the inputs; this is about the
+   definition compiling against the Handlers and capabilities the Runtime was
+   started with. A workflow declaring `workspace_access` on a Runtime without
+   that grant is `ready` and unrunnable, and this card used to offer 新目标 on
+   it — the web UI, reading the same catalogue, has always drawn the refusal
+   instead. Absent verdict means an older Runtime that does not send one; the
+   card offers the goal rather than hiding a workflow it cannot judge. */
+function runnable(w){const answer=w?.langgraph_compatibility;return !answer||answer.compatible===true}
+/* The Runtime's own sentence — which node, which capability — passed through
+   rather than translated: inventing wording here would drop the specifics
+   that make it actionable. */
+function refusalMarkup(w){if(runnable(w))return '';const answer=w.langgraph_compatibility||{};const detail=answer.detail||answer.reason||'';return `<div class="refusal">引擎无法运行这份定义${detail?`：${esc(detail)}`:'。'}</div>`}
 function graphMarkup(graph){return graph?.nodes?.length?'<div class="workflowGraphMount" data-workflow-graph aria-label="Workflow graph"></div>':'<div class="empty">No graph</div>'}
 function mountGraph(graph){const element=card.querySelector('[data-workflow-graph]');if(element&&globalThis.OrbitWorkflowGraph?.mount)globalThis.OrbitWorkflowGraph.mount(element,graph,currentTheme())}
 function bindTabs(){const tabs=[...card.querySelectorAll('[role="tab"]')];
@@ -646,7 +665,7 @@ function bindDeleteConfirmation(w){const dialog=document.getElementById('deleteW
 function drawList(rows){current=null;
  card.className='card workflowList';
  card.innerHTML=rows.length?rows.map(w=>`<div class="workflowRow"><button class="row" type="button" data-open-id="${esc(w.workflow_id)}"><div class="name">${esc(w.name)}</div>
- <div class="desc">${esc(w.description||`${w.node_count||0} steps · v${w.latest_version||''}`)}</div></button><button class="listGoal" type="button" data-goal-id="${esc(w.workflow_id)}" data-goal-name="${esc(w.name||w.workflow_id)}">新目标</button></div>`).join(''):'<div class="empty">No workflows</div>';
+ <div class="desc">${esc(w.description||`${w.node_count||0} steps · v${w.latest_version||''}`)}</div>${refusalMarkup(w)}</button>${runnable(w)?`<button class="listGoal" type="button" data-goal-id="${esc(w.workflow_id)}" data-goal-name="${esc(w.name||w.workflow_id)}">新目标</button>`:''}</div>`).join(''):'<div class="empty">No workflows</div>';
  card.querySelectorAll('[data-open-id]').forEach(b=>b.onclick=()=>openDetail(b.dataset.openId));
  card.querySelectorAll('[data-goal-id]').forEach(b=>b.onclick=event=>{event.stopPropagation();dispatchPromptValue(`使用工作流「${b.dataset.goalName}」（${b.dataset.goalId}）执行：`) });
 }
@@ -658,7 +677,8 @@ function drawDetail(w){
  <div class="tabs" role="tablist" aria-label="工作流详情视图"><button id="workflowGraphTab" class="tab" type="button" role="tab" aria-selected="true" aria-controls="workflowGraphPanel">流程图</button><button id="workflowDefinitionTab" class="tab" type="button" role="tab" aria-selected="false" aria-controls="workflowDefinitionPanel" tabindex="-1">定义列表</button></div>
  <div id="workflowGraphPanel" class="detailPanel" role="tabpanel" aria-labelledby="workflowGraphTab">${graphMarkup(w.graph)}</div>
  <div id="workflowDefinitionPanel" class="detailPanel definition" role="tabpanel" aria-labelledby="workflowDefinitionTab" hidden>${rows?`<div class="steps">${rows}</div>`:'<div class="empty">No definitions</div>'}</div>
- <div class="actions"><button class="action primary" data-prompt="使用工作流「${esc(w.name||w.workflow_id)}」（${esc(w.workflow_id)}）执行：" data-prompt-mode="edit">新目标</button>
+ ${refusalMarkup(w)}
+ <div class="actions">${runnable(w)?`<button class="action primary" data-prompt="使用工作流「${esc(w.name||w.workflow_id)}」（${esc(w.workflow_id)}）执行：" data-prompt-mode="edit">新目标</button>`:''}
  <button class="action" data-prompt="按照下面的要求修改工作流「${esc(w.name||w.workflow_id)}」（${esc(w.workflow_id)}）：" data-prompt-mode="edit">修改</button>
  <button id="openDeleteWorkflowDialog" class="action danger" type="button">删除</button></div>
  <dialog id="deleteWorkflowDialog" class="confirmDialog" aria-labelledby="deleteWorkflowTitle"><div class="confirmBody"><h2 id="deleteWorkflowTitle" class="confirmTitle">确认删除工作流？</h2><p class="confirmText">${esc(w.name||w.workflow_id)}<br>${esc(w.workflow_id)}</p></div><div class="confirmActions"><button id="cancelDeleteWorkflow" class="action" type="button">取消</button><button id="confirmDeleteWorkflow" class="action danger" type="button">确认删除</button></div></dialog>`;document.getElementById('workflowBack').onclick=showList;bind();bindTabs();bindDefinitionItems();bindDeleteConfirmation(w);mountGraph(w.graph)}

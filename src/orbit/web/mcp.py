@@ -1313,6 +1313,19 @@ def build_mcp_dispatcher(
                 # Said out loud so a caller holding the id knows why starting
                 # it will be refused, rather than finding out from `start_run`.
                 "archived": detail["archived"],
+                # The same verdict the listing now carries, for the same
+                # reason: a card that draws this workflow decides here whether
+                # to offer to start it, and `goal_readiness` alone answers a
+                # different question. `execution_compatibility` above is not
+                # this — that one is asked about a named execution mode and
+                # only when the caller asks.
+                "langgraph_compatibility": (
+                    {"compatible": False, "reason": "service_not_configured"}
+                    if langgraph_service is None
+                    else langgraph_service.compatibility(
+                        detail["workflow_id"], detail["latest_version"],
+                    )
+                ),
                 "input_mode": detail["input_mode"],
                 "inputs": detail["inputs"],
                 "goal_binding": detail["goal_binding"],
@@ -1390,6 +1403,24 @@ def build_mcp_dispatcher(
                         # the size.
                         "node_count": item["summary"]["node_count"],
                         "node_kinds": item["summary"]["node_kinds"],
+                        # Whether this Runtime can run it at all, which is a
+                        # different question from `goal_readiness` and was the
+                        # one this projection never answered. Readiness says a
+                        # goal can be bound to the inputs; this says the
+                        # definition compiles against the Handlers and
+                        # capabilities this Runtime was started with. A
+                        # workflow declaring `workspace_access` on a Runtime
+                        # without the grant is `ready` and unrunnable, and the
+                        # card offered to start it because nothing here told
+                        # it otherwise — while the web UI, reading the same
+                        # catalog over HTTP, drew the refusal in words.
+                        "langgraph_compatibility": (
+                            {"compatible": False, "reason": "service_not_configured"}
+                            if langgraph_service is None
+                            else langgraph_service.compatibility(
+                                item["workflow_id"], item["latest_version"],
+                            )
+                        ),
                     }
                     for item in items
                 ]

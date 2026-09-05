@@ -579,9 +579,10 @@ class StepListRenderingTests(unittest.TestCase):
         add a whole line for the status, which put a two-line label over the
         edge on the run page while the same workflow read fine on its own.
 
-        Two rules keep the card inside the lane: the state shares the kind's
-        row rather than taking one of its own, and the label stops at two
-        lines instead of growing without limit.
+        Three rules keep the card inside the lane: the state shares the kind's
+        row rather than taking one of its own, that row sits in the corner
+        beside the label rather than on a line above it, and the label stops
+        at two lines instead of growing without limit.
         """
 
         node = (EDITOR_SOURCE / "WorkflowNode.jsx").read_text(encoding="utf-8")
@@ -589,7 +590,12 @@ class StepListRenderingTests(unittest.TestCase):
 
         # One row carrying both, not a status line under the kind line.
         self.assertIn('<span className="meta">', node)
-        self.assertIn(".node .meta { display: flex", css)
+        self.assertIn("display: flex", css.split(".node .meta {")[1][:120])
+        # And that row beside the label, not stacked over it — the header is a
+        # row, and the corner is never squeezed by a long name.
+        header = css.split(".node header {")[1][:220]
+        self.assertIn("justify-content: space-between", header)
+        self.assertIn("flex: 0 0 auto", css.split(".node .meta {")[1][:160])
         meta = node.split('<span className="meta">')[1].split("</span>\n        </span>")[0]
         self.assertIn('className="kind"', meta)
         self.assertIn("run-status run-status-", meta)

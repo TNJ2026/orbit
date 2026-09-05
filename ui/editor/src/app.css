@@ -165,7 +165,15 @@ body {
 }
 
 .node.selected { border-color: var(--accent); }
-.node header { display: flex; flex-direction: column; gap: 2px; }
+/* Name on the left, what it is in the corner. A row rather than a stack: the
+   kind is small print about the label, not a heading over it, and the card is
+   a line shorter for it — which matters on a canvas that places nodes in
+   fixed lanes. `flex-start` so the corner stays level with the label's first
+   line when the label wraps to two. */
+.node header {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;
+}
+.node header > .title { flex: 1 1 auto; min-width: 0; }
 .node .kind { font-size: 10px; text-transform: uppercase; color: var(--muted); letter-spacing: 0.06em; }
 .node .title {
   font: inherit;
@@ -310,7 +318,12 @@ span.title:hover { border-color: transparent; }
 .node-run-running { border-left-color: var(--accent); }
 .node-run-waiting { border-left-color: #d97706; }
 .node-run-not_reached { border-left-color: var(--line); opacity: .62; }
-.node .meta { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+/* Never squeezed: it is two short words in a corner, and letting the label
+   push them into wrapping would cost the line the corner exists to save. */
+.node .meta {
+  display: flex; align-items: baseline; gap: 7px;
+  flex: 0 0 auto; white-space: nowrap;
+}
 .run-status {
   font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
   color: var(--muted); white-space: nowrap;
