@@ -49,6 +49,7 @@ def langgraph_run_dto(run, *, can_write: bool) -> dict[str, Any]:
         "workflow_version": run.workflow_version,
         "template_id": run.template_id,
         "agent_binding": run.agent_binding,
+        "execution_mode": run.execution_mode,
         "status": run.status,
         "revision": run.revision,
         "result": run.result,

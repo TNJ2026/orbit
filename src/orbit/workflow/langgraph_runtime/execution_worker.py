@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import multiprocessing
 from multiprocessing.connection import Client, Listener
 import os
@@ -10,6 +10,8 @@ from pathlib import Path
 import secrets
 import threading
 from typing import Any, Mapping, Sequence
+
+from ..domain.serialization import to_primitive
 
 from .compiler import (
     AcceptanceNotMet, BoundHandler, HandlerOutcome, LangGraphHandlerRegistry,
@@ -39,7 +41,7 @@ def _serve_worker(
         artifact_store=store,
         secret_values=secret_values,
     )
-    listener = Listener(("127.0.0.1", 0), family="AF_INET", authkey=authkey)
+    listener = Listener(("127.0.0.1", 0), family="AF_INET", authkey=authkey, backlog=64)
     metadata = [
         {
             "name": item.name,
@@ -70,10 +72,10 @@ def _serve_worker(
                     request["inputs"], request["config"], request["context"],
                 )
                 if isinstance(value, HandlerOutcome):
-                    payload = {"output": dict(value.output), "route": value.route}
+                    payload = {"output": to_primitive(value.output), "route": value.route}
                     connection.send({"ok": True, "kind": "outcome", "result": payload})
                 else:
-                    connection.send({"ok": True, "kind": "mapping", "result": dict(value)})
+                    connection.send({"ok": True, "kind": "mapping", "result": to_primitive(value)})
             elif operation == "cancel_run":
                 value = False if item.cancel_run is None else item.cancel_run(request["run_id"])
                 connection.send({"ok": True, "result": bool(value)})
@@ -112,6 +114,7 @@ class ExecutionWorkerController:
     address: Any
     authkey: bytes
     pid: int
+    _connect_lock: Any = field(default_factory=threading.Lock, repr=False)
 
     @property
     def alive(self) -> bool:
@@ -121,10 +124,15 @@ class ExecutionWorkerController:
         if not self.alive:
             raise LangGraphUnknownExternalResult("Execution Worker is unavailable")
         try:
-            connection = Client(self.address, family="AF_INET", authkey=self.authkey)
-            connection.send(dict(payload))
-            response = connection.recv()
-            connection.close()
+            # Listener authenticates one connection at a time. Concurrent
+            # handshakes against its small socket queue can reset a branch
+            # before it submits any work. Serialize only the handshake, not
+            # execution: each authenticated connection has its own responder.
+            with self._connect_lock:
+                connection = Client(self.address, family="AF_INET", authkey=self.authkey)
+            with connection:
+                connection.send(dict(payload))
+                response = connection.recv()
         except (EOFError, OSError, BrokenPipeError) as exc:
             raise LangGraphUnknownExternalResult(
                 "Execution Worker connection was lost; Handler outcome is unknown"
@@ -271,7 +279,7 @@ def start_execution_worker(
 
         def invoke(inputs, config, execution_context, *, call=rpc):
             response = call(
-                "invoke", inputs=dict(inputs), config=dict(config), context=execution_context,
+                "invoke", inputs=to_primitive(inputs), config=to_primitive(config), context=execution_context,
             )
             if response.get("kind") == "outcome":
                 value = response["result"]
@@ -329,7 +337,7 @@ def start_execution_worker_pool(
 
         def invoke(inputs, config, execution_context, *, rpc=call):
             response = rpc(
-                "invoke", inputs=dict(inputs), config=dict(config), context=execution_context,
+                "invoke", inputs=to_primitive(inputs), config=to_primitive(config), context=execution_context,
             )
             if response.get("kind") == "outcome":
                 value = response["result"]

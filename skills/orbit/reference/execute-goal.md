@@ -5,10 +5,17 @@ the workflow was generated earlier in the same task.
 
 First normalize and validate the user's request by following
 [execution-request.md](execution-request.md). Keep user-facing workflow inputs
-separate from Skill control options; only the normalized `goal`, `input`, and
+separate from Skill control options; only the normalized `goal`, `input`, `execution_mode`, and
 resolved workflow identity are sent to `start_run`.
 
 ## Select The Workflow
+
+For `execution_mode=current_app`, inspect candidates with `ready_only=false`:
+missing CLI bindings must not hide them. Pass `execution_mode=current_app` to
+`inspect_workflow_definition` and check `execution_compatibility.compatible`
+instead of rejecting a definition for its default CLI compatibility. Still
+validate the original published inputs and any missing goal input. Runtime
+adapts only this Run, including every parallel Agent branch.
 
 1. When the request includes an explicit workflow ID, call
    `inspect_workflow_definition` for that ID directly and validate its published
@@ -54,7 +61,7 @@ resolved workflow identity are sent to `start_run`.
    gate protects. This option never bypasses host, tool, Runtime, or workflow
    confirmation requirements at the point where an effect is actually
    authorized.
-3. Call `start_run` with the selected `workflow_id`, the normalized `goal` and
+3. Call `start_run` with the selected `workflow_id`, the normalized `execution_mode`, `goal` and
    `input`, `wait=false`, and a fresh idempotency key. Include
    `workflow_version` only for a concrete selected version, not `latest`.
    This call opens the dedicated goal-execution MCP App, which shows only this
@@ -90,6 +97,25 @@ resolved workflow identity are sent to `start_run`.
    claiming until none is queued. Never wait synchronously for a Run while it
    may be waiting for this same conversation; `start_run(wait=false)` above is
    what prevents that deadlock.
+   For adapted legacy nodes, `request.input.task.instructions` and
+   `original_config` carry the node's authored instructions, and
+   `request.input.task.input` carries its assembled inputs. The original
+   Handler name is provenance, not a request to invoke that CLI. Return an
+   object as `result`; for prose or text artifacts return `{"text": "..."}`.
+   Runtime stores declared artifacts and passes their content to later steps.
+   Secret-reference inputs remain opaque references; they do not grant access
+   to Runtime secrets. Use only the App's already-authorized credential/tool
+   facilities, and never request or print resolved secret values in a result.
+   Multiple ready branches produce independent delegations. When the host
+   supports subagents and the user authorized parallel execution, claim and
+   dispatch independent branches concurrently, keeping each lease renewed
+   and each result tied to its delegation ID. The parent owns the Runtime
+   credentials and completes each delegation. Serialize conflicting writes
+   to a shared workspace. Otherwise process branches sequentially, retaining
+   the Runtime's join semantics, and do not claim actual parallel execution.
+   In current_app mode, keep following until an interrupt or completion unless
+   the user explicitly requests detached execution; explain that queued App
+   work requires this conversation to continue claiming it.
 6. Execute only commands present in the latest `allowed_commands[]`. Never
    construct mutation URLs or infer a command from an earlier state.
    When a claimed App/Harness delegation contains `request.workspace`, run the

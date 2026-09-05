@@ -139,6 +139,7 @@ class LangGraphRun:
     # answer — `goal` is the label somebody gave the work, which is not the
     # same as the work.
     inputs: Mapping[str, Any] = field(default_factory=dict)
+    execution_mode: str = "default"
 
 
 EVENT_LOG_DDL = """
@@ -520,6 +521,11 @@ class LangGraphWorkflowService:
                 connection.execute(
                     "ALTER TABLE langgraph_runs ADD COLUMN graph_snapshot_json TEXT"
                 )
+            if "execution_mode" not in columns:
+                connection.execute(
+                    "ALTER TABLE langgraph_runs ADD COLUMN execution_mode"
+                    " TEXT NOT NULL DEFAULT 'default'"
+                )
             if "agent_binding" not in columns:
                 # Which Agent this run's Agent steps were bound to, denormalised
                 # out of the snapshot beside it. The snapshot is the authority;
@@ -655,7 +661,7 @@ class LangGraphWorkflowService:
             )
         return record
 
-    def _bound(self, ir):
+    def _bound(self, ir, execution_mode="default"):
         """The graph this Runtime will really execute, and what moved.
 
         Rebinding is a decision taken once, when the run starts, so the result
@@ -665,6 +671,12 @@ class LangGraphWorkflowService:
         definition names — which is the Agent that was not there.
         """
 
+        from .current_app import bind_current_app, validate_execution_mode
+
+        validate_execution_mode(execution_mode)
+        if execution_mode == "current_app":
+            binding = bind_current_app(ir, self.handlers)
+            return binding.ir, binding
         if self.rebind is None:
             return ir, None
         binding = self.rebind(ir)
@@ -680,6 +692,7 @@ class LangGraphWorkflowService:
         actor: str = "system:langgraph",
         goal: str = "",
         wait: bool = True,
+        execution_mode: str = "default",
     ) -> LangGraphRun:
         """Start a run, and by default see it through.
 
@@ -702,8 +715,11 @@ class LangGraphWorkflowService:
             raise ValueError("actor is required")
         goal = _goal(goal)
         record = self._workflow(workflow_id, workflow_version, starting=True)
-        ir, binding = self._bound(record.ir)
-        inputs = _bind_goal_input(ir, inputs, goal)
+        ir, binding = self._bound(record.ir, execution_mode)
+        if execution_mode == "current_app":
+            # This conversation must receive the Run before it can claim work.
+            wait = False
+        inputs = _bind_goal_input(record.ir if execution_mode == "current_app" else ir, inputs, goal)
         request = {
             "workflow_id": workflow_id,
             "workflow_version": record.version.value,
@@ -720,6 +736,8 @@ class LangGraphWorkflowService:
             # Runtime that rebinds nothing hashes a start byte for byte as
             # every earlier build did and receipts written then still replay.
             request["agent_binding"] = binding.identity
+        if execution_mode != "default":
+            request["execution_mode"] = execution_mode
         request_hash = definition_hash(request).value
 
         # Resolve a replay before anything may refuse to compile the graph it
@@ -776,8 +794,8 @@ class LangGraphWorkflowService:
                 "INSERT INTO langgraph_runs("
                 "run_id,workflow_id,workflow_version,status,revision,input_json,"
                 "result_json,error,created_at,updated_at,owner_actor,goal,"
-                "graph_snapshot_json,agent_binding)"
-                " VALUES (?,?,?,'running',0,?,NULL,NULL,?,?,?,?,?,?)",
+                "graph_snapshot_json,agent_binding,execution_mode)"
+                " VALUES (?,?,?,'running',0,?,NULL,NULL,?,?,?,?,?,?,?)",
                 (
                     run_id, workflow_id, record.version.value,
                     canonical_json(inputs), now, now, actor, goal,
@@ -788,6 +806,7 @@ class LangGraphWorkflowService:
                     None if binding is None
                     else canonical_json(to_primitive(ir)),
                     None if binding is None else binding.identity,
+                    execution_mode,
                 ),
             )
             connection.execute(
@@ -915,7 +934,8 @@ class LangGraphWorkflowService:
         )
 
     def compatibility(
-        self, workflow_id: str, workflow_version: int | None = None
+        self, workflow_id: str, workflow_version: int | None = None,
+        *, execution_mode: str = "default",
     ) -> Mapping[str, Any]:
         """Explain whether an immutable workflow version can use this engine."""
 
@@ -932,7 +952,7 @@ class LangGraphWorkflowService:
             # published" — it is "can this Runtime run it", and a definition
             # pinned to an Agent nobody installed here is exactly the one
             # the fallback exists to answer yes for.
-            ir, binding = self._bound(record.ir)
+            ir, binding = self._bound(record.ir, execution_mode)
         except ValueError as exc:
             # Only a port the current Agent does not offer reaches here — an
             # Agent that cannot be named leaves the published binding alone
@@ -944,7 +964,7 @@ class LangGraphWorkflowService:
                 "reason": "agent_rebind_failed",
                 "detail": str(exc),
             }
-        key = record.definition_hash.value
+        key = record.definition_hash.value + ("#current_app" if execution_mode == "current_app" else "")
         if binding is not None:
             key = f"{key}#{binding.identity}"
         with self._compatibility_lock:
@@ -1108,9 +1128,10 @@ class LangGraphWorkflowService:
             )
             self._append_event(connection, run_id)
             connection.commit()
-        return self._execute(
-            run_id, ir, resume=responses,
-        )
+        if current.execution_mode == "current_app":
+            self._in_background(run_id, ir, resume=responses)
+            return self.get(run_id)
+        return self._execute(run_id, ir, resume=responses)
 
     def recover(self, run_id: str) -> LangGraphRun:
         """Continue a run whose process ended after a durable checkpoint.
@@ -1192,6 +1213,9 @@ class LangGraphWorkflowService:
             ).fetchone()
         responses = json.loads(pending["interrupt_responses_json"] or "{}")
         if responses:
+            if current.execution_mode == "current_app":
+                self._in_background(run_id, self._run_ir(current), resume=responses)
+                return self.get(run_id)
             return self._execute(
                 run_id, self._run_ir(current), resume=responses,
             )
@@ -1203,6 +1227,9 @@ class LangGraphWorkflowService:
                 "SELECT input_json FROM langgraph_runs WHERE run_id=?", (run_id,)
             ).fetchone()
         inputs = None if has_checkpoint else json.loads(row["input_json"])
+        if current.execution_mode == "current_app":
+            self._in_background(run_id, self._run_ir(current), inputs=inputs)
+            return self.get(run_id)
         return self._execute(run_id, self._run_ir(current), inputs=inputs)
 
     def resolve_unknown_delegation(
@@ -1236,7 +1263,7 @@ class LangGraphWorkflowService:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             attempt = connection.execute(
-                "SELECT attempt_id,node_id,status FROM langgraph_handler_attempts"
+                "SELECT attempt_id,node_id,status,handler_name FROM langgraph_handler_attempts"
                 " WHERE execution_ref=? AND handler_name IN"
                 " ('app.delegate','harness.subagent')",
                 (delegation_id,),
@@ -1258,7 +1285,9 @@ class LangGraphWorkflowService:
                 (
                     target_status,
                     None if output is None else canonical_json(output),
-                    None if output is not None else (error or "delegation confirmed failed"),
+                    ("delegation_result_requires_normalization"
+                     if output is not None and attempt["handler_name"] == "app.delegate"
+                     else None if output is not None else (error or "delegation confirmed failed")),
                     stamp, attempt["attempt_id"],
                 ),
             )
@@ -1509,7 +1538,7 @@ class LangGraphWorkflowService:
             raise LookupError(f"LangGraph run not found: {run_id}")
         return self._record(row)
 
-    def _in_background(self, run_id: str, ir, *, inputs) -> None:
+    def _in_background(self, run_id: str, ir, *, inputs=..., resume=...) -> None:
         """Execute a run on a thread, and remember it is out there.
 
         Failures are not raised anywhere a caller could catch them — there is
@@ -1520,7 +1549,7 @@ class LangGraphWorkflowService:
 
         def run() -> None:
             try:
-                self._execute(run_id, ir, inputs=inputs)
+                self._execute(run_id, ir, inputs=inputs, resume=resume)
             except Exception:  # noqa: BLE001 - settled on the run already
                 return
 
@@ -1933,7 +1962,8 @@ class LangGraphWorkflowService:
             # workflow must not rewrite what a finished run was asked to do.
             prompt = None
             if isinstance(node.config, Mapping):
-                authored = node.config.get("prompt")
+                source = node.config.get("_agent_step") or {}
+                authored = (source.get("config") or node.config).get("prompt")
                 if isinstance(authored, str) and authored.strip():
                     prompt = authored
             steps.append({
@@ -3038,4 +3068,5 @@ class LangGraphWorkflowService:
             # defensively rather than assumed onto every row.
             json.loads(row["input_json"]) if "input_json" in row.keys()
             and row["input_json"] else {},
+            row["execution_mode"] if "execution_mode" in row.keys() else "default",
         )

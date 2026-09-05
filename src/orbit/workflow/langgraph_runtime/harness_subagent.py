@@ -872,15 +872,30 @@ class AppDelegationHandler(HarnessSubagentHandler):
             )
         digest = hashlib.sha256(str(request.idempotency_key).encode()).hexdigest()
         delegation_id = f"app_delegation:{digest}"
+        inputs = request.input
+        source = request.config.get("_agent_step")
+        if source is not None:
+            # Run-local adaptation retains the published graph's ports. Only
+            # the message delivered to the App uses the task envelope.
+            inputs = {"task": {
+                "input": inputs,
+                "instructions": source["config"].get("prompt", ""),
+                "original_handler": source["handler"],
+                "original_config": source["config"],
+            }}
         return PreparedExecution({
             "delegation_id": delegation_id, "actor": str(request.actor),
-            "input": request.input, "config": request.config,
+            "input": inputs, "config": request.config,
             "workspace": self._workspace_descriptor(request),
             "protocol": {"name": "orbit-app-delegation", "version": "1"},
             "execution": {
                 "attempt_id": str(request.attempt_id),
                 "idempotency_key": str(request.idempotency_key),
                 "deadline": request.deadline.isoformat(),
+                "node_id": getattr(request, "node_id", ""),
+                "run_id": getattr(request, "run_id", ""),
+                "output_ports": getattr(request, "output_ports", ()),
+                "acceptance": getattr(request, "acceptance", None),
             },
         }, delegation_id)
 

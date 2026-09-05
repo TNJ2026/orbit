@@ -526,7 +526,7 @@ class ToolCallTests(ApiTestCase):
             self.assertEqual(
                 {
                     "goal", "inputs", "artifact_count", "workflow_id",
-                    "workflow_version", "template_id", "agent_binding", "status",
+                    "workflow_version", "template_id", "agent_binding", "execution_mode", "status",
                     "revision", "result", "interrupts", "error", "created_at",
                     "updated_at", "allowed_commands", "run_id",
                 },

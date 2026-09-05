@@ -15,6 +15,7 @@ workflow:
   version: latest | integer
 goal: string
 input: {}
+execution_mode: default | current_app
 options:
   dry_run: false
   follow: interrupt
@@ -22,14 +23,21 @@ options:
   confirm: auto
 ```
 
-Only `goal`, `input`, and the resolved workflow ID and concrete version map to
+Only `goal`, `input`, `execution_mode`, and the resolved workflow ID and concrete version map to
 `start_run`. `options` controls the Skill. Generate `idempotency_key` internally
 and always call `start_run` with `wait=false`.
 
 Defaults are `selector.type=auto`, `version=latest`, `input={}`,
+`execution_mode=default`,
 `dry_run=false`, `follow=interrupt`, `on_missing=ask`, and `confirm=auto`.
 
 ## Accepted Forms
+
+Requests such as “所有 Agent 步骤都交给当前 App 执行，包括并行分支” or
+“run every Agent step in this App without CLIs” select `execution_mode=current_app`.
+Send that explicit parameter to Runtime; do not edit or republish the workflow.
+Do not infer this mode merely because the request arrived in an App.
+Validate the value as exactly `default` or `current_app` and include it in previews.
 
 A short request such as:
 

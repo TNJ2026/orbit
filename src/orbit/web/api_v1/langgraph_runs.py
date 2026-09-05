@@ -245,6 +245,7 @@ def build_routes(ctx, service) -> list[Route]:
                     actor=actor,
                     goal=str(body.get("goal") or ""),
                     wait=True if wait is None else wait,
+                    execution_mode=body.get("execution_mode", "default"),
                 )
             except LookupError as exc:
                 raise ValueError(str(exc)) from None

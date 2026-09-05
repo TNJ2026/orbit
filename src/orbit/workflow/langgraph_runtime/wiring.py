@@ -18,10 +18,10 @@ from ..domain.durable_execution import ExecutionSafety
 from ..domain.serialization import canonical_json
 from ..data.secrets import assert_no_secret_values
 from ..handlers import AgentHandler, ToolHandler, TransformHandler
-from ..handlers.agent import AgentRequest
+from ..handlers.agent import AgentRequest, _resolve_artifact_inputs
 from ..handlers.context import ScopedSecretResolver
 from ..catalogs import InMemorySchemaCatalog
-from .harness_subagent import HarnessSubagentHandler
+from .harness_subagent import AppDelegationHandler, HarnessSubagentHandler
 from ..persistence.workflow_versions import SQLiteWorkflowVersionStore
 from .artifacts import LangGraphArtifactStore
 from .console import AttemptConsole, AttemptConsoleSink
@@ -251,6 +251,14 @@ class _HandlerAttemptJournal:
             return None
         return str(row["execution_ref"])
 
+    def needs_output_normalization(self, attempt_id: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT error FROM langgraph_handler_attempts WHERE attempt_id=?",
+                (attempt_id,),
+            ).fetchone()
+        return row is not None and row["error"] == "delegation_result_requires_normalization"
+
     def _append(
         self, connection, outcome: str, run_id: str, node_id: str, attempt_id: str,
     ) -> None:
@@ -293,7 +301,7 @@ class _HandlerAttemptJournal:
             connection.commit()
 
 
-def _validate_secret_refs(inputs, context, manifest) -> None:
+def _validate_secret_refs(inputs, context, manifest, *, opaque_only=False) -> None:
     for port in context.input_ports:
         if port.get("data_policy", {}).get("transport") != "secret_ref":
             continue
@@ -304,7 +312,7 @@ def _validate_secret_refs(inputs, context, manifest) -> None:
         logical_name = reference.get("logical_name")
         if unknown or not isinstance(logical_name, str) or not logical_name:
             raise ValueError(f"secret_ref input {port['id']!r} is invalid")
-        if logical_name not in manifest.required_secrets:
+        if not opaque_only and logical_name not in manifest.required_secrets:
             raise ValueError(
                 f"secret_ref input {port['id']!r} was not declared by Handler Manifest"
             )
@@ -318,7 +326,7 @@ def _check_acceptance(implementation, context) -> None:
         return
     from ...workspace.acceptance import AcceptanceUnmet, evaluate
 
-    client = getattr(implementation, "client", None)
+    client = getattr(implementation, "client", implementation)
     project_root = getattr(client, "project_root", None)
     if project_root is None:
         # Acceptance describes files in the project, and this node is not
@@ -580,6 +588,7 @@ def _agent_adapter(
 def _tool_adapter(
     implementation: ToolHandler, manifest, journal, secret_values,
     console: AttemptConsole | None = None,
+    artifact_store=None,
 ):
     active: dict[str, dict[str, Any]] = {}
     active_lock = Lock()
@@ -603,18 +612,28 @@ def _tool_adapter(
         )
 
     def invoke(inputs, config, context):
-        _validate_secret_refs(inputs, context, manifest)
+        # App delegates carry reference metadata, never a resolved Runtime
+        # secret. Its ScopedSecretResolver remains restricted to the manifest.
+        _validate_secret_refs(
+            inputs, context, manifest,
+            opaque_only=isinstance(implementation, AppDelegationHandler),
+        )
         validation = implementation.validate(manifest, config)
         if not validation.valid:
             issue = validation.issues[0]
             raise ValueError(f"Tool Handler validation {issue.path}: {issue.message}")
-        deadline = datetime.now(timezone.utc) + timedelta(
-            seconds=manifest.resource_profile.max_duration_seconds
-        )
+        duration = manifest.resource_profile.max_duration_seconds
+        if isinstance(implementation, AppDelegationHandler):
+            duration = min(duration, int(config.get("max_wall_seconds", 1800)))
+        deadline = datetime.now(timezone.utc) + timedelta(seconds=duration)
         request = SimpleNamespace(
             attempt_id=context.attempt_id, input=inputs, config=config,
             idempotency_key=context.attempt_id, deadline=deadline,
             process_deadline=deadline, actor=context.actor,
+            run_id=context.run_id, node_id=context.node_id,
+            workspace_access=context.workspace_access,
+            input_ports=context.input_ports, output_ports=context.output_ports,
+            acceptance=context.acceptance,
         )
         handler_context = SimpleNamespace(
             request=request,
@@ -625,6 +644,46 @@ def _tool_adapter(
             output=_console_sink(console, context),
             clock=lambda: datetime.now(timezone.utc),
         )
+        artifacts = None
+        if isinstance(implementation, AppDelegationHandler) and artifact_store is not None:
+            artifacts = artifact_store.access(
+                run_id=context.run_id, node_id=context.node_id,
+                attempt_id=context.attempt_id, inputs=inputs,
+                input_ports=context.input_ports, actor=context.actor,
+                secret_values=secret_values.values(),
+                output_ports=tuple(SimpleNamespace(
+                    id=p["id"], schema_id=p["schema_id"],
+                    data_policy=SimpleNamespace(**p["data_policy"]),
+                ) for p in context.output_ports),
+            )
+            handler_context.artifacts = artifacts
+            request.input = _resolve_artifact_inputs(inputs, handler_context)
+
+        def finish_output(output):
+            output = dict(output)
+            assert_no_secret_values(output, secret_values.values())
+            if artifacts is not None:
+                for port in context.output_ports:
+                    if port["data_policy"]["transport"] != "artifact_ref":
+                        continue
+                    value = output[port["id"]]
+                    types = port["data_policy"]["content_types"]
+                    if not types:
+                        raise ValueError("App artifact output needs a declared content type")
+                    content_type = types[0]
+                    if content_type == "application/json":
+                        content = canonical_json(value)
+                    elif isinstance(value, Mapping) and isinstance(value.get("text"), str):
+                        content = value["text"]
+                    else:
+                        raise ValueError("App text artifact result must contain a text string")
+                    output[port["id"]] = {"artifact_id": artifacts.write(
+                        name=port["id"], content=content.encode("utf-8"),
+                        content_type=content_type,
+                    )}
+                _check_acceptance(implementation, context)
+                artifacts.commit()
+            return output
         recovery_ref = journal.stale_execution_ref(context.attempt_id)
         if recovery_ref is not None and isinstance(
             implementation, HarnessSubagentHandler,
@@ -640,7 +699,7 @@ def _tool_adapter(
                     f"Agent delegation {recovery_ref} recovery failed"
                 ) from exc
             if recovered.disposition is RecoveryDisposition.FOUND:
-                output = dict(recovered.result.output)
+                output = finish_output(recovered.result.output)
                 journal.settle(context.attempt_id, "succeeded", output=output)
                 return output
             journal.settle(context.attempt_id, "unknown", error="recovery_unknown")
@@ -655,6 +714,9 @@ def _tool_adapter(
             ),
         )
         if replay is not None:
+            if isinstance(implementation, AppDelegationHandler) and journal.needs_output_normalization(context.attempt_id):
+                replay = finish_output(replay)
+                journal.settle(context.attempt_id, "succeeded", output=replay)
             return replay
         if consume_pruned(context.attempt_id):
             return pruned_outcome(context)
@@ -708,8 +770,7 @@ def _tool_adapter(
                 return pruned_outcome(context)
             if not isinstance(result.output, Mapping):
                 raise ValueError("Tool output must be an object")
-            output = dict(result.output)
-            assert_no_secret_values(output, secret_values.values())
+            output = finish_output(result.output)
             journal.settle(context.attempt_id, "succeeded", output=output)
             return output
         except LangGraphRunCancelled:
@@ -720,6 +781,8 @@ def _tool_adapter(
             )
             raise
         except Exception as exc:
+            if artifacts is not None:
+                artifact_store.abandon(artifacts.produced_artifact_ids)
             if consume_pruned(context.attempt_id):
                 return pruned_outcome(context)
             if isinstance(implementation, HarnessSubagentHandler):
@@ -848,7 +911,7 @@ def trusted_handlers(
             journal = _HandlerAttemptJournal(attempt_db_path)
             invoke, cancel_run, cancel_attempts, finish_run = _tool_adapter(
                 registration.implementation, manifest, journal, secret_values,
-                console,
+                console, artifact_store,
             )
             handlers.append(BoundHandler(
                 manifest.name,
@@ -856,7 +919,10 @@ def trusted_handlers(
                 manifest.fingerprint,
                 invoke,
                 cancel_run=cancel_run,
-                supported_transports=frozenset({"inline", "secret_ref"}),
+                supported_transports=frozenset(
+                    {"inline", "artifact_ref", "secret_ref"} if isinstance(registration.implementation, AppDelegationHandler)
+                    else {"inline", "secret_ref"}
+                ),
                 retry_safe=(
                     manifest.execution_safety is ExecutionSafety.REPLAY_SAFE
                 ),

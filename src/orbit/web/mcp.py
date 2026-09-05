@@ -406,7 +406,10 @@ def build_mcp_dispatcher(
             "scope": READ_SCOPE,
             "inputSchema": {
                 "type": "object",
-                "properties": {"workflow_id": {"type": "string"}},
+                "properties": {
+                    "workflow_id": {"type": "string"},
+                    "execution_mode": {"type": "string", "enum": ["default", "current_app"]},
+                },
                 "required": ["workflow_id"],
             },
         },
@@ -728,13 +731,14 @@ def build_mcp_dispatcher(
             },
             {
                 "name": "start_run",
-                "description": "Start a published workflow using LangGraph.",
+                "description": "Start a published workflow. execution_mode=current_app delegates every Agent step to this conversation, including parallel branches, without requiring CLIs. Claim and complete delegations while following the run; this mode always returns asynchronously.",
                 "scope": WRITE_SCOPE,
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "workflow_id": {"type": "string"},
                         "workflow_version": {"type": "integer"},
+                        "execution_mode": {"type": "string", "enum": ["default", "current_app"], "default": "default"},
                         "input": {"type": "object"},
                         "goal": {"type": "string", "maxLength": 4000},
                         "wait": {"type": "boolean", "default": True},
@@ -1187,6 +1191,7 @@ def build_mcp_dispatcher(
                     idempotency_key=str(arguments["idempotency_key"]),
                     actor=actor, goal=str(arguments.get("goal") or ""),
                     wait=True if wait is None else wait,
+                    execution_mode=arguments.get("execution_mode", "default"),
                 ),
                 can_write=True,
             )
@@ -1275,6 +1280,13 @@ def build_mcp_dispatcher(
             return {"collected_artifact_ids": list(collected)}
         if name in {"get_workflow_definition", "inspect_workflow_definition"}:
             detail = workflow_reads.detail(workflow_id_argument(arguments))
+            execution_preview = {}
+            if "execution_mode" in arguments:
+                if langgraph_service is None:
+                    raise ValueError("LangGraph execution is unavailable")
+                execution_preview = {"execution_compatibility": langgraph_service.compatibility(
+                    detail["workflow_id"], execution_mode=arguments["execution_mode"],
+                )}
             graph = detail.get("graph") or {}
             layout = {
                 spot["node_id"]: spot
@@ -1291,6 +1303,7 @@ def build_mcp_dispatcher(
                 return (spot.get("depth", 0), spot.get("lane", 0), node["node_id"])
             return {
                 "workflow_id": detail["workflow_id"],
+                **execution_preview,
                 "name": detail["name"],
                 "description": detail["description"],
                 "latest_version": detail["latest_version"],

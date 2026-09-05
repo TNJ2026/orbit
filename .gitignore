@@ -27,6 +27,7 @@ docs/*
 !docs/project-file-access-design.md
 !docs/deepseek-harness-integration-plan.md
 !docs/background-agent-worker.md
+!docs/current-app-execution.md
 !agent-app.json
 !.mcp.json
 !.codex-plugin/
